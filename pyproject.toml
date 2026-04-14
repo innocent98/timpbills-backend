@@ -55,7 +55,7 @@ start = "app.main:start"
 line-length = 100
 target-version = ["py311"]
 include = "\\.pyi?$"
-exclude = """
+exclude = '''
 /(
     \.git
     | \.hg
@@ -68,7 +68,7 @@ exclude = """
     | dist
     | alembic
 )/
-"""
+'''
 
 [tool.isort]
 profile = "black"
