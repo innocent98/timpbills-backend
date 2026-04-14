@@ -6,8 +6,10 @@ from sqlalchemy.orm import sessionmaker
 from app.main import app
 from app.db.base import Base
 from app.db.session import get_db
+# Import all models so metadata knows about them
+from app.db.models import user, otp  # noqa: F401
 
-# Test database
+# Test database (file-based, used for integration client tests)
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -36,3 +38,23 @@ def client(db):
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def db_session():
+    """In-memory SQLite session for unit/service tests (no Postgres required)."""
+    _engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+    # SQLAlchemy 2.x automatically maps postgresql.UUID → CHAR(32) on SQLite,
+    # and Enum types use VARCHAR with CHECK constraints, so no extra patching needed.
+    Base.metadata.create_all(_engine)
+    SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+        _engine.dispose()
