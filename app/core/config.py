@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     EMAILS_FROM_EMAIL: Optional[EmailStr] = None
     EMAILS_FROM_NAME: Optional[str] = None
 
+    # Termii SMS
+    TERMII_API_KEY: Optional[str] = None
+    TERMII_SENDER_ID: Optional[str] = "Timpbills"
+
     # Admin
     FIRST_SUPERUSER_EMAIL: EmailStr
     FIRST_SUPERUSER_PASSWORD: str
