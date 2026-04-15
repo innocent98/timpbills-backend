@@ -191,3 +191,24 @@ async def reset_password(
     except ValueError as e:
         _raise(str(e))
     return success({"ok": True}, request_id=getattr(request.state, "request_id", None))
+
+
+# ---------------------------------------------------------------------------
+# Session validation — used by Flutter splash to trust a stale access token
+# ---------------------------------------------------------------------------
+
+@router.get("/me")
+async def me(request: Request, user: User = Depends(get_current_user)):
+    return success(
+        {
+            "user_id": str(user.id),
+            "phone": user.phone,
+            "email": user.email,
+            "full_name": user.full_name,
+            "email_verified": user.email_verified,
+            "phone_verified": user.is_phone_verified,
+            "pin_set": user.pin_hash is not None,
+            "kyc_level": user.kyc_level.value,
+        },
+        request_id=getattr(request.state, "request_id", None),
+    )
