@@ -1,42 +1,61 @@
 services:
   api:
-    build: .
-    container_name: timpbills-backend_api
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: timpbills_api
     ports:
       - "8000:8000"
     volumes:
       - ./app:/app/app
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./scripts:/app/scripts
     env_file:
-      - .env
+      - .env.docker
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 15s
 
   db:
-    image: postgres:15
-    container_name: timpbills-backend_db
+    image: postgres:15-alpine
+    container_name: timpbills_db
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: timpbills-backend_db
+      POSTGRES_USER: ${POSTGRES_USER:-timpbills}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-timpbills_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-timpbills}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-timpbills}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
-    container_name: timpbills-backend_redis
+    container_name: timpbills_redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   postgres_data:

@@ -1,0 +1,33 @@
+# Development image — hot-reload via uvicorn --reload.
+# Uses python:3.11-slim (NOT alpine). Alpine's musl libc breaks wheels for
+# psycopg2-binary, bcrypt, and cryptography — forcing source compilation
+# with gcc, which balloons build time and final image size beyond slim.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV POETRY_HOME="/opt/poetry" \
+    POETRY_VERSION=1.8.4 \
+    POETRY_NO_INTERACTION=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN curl -sSL https://install.python-poetry.org | python3 - && \
+    ln -s /opt/poetry/bin/poetry /usr/local/bin/poetry
+
+COPY pyproject.toml poetry.lock* ./
+
+# Install main + dev deps (dev for pytest/migrations during container-based testing)
+RUN poetry config virtualenvs.create false && \
+    poetry install --no-interaction --no-ansi
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

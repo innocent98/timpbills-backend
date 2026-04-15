@@ -1,3 +1,6 @@
+# Production image — python:3.11-slim (NOT alpine).
+# Alpine's musl libc forces source-compile of psycopg2/bcrypt/cryptography,
+# producing larger and slower builds despite Alpine's smaller base layer.
 FROM python:3.11-slim as builder
 
 WORKDIR /app
