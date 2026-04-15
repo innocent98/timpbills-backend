@@ -1,0 +1,6 @@
+from typing import Protocol
+
+
+class EmailProvider(Protocol):
+    async def send_otp(self, *, to: str, code: str) -> None: ...
+    async def send_text(self, *, to: str, subject: str, html: str, text: str | None = None) -> None: ...
