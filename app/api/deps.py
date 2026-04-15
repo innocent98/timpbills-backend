@@ -2,9 +2,11 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from jose import JWTError
+from redis.asyncio import Redis
 
 from app.db.session import SessionLocal
 from app.services.auth_service import AuthService
+from app.services.token_store import RedisTokenStore, TokenStore
 from app.integrations.base import SmsProvider
 from app.integrations.termii.fake import FakeTermiiClient
 from app.integrations.termii.client import TermiiClient
@@ -16,6 +18,20 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=F
 
 # Singleton fake SMS client so tests can inspect .sent
 _fake_sms_singleton = FakeTermiiClient()
+
+# Redis client singleton
+_redis_client: Redis | None = None
+
+
+def get_redis() -> Redis:
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    return _redis_client
+
+
+def get_token_store(redis: Redis = Depends(get_redis)) -> TokenStore:
+    return RedisTokenStore(redis=redis)
 
 
 def reset_fake_sms() -> None:
@@ -41,8 +57,9 @@ def get_sms_provider() -> SmsProvider:
 def get_auth_service(
     db: Session = Depends(get_db),
     sms: SmsProvider = Depends(get_sms_provider),
+    token_store: TokenStore = Depends(get_token_store),
 ) -> AuthService:
-    return AuthService(db=db, sms=sms)
+    return AuthService(db=db, sms=sms, token_store=token_store)
 
 
 def get_current_user(
