@@ -1,8 +1,10 @@
 import pytest
 from httpx import AsyncClient, ASGITransport
 from app.main import app
-from app.api.deps import get_db, _fake_sms_singleton, reset_fake_sms
+from app.api.deps import get_db, get_token_store, _fake_sms_singleton, reset_fake_sms
 from app.core.limiter import limiter
+from fakeredis.aioredis import FakeRedis
+from app.services.token_store import RedisTokenStore
 
 
 @pytest.fixture
@@ -14,7 +16,14 @@ async def client(db_session):
         finally:
             pass
 
+    # Override get_token_store to use fakeredis
+    fake_redis = FakeRedis(decode_responses=True)
+
+    def _get_token_store():
+        return RedisTokenStore(redis=fake_redis)
+
     app.dependency_overrides[get_db] = _get_db
+    app.dependency_overrides[get_token_store] = _get_token_store
     reset_fake_sms()
 
     # Disable rate limiting during tests to avoid cross-test interference
@@ -23,6 +32,7 @@ async def client(db_session):
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
     limiter.enabled = True
+    await fake_redis.aclose()
     app.dependency_overrides.clear()
 
 
@@ -96,7 +106,13 @@ async def rate_limited_client(db_session):
         finally:
             pass
 
+    fake_redis_rl = FakeRedis(decode_responses=True)
+
+    def _get_token_store():
+        return RedisTokenStore(redis=fake_redis_rl)
+
     app.dependency_overrides[get_db] = _get_db
+    app.dependency_overrides[get_token_store] = _get_token_store
     reset_fake_sms()
     # Ensure rate limiting is enabled and reset any stored state
     limiter.enabled = True
@@ -105,6 +121,7 @@ async def rate_limited_client(db_session):
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
     limiter.enabled = False
+    await fake_redis_rl.aclose()
     app.dependency_overrides.clear()
 
 

@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -58,3 +59,19 @@ def db_session():
     finally:
         session.close()
         _engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def fake_redis():
+    """fakeredis async client for token store tests."""
+    from fakeredis.aioredis import FakeRedis
+    client = FakeRedis(decode_responses=True)
+    yield client
+    await client.aclose()
+
+
+@pytest_asyncio.fixture
+async def token_store(fake_redis):
+    """RedisTokenStore backed by fakeredis."""
+    from app.services.token_store import RedisTokenStore
+    return RedisTokenStore(redis=fake_redis)
