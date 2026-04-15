@@ -22,6 +22,7 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     pin_hash = Column(String, nullable=True)
     kyc_level = Column(Enum(KycLevel, name="kyc_level_enum"), nullable=False, default=KycLevel.tier_0)
+    email_verified = Column(Boolean, nullable=False, default=False, server_default="false")
     is_phone_verified = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
