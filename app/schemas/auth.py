@@ -31,6 +31,7 @@ class RegisterRequest(BaseModel):
 
 class RegisterResponse(BaseModel):
     user_id: str
+    email: str
     phone: str
 
 
@@ -48,6 +49,37 @@ class AuthTokens(BaseModel):
 class VerifyOtpResponse(BaseModel):
     tokens: AuthTokens
     pin_set: bool
+
+
+# --- Email verification ---
+
+class SendEmailOtpRequest(BaseModel):
+    email: EmailStr
+
+
+class VerifyEmailOtpRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
+
+
+class EmailVerifiedResponse(BaseModel):
+    tokens: AuthTokens
+    pin_set: bool
+    phone_verified: bool
+
+
+# --- Phone verification (on-demand upgrade) ---
+
+class SendPhoneOtpRequest(BaseModel):
+    """Request body for on-demand phone OTP send. Phone comes from the authenticated user."""
+
+    pass  # no fields — phone is taken from the authenticated user's profile
+
+
+class VerifyPhoneOtpRequest(BaseModel):
+    """Request body for phone OTP verification (authenticated endpoint)."""
+
+    code: str = Field(min_length=6, max_length=6)
 
 
 class LoginRequest(BaseModel):
