@@ -3,6 +3,7 @@ import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.main import app
 from app.db.base import Base
@@ -44,10 +45,17 @@ def client(db):
 
 @pytest.fixture
 def db_session():
-    """In-memory SQLite session for unit/service tests (no Postgres required)."""
+    """In-memory SQLite session for unit/service tests (no Postgres required).
+
+    Uses StaticPool so all threads (including FastAPI's run_in_threadpool)
+    share the same in-memory connection.  Without StaticPool, SQLite creates
+    a fresh (empty) connection per thread and synchronous FastAPI dependencies
+    like get_current_user lose the schema.
+    """
     _engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
         future=True,
     )
     # SQLAlchemy 2.x automatically maps postgresql.UUID → CHAR(32) on SQLite,
