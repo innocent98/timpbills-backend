@@ -1,22 +1,25 @@
 import pytest
 
 from app.services.auth_service import AuthService
-from app.schemas.auth import RegisterRequest, LoginRequest, VerifyOtpRequest
+from app.schemas.auth import RegisterRequest, LoginRequest, VerifyEmailOtpRequest
 from app.integrations.termii.fake import FakeTermiiClient
+from app.integrations.email.fake import FakeEmailClient
 
 
-async def _register(svc, sms, phone="+2348011111111"):
-    req = RegisterRequest(full_name="Reset User", phone=phone, email=f"reset_{phone[-4:]}@test.co", password="Secret1!")
+async def _register(svc, sms, em, phone="+2348011111111"):
+    email = f"reset_{phone[-4:]}@test.co"
+    req = RegisterRequest(full_name="Reset User", phone=phone, email=email, password="Secret1!")
     await svc.register(req)
-    code = sms.sent[-1].code_or_message
-    await svc.verify_otp(VerifyOtpRequest(phone=phone, code=code))
+    code = em.sent[-1].code_or_body
+    await svc.verify_email_otp(VerifyEmailOtpRequest(email=email, code=code))
 
 
 @pytest.mark.asyncio
 async def test_reset_password_happy_path(db_session):
     sms = FakeTermiiClient()
-    svc = AuthService(db=db_session, sms=sms)
-    await _register(svc, sms)
+    em = FakeEmailClient()
+    svc = AuthService(db=db_session, sms=sms, email=em)
+    await _register(svc, sms, em)
     sms.sent.clear()
 
     await svc.forgot_password("+2348011111111")
@@ -36,8 +39,9 @@ async def test_reset_password_happy_path(db_session):
 @pytest.mark.asyncio
 async def test_reset_password_wrong_code(db_session):
     sms = FakeTermiiClient()
-    svc = AuthService(db=db_session, sms=sms)
-    await _register(svc, sms)
+    em = FakeEmailClient()
+    svc = AuthService(db=db_session, sms=sms, email=em)
+    await _register(svc, sms, em)
 
     await svc.forgot_password("+2348011111111")
 
@@ -48,7 +52,8 @@ async def test_reset_password_wrong_code(db_session):
 @pytest.mark.asyncio
 async def test_reset_password_user_not_found(db_session):
     sms = FakeTermiiClient()
-    svc = AuthService(db=db_session, sms=sms)
+    em = FakeEmailClient()
+    svc = AuthService(db=db_session, sms=sms, email=em)
 
     with pytest.raises(ValueError, match="USER_NOT_FOUND"):
         await svc.reset_password("ghost@test.co", "123456", "NewSecret1!")

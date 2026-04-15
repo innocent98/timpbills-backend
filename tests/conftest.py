@@ -9,6 +9,7 @@ from app.db.base import Base
 from app.db.session import get_db
 # Import all models so metadata knows about them
 from app.db.models import user, otp  # noqa: F401
+from app.integrations.email.fake import FakeEmailClient
 
 # Test database (file-based, used for integration client tests)
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
@@ -75,3 +76,15 @@ async def token_store(fake_redis):
     """RedisTokenStore backed by fakeredis."""
     from app.services.token_store import RedisTokenStore
     return RedisTokenStore(redis=fake_redis)
+
+
+# Module-level singleton so each test module shares one fake email client
+# (mirrors the _fake_email_singleton pattern in deps.py)
+_fake_email_module_singleton = FakeEmailClient()
+
+
+@pytest.fixture
+def fake_email_client():
+    """FakeEmailClient singleton — cleared before each test."""
+    _fake_email_module_singleton.sent.clear()
+    return _fake_email_module_singleton
