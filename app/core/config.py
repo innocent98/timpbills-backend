@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     # Termii SMS
     TERMII_API_KEY: Optional[str] = None
     TERMII_SENDER_ID: Optional[str] = "Timpbills"
+    TERMII_BASE_URL: str = "https://api.ng.termii.com/api"
 
     # Resend Email
     RESEND_API_KEY: Optional[str] = None
@@ -73,6 +74,7 @@ class Settings(BaseSettings):
     class Config:
         case_sensitive = True
         env_file = ".env"
+        extra = "ignore"  # tolerate extra env vars so .env can document unused ones
 
 
 settings = Settings()

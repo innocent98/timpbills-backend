@@ -12,7 +12,12 @@ services:
       - ./alembic.ini:/app/alembic.ini
       - ./scripts:/app/scripts
     env_file:
-      - .env.docker
+      - .env
+    # Override DATABASE_URL + REDIS_URL to use docker-network service names.
+    # Everything else (SECRET_KEY, RESEND_API_KEY, etc.) comes from .env as-is.
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-timpbills}:${POSTGRES_PASSWORD:-timpbills_dev}@db:5432/${POSTGRES_DB:-timpbills}
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy
