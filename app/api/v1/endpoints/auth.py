@@ -2,10 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from app.api.deps import get_auth_service, get_current_user
 from app.db.models.user import User
 from app.schemas.auth import (
+    EmailVerifiedResponse,
     RegisterRequest,
     RegisterResponse,
-    VerifyOtpRequest,
-    VerifyOtpResponse,
+    SendEmailOtpRequest,
+    VerifyEmailOtpRequest,
+    VerifyPhoneOtpRequest,
     LoginRequest,
     LoginResponse,
     RefreshRequest,
@@ -28,6 +30,8 @@ _ERROR_MAP: dict[str, tuple[int, str]] = {
     "INVALID_OTP": (400, "Invalid OTP"),
     "INVALID_CREDENTIALS": (401, "Invalid credentials"),
     "INVALID_TOKEN": (401, "Invalid or expired token"),
+    "EMAIL_ALREADY_VERIFIED": (409, "Email already verified"),
+    "PHONE_ALREADY_VERIFIED": (409, "Phone already verified"),
 }
 
 
@@ -50,19 +54,73 @@ async def register(
     return success(res.model_dump(), request_id=getattr(request.state, "request_id", None))
 
 
-@router.post("/verify-otp")
+# ---------------------------------------------------------------------------
+# Email verification
+# ---------------------------------------------------------------------------
+
+@router.post("/email/verify")
 @limiter.limit("5/minute")
-async def verify_otp(
+async def verify_email_otp(
     request: Request,
-    req: VerifyOtpRequest,
+    req: VerifyEmailOtpRequest,
     svc: AuthService = Depends(get_auth_service),
 ):
     try:
-        res = await svc.verify_otp(req)
+        res = await svc.verify_email_otp(req)
     except ValueError as e:
         _raise(str(e))
     return success(res.model_dump(), request_id=getattr(request.state, "request_id", None))
 
+
+@router.post("/email/resend")
+@limiter.limit("3/minute")
+async def resend_email_otp(
+    request: Request,
+    req: SendEmailOtpRequest,
+    svc: AuthService = Depends(get_auth_service),
+):
+    try:
+        await svc.send_email_otp(req.email)
+    except ValueError as e:
+        _raise(str(e))
+    return success({"ok": True}, request_id=getattr(request.state, "request_id", None))
+
+
+# ---------------------------------------------------------------------------
+# Phone verification (authenticated, on-demand Tier 1 upgrade)
+# ---------------------------------------------------------------------------
+
+@router.post("/phone/send-otp")
+async def send_phone_otp(
+    request: Request,
+    svc: AuthService = Depends(get_auth_service),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.send_phone_otp(user_id=user.id)
+    except ValueError as e:
+        _raise(str(e))
+    return success({"ok": True}, request_id=getattr(request.state, "request_id", None))
+
+
+@router.post("/phone/verify-otp")
+@limiter.limit("5/minute")
+async def verify_phone_otp(
+    request: Request,
+    req: VerifyPhoneOtpRequest,
+    svc: AuthService = Depends(get_auth_service),
+    user: User = Depends(get_current_user),
+):
+    try:
+        res = await svc.verify_phone_otp(user_id=user.id, code=req.code)
+    except ValueError as e:
+        _raise(str(e))
+    return success(res.model_dump(), request_id=getattr(request.state, "request_id", None))
+
+
+# ---------------------------------------------------------------------------
+# Standard auth endpoints
+# ---------------------------------------------------------------------------
 
 @router.post("/login")
 @limiter.limit("5/minute")
