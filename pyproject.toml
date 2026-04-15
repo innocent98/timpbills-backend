@@ -47,6 +47,7 @@ pylint = "^3.3.0"
 pre-commit = "^4.0.0"
 ipython = "^8.29.0"
 ruff = "^0.8.0"
+fakeredis = "^2.25.0"
 
 [tool.poetry.scripts]
 start = "app.main:start"
