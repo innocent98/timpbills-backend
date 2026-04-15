@@ -33,6 +33,7 @@ gunicorn = "^23.0.0"
 psycopg2-binary = "^2.9.10"
 redis = "^5.0.0"
 slowapi = "^0.1.9"
+resend = "^2.5.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"
