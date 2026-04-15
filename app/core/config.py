@@ -58,6 +58,14 @@ class Settings(BaseSettings):
     TERMII_API_KEY: Optional[str] = None
     TERMII_SENDER_ID: Optional[str] = "Timpbills"
 
+    # Resend Email
+    RESEND_API_KEY: Optional[str] = None
+    EMAIL_FROM_ADDRESS: str = "noreply@timpbills.com"
+    EMAIL_FROM_NAME: str = "Timpbills"
+
+    # Force fake providers (useful for local dev without real keys)
+    FORCE_FAKE_PROVIDERS: bool = False
+
     # Admin
     FIRST_SUPERUSER_EMAIL: EmailStr
     FIRST_SUPERUSER_PASSWORD: str
