@@ -25,26 +25,31 @@ from app.schemas.auth import (
     VerifyOtpRequest,
     VerifyOtpResponse,
 )
+from app.services.token_store import NullTokenStore, TokenStore
 
 _ACCESS_EXPIRE = timedelta(minutes=60)
 _REFRESH_EXPIRE = timedelta(days=30)
+REFRESH_TOKEN_TTL_SECONDS = int(_REFRESH_EXPIRE.total_seconds())
 
 
-def _issue_token_pair(user_id: str) -> AuthTokens:
+def _issue_token_pair(user_id: str) -> tuple[AuthTokens, str]:
+    """Return (AuthTokens, jti) so callers can persist the jti."""
     jti = uuid4().hex
     access = create_access_token(subject=user_id, expires_in=_ACCESS_EXPIRE)
     refresh = create_refresh_token(subject=user_id, jti=jti, expires_in=_REFRESH_EXPIRE)
-    return AuthTokens(
+    tokens = AuthTokens(
         access_token=access,
         refresh_token=refresh,
         expires_in=int(_ACCESS_EXPIRE.total_seconds()),
     )
+    return tokens, jti
 
 
 class AuthService:
-    def __init__(self, *, db: Session, sms: SmsProvider) -> None:
+    def __init__(self, *, db: Session, sms: SmsProvider, token_store: TokenStore | None = None) -> None:
         self._db = db
         self._sms = sms
+        self._tokens: TokenStore = token_store if token_store is not None else NullTokenStore()
 
     async def register(self, req: RegisterRequest) -> RegisterResponse:
         existing = (
@@ -113,7 +118,8 @@ class AuthService:
         user.is_phone_verified = True
         self._db.commit()
 
-        tokens = _issue_token_pair(str(user.id))
+        tokens, jti = _issue_token_pair(str(user.id))
+        await self._tokens.save(user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
         return VerifyOtpResponse(tokens=tokens, pin_set=user.pin_hash is not None)
 
     async def login(self, req: LoginRequest) -> LoginResponse:
@@ -125,7 +131,8 @@ class AuthService:
         if not user or not verify_password(req.password, user.password_hash):
             raise ValueError("INVALID_CREDENTIALS")
 
-        tokens = _issue_token_pair(str(user.id))
+        tokens, jti = _issue_token_pair(str(user.id))
+        await self._tokens.save(user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
         return LoginResponse(tokens=tokens, pin_set=user.pin_hash is not None)
 
     async def refresh(self, refresh_token: str) -> AuthTokens:
@@ -141,7 +148,28 @@ class AuthService:
         if not user_id:
             raise ValueError("INVALID_TOKEN")
 
-        return _issue_token_pair(user_id)
+        old_jti = payload.get("jti")
+        if not old_jti:
+            raise ValueError("INVALID_TOKEN")
+
+        if not await self._tokens.is_valid(user_id=user_id, jti=old_jti):
+            # Replay attack or revoked token — nuke all sessions for this user
+            await self._tokens.revoke_all(user_id=user_id)
+            raise ValueError("INVALID_TOKEN")
+
+        await self._tokens.revoke(user_id=user_id, jti=old_jti)
+
+        try:
+            user_uuid = UUID(user_id)
+        except (TypeError, ValueError):
+            raise ValueError("INVALID_TOKEN")
+        user = self._db.query(User).filter(User.id == user_uuid).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+
+        new_tokens, new_jti = _issue_token_pair(str(user.id))
+        await self._tokens.save(user_id=str(user.id), jti=new_jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
+        return new_tokens
 
     async def set_pin(self, user_id: UUID, pin: str) -> None:
         user = self._db.query(User).filter(User.id == user_id).first()
@@ -209,3 +237,5 @@ class AuthService:
         otp.used_at = datetime.utcnow()
         user.password_hash = hash_password(new_password)
         self._db.commit()
+
+        await self._tokens.revoke_all(user_id=str(user.id))
