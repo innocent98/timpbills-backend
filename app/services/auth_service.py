@@ -16,12 +16,15 @@ from app.core.security import (
 from app.db.models.otp import OtpCode, OtpPurpose
 from app.db.models.user import KycLevel, User
 from app.integrations.base import SmsProvider
+from app.integrations.email.base import EmailProvider
 from app.schemas.auth import (
     AuthTokens,
+    EmailVerifiedResponse,
     LoginRequest,
     LoginResponse,
     RegisterRequest,
     RegisterResponse,
+    VerifyEmailOtpRequest,
     VerifyOtpRequest,
     VerifyOtpResponse,
 )
@@ -46,9 +49,17 @@ def _issue_token_pair(user_id: str) -> tuple[AuthTokens, str]:
 
 
 class AuthService:
-    def __init__(self, *, db: Session, sms: SmsProvider, token_store: TokenStore | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        db: Session,
+        sms: SmsProvider,
+        email: EmailProvider,
+        token_store: TokenStore | None = None,
+    ) -> None:
         self._db = db
         self._sms = sms
+        self._email = email
         self._tokens: TokenStore = token_store if token_store is not None else NullTokenStore()
 
     async def register(self, req: RegisterRequest) -> RegisterResponse:
@@ -73,18 +84,147 @@ class AuthService:
         code = f"{secrets.randbelow(1_000_000):06d}"
         otp = OtpCode(
             user_id=user.id,
+            email=user.email,
+            code_hash=hash_pin(code),
+            purpose=OtpPurpose.email_verification,
+            expires_at=datetime.utcnow() + timedelta(minutes=5),
+        )
+        self._db.add(otp)
+        self._db.commit()
+
+        await self._email.send_otp(to=user.email, code=code)
+        return RegisterResponse(user_id=str(user.id), email=user.email, phone=user.phone)
+
+    async def send_email_otp(self, email: str) -> None:
+        """Re-send an email OTP for the given address (e.g. resend during countdown)."""
+        user = self._db.query(User).filter(User.email == email).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+
+        if user.email_verified:
+            raise ValueError("EMAIL_ALREADY_VERIFIED")
+
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        otp = OtpCode(
+            user_id=user.id,
+            email=user.email,
+            code_hash=hash_pin(code),
+            purpose=OtpPurpose.email_verification,
+            expires_at=datetime.utcnow() + timedelta(minutes=5),
+        )
+        self._db.add(otp)
+        self._db.commit()
+
+        await self._email.send_otp(to=user.email, code=code)
+
+    async def verify_email_otp(self, req: VerifyEmailOtpRequest) -> EmailVerifiedResponse:
+        user = self._db.query(User).filter(User.email == req.email).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+
+        otp = (
+            self._db.query(OtpCode)
+            .filter(
+                OtpCode.user_id == user.id,
+                OtpCode.purpose == OtpPurpose.email_verification,
+                OtpCode.used_at.is_(None),
+            )
+            .order_by(OtpCode.created_at.desc())
+            .first()
+        )
+        if not otp:
+            raise ValueError("NO_ACTIVE_OTP")
+
+        if datetime.utcnow() > otp.expires_at:
+            raise ValueError("OTP_EXPIRED")
+
+        if otp.attempts >= 3:
+            raise ValueError("OTP_ATTEMPTS_EXCEEDED")
+
+        if not verify_pin(req.code, otp.code_hash):
+            otp.attempts += 1
+            self._db.commit()
+            raise ValueError("INVALID_OTP")
+
+        otp.used_at = datetime.utcnow()
+        user.email_verified = True
+        self._db.commit()
+
+        tokens, jti = _issue_token_pair(str(user.id))
+        await self._tokens.save(user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
+        return EmailVerifiedResponse(
+            tokens=tokens,
+            pin_set=user.pin_hash is not None,
+            phone_verified=user.is_phone_verified,
+        )
+
+    async def send_phone_otp(self, user_id: UUID) -> None:
+        """Send a phone OTP for an authenticated user (on-demand upgrade to Tier 1)."""
+        user = self._db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+
+        if user.is_phone_verified:
+            raise ValueError("PHONE_ALREADY_VERIFIED")
+
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        otp = OtpCode(
+            user_id=user.id,
             phone=user.phone,
             code_hash=hash_pin(code),
-            purpose=OtpPurpose.register,
+            purpose=OtpPurpose.phone_verification,
             expires_at=datetime.utcnow() + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
 
         await self._sms.send_otp(phone=user.phone, code=code)
-        return RegisterResponse(user_id=str(user.id), phone=user.phone)
 
+    async def verify_phone_otp(self, user_id: UUID, code: str) -> VerifyOtpResponse:
+        """Verify phone OTP for an authenticated user and upgrade to Tier 1."""
+        user = self._db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+
+        otp = (
+            self._db.query(OtpCode)
+            .filter(
+                OtpCode.user_id == user.id,
+                OtpCode.purpose == OtpPurpose.phone_verification,
+                OtpCode.used_at.is_(None),
+            )
+            .order_by(OtpCode.created_at.desc())
+            .first()
+        )
+        if not otp:
+            raise ValueError("NO_ACTIVE_OTP")
+
+        if datetime.utcnow() > otp.expires_at:
+            raise ValueError("OTP_EXPIRED")
+
+        if otp.attempts >= 3:
+            raise ValueError("OTP_ATTEMPTS_EXCEEDED")
+
+        if not verify_pin(code, otp.code_hash):
+            otp.attempts += 1
+            self._db.commit()
+            raise ValueError("INVALID_OTP")
+
+        otp.used_at = datetime.utcnow()
+        user.kyc_level = KycLevel.tier_1
+        user.is_phone_verified = True
+        self._db.commit()
+
+        tokens, jti = _issue_token_pair(str(user.id))
+        await self._tokens.save(user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
+        return VerifyOtpResponse(tokens=tokens, pin_set=user.pin_hash is not None)
+
+    # ---------------------------------------------------------------------------
+    # Legacy verify_otp — kept for backward compat within service layer.
+    # The old /auth/verify-otp endpoint has been removed (clean rename).
+    # ---------------------------------------------------------------------------
     async def verify_otp(self, req: VerifyOtpRequest) -> VerifyOtpResponse:
+        """DEPRECATED: old phone-based register verification. Use verify_email_otp instead."""
         user = self._db.query(User).filter(User.phone == req.phone).first()
         if not user:
             raise ValueError("USER_NOT_FOUND")
