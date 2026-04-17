@@ -33,6 +33,42 @@ services:
       retries: 3
       start_period: 15s
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: celery -A app.workers.celery_app worker -l info
+    container_name: timpbills_worker
+    volumes:
+      - ./app:/app/app
+      - ./pyproject.toml:/app/pyproject.toml
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-timpbills}:${POSTGRES_PASSWORD:-timpbills_dev}@db:5432/${POSTGRES_DB:-timpbills}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: celery -A app.workers.celery_app beat -l info
+    container_name: timpbills_beat
+    volumes:
+      - ./app:/app/app
+      - ./pyproject.toml:/app/pyproject.toml
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-timpbills}:${POSTGRES_PASSWORD:-timpbills_dev}@db:5432/${POSTGRES_DB:-timpbills}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
   db:
     image: postgres:15-alpine
     container_name: timpbills_db
