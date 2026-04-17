@@ -181,3 +181,24 @@ def require_pin_token(
             detail={"code": "INVALID_PIN_TOKEN", "message": "PIN token scope mismatch"},
         )
     return x_pin_token
+
+
+# --- Added by B6 (Paystack provider) ---
+from app.integrations.paystack.base import PaymentProvider
+from app.integrations.paystack.client import PaystackClient
+from app.integrations.paystack.fake import FakePaystackClient
+
+
+_fake_paystack_singleton = FakePaystackClient()
+
+
+def get_paystack_provider() -> PaymentProvider:
+    env = getattr(settings, "ENVIRONMENT", "dev")
+    if settings.FORCE_FAKE_PROVIDERS or env in ("dev", "test", "development"):
+        return _fake_paystack_singleton
+    return PaystackClient()
+
+
+def reset_fake_paystack() -> None:
+    global _fake_paystack_singleton
+    _fake_paystack_singleton = FakePaystackClient()
