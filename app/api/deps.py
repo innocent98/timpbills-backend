@@ -99,6 +99,11 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "INVALID_TOKEN", "message": "Invalid or expired token"},
         )
+    if payload.get("typ") == "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "INVALID_TOKEN", "message": "Refresh token cannot be used as access token"},
+        )
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(
