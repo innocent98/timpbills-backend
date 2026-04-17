@@ -11,6 +11,8 @@ services:
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
       - ./scripts:/app/scripts
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml
     env_file:
       - .env
     # Override DATABASE_URL + REDIS_URL to use docker-network service names.
