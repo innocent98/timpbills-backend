@@ -25,6 +25,20 @@ from app.utils.responses import success
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 
+def _claim_payment(db: Session, payment_id, target_status: PaymentStatus) -> bool:
+    """Atomically flip Payment.status pending → target; no-op if already moved."""
+    locked = (
+        db.query(Payment)
+        .filter(Payment.id == payment_id)
+        .with_for_update()
+        .one()
+    )
+    if locked.status != PaymentStatus.pending:
+        return False
+    locked.status = target_status
+    return True
+
+
 @router.post("/paystack", response_model=None)
 async def paystack_webhook(
     request: Request,
@@ -90,23 +104,23 @@ async def paystack_webhook(
                 "code": "PAYSTACK_VERIFY_MISMATCH",
                 "message": f"Webhook says success but verify says {v.status}",
             })
-        payment.status = PaymentStatus.success
-        # Credit net amount (gross – fee)
-        wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
-        tx_svc.transition(
-            tx,
-            to_status=TransactionStatus.success,
-            reason="paystack.webhook.charge.success",
-            context={"paystack_event_id": event_id},
-        )
+        # Race guard: reconcile worker may have claimed this payment already.
+        if _claim_payment(db, payment.id, PaymentStatus.success):
+            wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+            tx_svc.transition(
+                tx,
+                to_status=TransactionStatus.success,
+                reason="paystack.webhook.charge.success",
+                context={"paystack_event_id": event_id},
+            )
     elif event_type in ("charge.failed", "transfer.failed"):
-        payment.status = PaymentStatus.failed
-        tx_svc.transition(
-            tx,
-            to_status=TransactionStatus.failed,
-            reason=f"paystack.webhook.{event_type}",
-            context={"paystack_event_id": event_id},
-        )
+        if _claim_payment(db, payment.id, PaymentStatus.failed):
+            tx_svc.transition(
+                tx,
+                to_status=TransactionStatus.failed,
+                reason=f"paystack.webhook.{event_type}",
+                context={"paystack_event_id": event_id},
+            )
 
     we.processed = True
     db.commit()

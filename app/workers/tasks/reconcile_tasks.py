@@ -1,7 +1,9 @@
 """Reconcile pending payments by polling Paystack verify.
 
 Runs every 2 minutes via Celery beat. Catches transactions where the
-webhook didn't arrive (network blip, Paystack outage).
+webhook didn't arrive (network blip, Paystack outage). Races safely
+against the webhook handler: before mutating a Payment row, both paths
+re-fetch with SELECT FOR UPDATE and no-op if status is no longer pending.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -11,7 +13,7 @@ from app.db.models._enums import TransactionStatus
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
 from app.db.session import SessionLocal
-from app.integrations.paystack.client import PaystackClient
+from app.integrations.paystack.factory import select_paystack_client
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import WalletService
 from app.workers.celery_app import celery_app
@@ -43,7 +45,7 @@ async def _reconcile() -> dict:
         if not pending:
             return {"checked": 0, "settled": 0}
 
-        client = PaystackClient()
+        client = select_paystack_client()
         wallet_svc = WalletService(db=db)
         tx_svc = TransactionService(db=db)
         settled = 0
@@ -51,25 +53,44 @@ async def _reconcile() -> dict:
             try:
                 v = await client.verify(reference=payment.provider_reference)
             except Exception as exc:
-                log.warning("reconcile: verify failed for %s: %s", payment.provider_reference, exc)
+                log.warning(
+                    "reconcile: verify failed for %s: %s",
+                    payment.provider_reference, exc,
+                )
                 continue
             if v.status == "success":
-                payment.status = PaymentStatus.success
-                wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
-                tx_svc.transition(
-                    tx, to_status=TransactionStatus.success,
-                    reason="reconcile.verify.success",
-                )
-                settled += 1
+                if _claim_payment(db, payment.id, PaymentStatus.success):
+                    wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+                    tx_svc.transition(
+                        tx, to_status=TransactionStatus.success,
+                        reason="reconcile.verify.success",
+                    )
+                    settled += 1
             elif v.status == "failed":
-                payment.status = PaymentStatus.failed
-                tx_svc.transition(
-                    tx, to_status=TransactionStatus.failed,
-                    reason="reconcile.verify.failed",
-                )
-                settled += 1
+                if _claim_payment(db, payment.id, PaymentStatus.failed):
+                    tx_svc.transition(
+                        tx, to_status=TransactionStatus.failed,
+                        reason="reconcile.verify.failed",
+                    )
+                    settled += 1
             # abandoned → leave pending for next poll
         db.commit()
         return {"checked": len(pending), "settled": settled}
     finally:
         db.close()
+
+
+def _claim_payment(db, payment_id, target_status: PaymentStatus) -> bool:
+    """Atomically flip Payment.status pending → target. Returns True if this call
+    won the race. A no-op if the row was already mutated by the webhook handler
+    (or a concurrent reconcile run)."""
+    locked = (
+        db.query(Payment)
+        .filter(Payment.id == payment_id)
+        .with_for_update()
+        .one()
+    )
+    if locked.status != PaymentStatus.pending:
+        return False
+    locked.status = target_status
+    return True

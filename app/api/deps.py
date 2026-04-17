@@ -185,23 +185,22 @@ def require_pin_token(
 
 # --- Added by B6 (Paystack provider) ---
 from app.integrations.paystack.base import PaymentProvider
-from app.integrations.paystack.client import PaystackClient
-from app.integrations.paystack.fake import FakePaystackClient
-
-
-_fake_paystack_singleton = FakePaystackClient()
+from app.integrations.paystack import factory as _paystack_factory
 
 
 def get_paystack_provider() -> PaymentProvider:
-    env = getattr(settings, "ENVIRONMENT", "dev")
-    if settings.FORCE_FAKE_PROVIDERS or env in ("dev", "test", "development"):
-        return _fake_paystack_singleton
-    return PaystackClient()
+    return _paystack_factory.select_paystack_client()
 
 
 def reset_fake_paystack() -> None:
-    global _fake_paystack_singleton
-    _fake_paystack_singleton = FakePaystackClient()
+    _paystack_factory.reset_fake_singleton()
+
+
+# Back-compat shim for tests that import the singleton directly.
+def __getattr__(name: str):  # pragma: no cover - import plumbing
+    if name == "_fake_paystack_singleton":
+        return _paystack_factory.get_fake_singleton()
+    raise AttributeError(name)
 
 
 # --- Added by B7 (wallet + transaction services) ---
