@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from jose import JWTError
@@ -124,3 +124,60 @@ def get_current_user(
             detail={"code": "USER_NOT_FOUND", "message": "User not found"},
         )
     return user
+
+
+# --- Added by B5 (IdempotencyService + header guard) ---
+from app.services.idempotency_service import IdempotencyService
+
+
+def get_idempotency_service(redis: Redis = Depends(get_redis)) -> IdempotencyService:
+    return IdempotencyService(redis=redis)
+
+
+def require_idempotency_key(
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> str:
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "IDEMPOTENCY_KEY_REQUIRED",
+                "message": "Idempotency-Key header required for this endpoint",
+            },
+        )
+    return idempotency_key
+
+
+# --- Added by B4 (PinService + pin token guard) ---
+from app.services.pin_service import PinService
+
+
+def get_pin_service(
+    db: Session = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+) -> PinService:
+    return PinService(db=db, redis=redis)
+
+
+def require_pin_token(
+    x_pin_token: str | None = Header(default=None, alias="X-Pin-Token"),
+    user: User = Depends(get_current_user),
+) -> str:
+    if not x_pin_token:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "PIN_TOKEN_REQUIRED", "message": "Missing X-Pin-Token"},
+        )
+    try:
+        payload = decode_token(x_pin_token)
+    except JWTError:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "INVALID_PIN_TOKEN", "message": "Invalid or expired PIN token"},
+        )
+    if payload.get("scope") != "money-ops" or payload.get("sub") != str(user.id):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "INVALID_PIN_TOKEN", "message": "PIN token scope mismatch"},
+        )
+    return x_pin_token

@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from app.api.deps import get_auth_service, get_current_user
+from app.api.deps import get_auth_service, get_current_user, get_pin_service
 from app.db.models.user import User
+from app.schemas.pin import VerifyPinRequest, VerifyPinResponse
+from app.services.pin_service import InvalidPin, PinLocked, PinNotSet, PinService
 from app.schemas.auth import (
     EmailVerifiedResponse,
     RegisterRequest,
@@ -34,6 +36,13 @@ _ERROR_MAP: dict[str, tuple[int, str]] = {
     "PHONE_ALREADY_VERIFIED": (409, "Phone already verified"),
     "EMAIL_NOT_VERIFIED": (403, "Email not verified"),
     "ACCOUNT_DISABLED": (403, "Account is disabled"),
+    "IDEMPOTENCY_KEY_REQUIRED": (400, "Idempotency-Key header required"),
+    "IDEMPOTENCY_CONFLICT":     (409, "Idempotency key reused with different request"),
+    "PIN_NOT_SET":        (400, "PIN has not been set"),
+    "PIN_LOCKED":         (423, "PIN is locked due to too many attempts"),
+    "INVALID_PIN":        (401, "Invalid PIN"),
+    "PIN_TOKEN_REQUIRED": (401, "X-Pin-Token header required"),
+    "INVALID_PIN_TOKEN":  (401, "Invalid or expired PIN token"),
 }
 
 
@@ -213,5 +222,32 @@ async def me(request: Request, user: User = Depends(get_current_user)):
             "pin_set": user.pin_hash is not None,
             "kyc_level": user.kyc_level.value,
         },
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# PIN verification — issues a short-lived money-ops JWT
+# ---------------------------------------------------------------------------
+
+@router.post("/pin/verify", response_model=None)
+@limiter.limit("5/minute")
+async def verify_pin_endpoint(
+    request: Request,
+    body: VerifyPinRequest,
+    svc: PinService = Depends(get_pin_service),
+    user: User = Depends(get_current_user),
+):
+    try:
+        token = await svc.verify_async(user_id=user.id, pin=body.pin)
+    except PinNotSet:
+        _raise("PIN_NOT_SET")
+    except PinLocked:
+        _raise("PIN_LOCKED")
+    except InvalidPin:
+        _raise("INVALID_PIN")
+
+    return success(
+        VerifyPinResponse(pin_token=token, expires_in=300).model_dump(),
         request_id=getattr(request.state, "request_id", None),
     )
