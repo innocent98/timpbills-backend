@@ -6,3 +6,4 @@ Base = declarative_base()
 # on every `alembic revision --autogenerate`.
 from app.db.mixins import TimestampMixin  # noqa: F401,E402
 from app.db.models import user, otp  # noqa: F401,E402
+from app.db.models import wallet  # noqa: F401,E402
