@@ -2,7 +2,7 @@
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import Column, Enum, ForeignKey, Index, Numeric, String
+from sqlalchemy import Column, Enum, ForeignKey, Index, JSON, Numeric, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.db.base import Base
@@ -35,4 +35,5 @@ class Transaction(Base, TimestampMixin):
     currency  = Column(String(3), nullable=False, default="NGN")
 
     # Arbitrary metadata. For wallet funding: {"paystack_reference": "..."}.
-    meta = Column(JSONB, nullable=False, default=dict)
+    # JSON().with_variant(JSONB(), 'postgresql') → JSONB on Postgres, TEXT on SQLite.
+    meta = Column(JSON().with_variant(JSONB(), 'postgresql'), nullable=False, default=dict)

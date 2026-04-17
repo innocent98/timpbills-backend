@@ -1,7 +1,7 @@
 """Webhook events — raw body + dedupe on provider event id."""
 import uuid
 
-from sqlalchemy import Boolean, Column, String
+from sqlalchemy import Boolean, Column, JSON, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.db.base import Base
@@ -16,5 +16,5 @@ class WebhookEvent(Base, TimestampMixin):
     # Paystack's `data.id` or `data.reference` — unique per event.
     provider_event_id = Column(String, nullable=False, unique=True, index=True)
     event_type = Column(String, nullable=False)
-    raw = Column(JSONB, nullable=False)
+    raw = Column(JSON().with_variant(JSONB(), 'postgresql'), nullable=False)
     processed = Column(Boolean, nullable=False, default=False)

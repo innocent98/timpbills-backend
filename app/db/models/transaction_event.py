@@ -1,7 +1,7 @@
 """Audit trail — one row per state transition on a Transaction."""
 import uuid
 
-from sqlalchemy import Column, Enum, ForeignKey, String
+from sqlalchemy import Column, Enum, ForeignKey, JSON, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.db.base import Base
@@ -22,4 +22,4 @@ class TransactionEvent(Base, TimestampMixin):
     from_status = Column(Enum(TransactionStatus, name="tx_status_enum"), nullable=True)
     to_status   = Column(Enum(TransactionStatus, name="tx_status_enum"), nullable=False)
     reason      = Column(String, nullable=True)
-    context     = Column(JSONB, nullable=False, default=dict)
+    context     = Column(JSON().with_variant(JSONB(), 'postgresql'), nullable=False, default=dict)
