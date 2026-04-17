@@ -1,0 +1,113 @@
+"""Paystack webhook receiver.
+
+1. Verify HMAC-SHA512 signature using raw request body.
+2. Dedupe on provider_event_id in webhook_events table.
+3. For charge.success: mark Payment.success, credit wallet,
+   transition Transaction to success.
+4. For charge.failed: mark Payment.failed, transition Transaction to failed.
+"""
+import json
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_db, get_paystack_provider, get_wallet_service
+from app.db.models._enums import TransactionStatus
+from app.db.models.payment import Payment, PaymentStatus
+from app.db.models.transaction import Transaction
+from app.db.models.webhook_event import WebhookEvent
+from app.integrations.paystack.base import PaymentProvider
+from app.services.transaction_service import TransactionService
+from app.services.wallet_service import WalletService
+from app.utils.responses import success
+
+
+router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+
+@router.post("/paystack", response_model=None)
+async def paystack_webhook(
+    request: Request,
+    x_paystack_signature: str | None = Header(default=None, alias="x-paystack-signature"),
+    db: Session = Depends(get_db),
+    paystack: PaymentProvider = Depends(get_paystack_provider),
+    wallet_svc: WalletService = Depends(get_wallet_service),
+):
+    raw_body = await request.body()
+    if not paystack.verify_signature(raw_body=raw_body, signature=x_paystack_signature or ""):
+        raise HTTPException(status_code=401, detail={
+            "code": "INVALID_SIGNATURE", "message": "Bad signature"
+        })
+
+    payload = json.loads(raw_body or b"{}")
+    event_type = payload.get("event", "")
+    event_id = str(payload.get("data", {}).get("id", ""))
+    reference = payload.get("data", {}).get("reference")
+
+    if not event_id or not reference:
+        raise HTTPException(status_code=400, detail={
+            "code": "MALFORMED_WEBHOOK", "message": "Missing data.id or data.reference"
+        })
+
+    # Dedupe
+    existing = (
+        db.query(WebhookEvent)
+        .filter(WebhookEvent.provider_event_id == event_id)
+        .first()
+    )
+    if existing:
+        return success({"ok": True, "deduped": True})
+
+    we = WebhookEvent(
+        provider="paystack",
+        provider_event_id=event_id,
+        event_type=event_type,
+        raw=payload,
+        processed=False,
+    )
+    db.add(we)
+    db.flush()
+
+    # Lookup payment → transaction
+    payment = (
+        db.query(Payment).filter(Payment.provider_reference == reference).first()
+    )
+    if payment is None:
+        # Unknown reference — still record the event for audit.
+        db.commit()
+        return success({"ok": True, "note": "unknown_reference"})
+
+    tx = (
+        db.query(Transaction).filter(Transaction.id == payment.transaction_id).first()
+    )
+    tx_svc = TransactionService(db=db)
+
+    if event_type == "charge.success":
+        # Guard: verify with Paystack to confirm (defensive against fake signatures)
+        v = await paystack.verify(reference=reference)
+        if v.status != "success":
+            raise HTTPException(status_code=400, detail={
+                "code": "PAYSTACK_VERIFY_MISMATCH",
+                "message": f"Webhook says success but verify says {v.status}",
+            })
+        payment.status = PaymentStatus.success
+        # Credit net amount (gross – fee)
+        wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+        tx_svc.transition(
+            tx,
+            to_status=TransactionStatus.success,
+            reason="paystack.webhook.charge.success",
+            context={"paystack_event_id": event_id},
+        )
+    elif event_type in ("charge.failed", "transfer.failed"):
+        payment.status = PaymentStatus.failed
+        tx_svc.transition(
+            tx,
+            to_status=TransactionStatus.failed,
+            reason=f"paystack.webhook.{event_type}",
+            context={"paystack_event_id": event_id},
+        )
+
+    we.processed = True
+    db.commit()
+    return success({"ok": True})
