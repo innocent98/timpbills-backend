@@ -1,9 +1,9 @@
 import uuid
 import enum
-from datetime import datetime
-from sqlalchemy import Boolean, Column, DateTime, Enum, String
+from sqlalchemy import Boolean, Column, Enum, String
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
+from app.db.mixins import TimestampMixin
 
 
 class KycLevel(str, enum.Enum):
@@ -12,7 +12,7 @@ class KycLevel(str, enum.Enum):
     tier_2 = "tier_2"
 
 
-class User(Base):
+class User(TimestampMixin, Base):
     __tablename__ = "users"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -25,5 +25,3 @@ class User(Base):
     email_verified = Column(Boolean, nullable=False, default=False, server_default="false")
     is_phone_verified = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

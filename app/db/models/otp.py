@@ -1,9 +1,10 @@
 import uuid
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
+from app.db.mixins import TimestampMixin
 
 
 class OtpPurpose(str, enum.Enum):
@@ -14,7 +15,7 @@ class OtpPurpose(str, enum.Enum):
     phone_verification = "phone_verification"
 
 
-class OtpCode(Base):
+class OtpCode(TimestampMixin, Base):
     __tablename__ = "otp_codes"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -24,6 +25,5 @@ class OtpCode(Base):
     code_hash = Column(String, nullable=False)
     purpose = Column(Enum(OtpPurpose, name="otp_purpose_enum"), nullable=False)
     attempts = Column(Integer, nullable=False, default=0)
-    expires_at = Column(DateTime, nullable=False)
-    used_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
