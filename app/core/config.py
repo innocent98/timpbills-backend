@@ -59,6 +59,16 @@ class Settings(BaseSettings):
     TERMII_SENDER_ID: Optional[str] = "Timpbills"
     TERMII_BASE_URL: str = "https://api.ng.termii.com/api"
 
+    # Paystack
+    PAYSTACK_SECRET_KEY: Optional[str] = None
+    PAYSTACK_PUBLIC_KEY: Optional[str] = None
+    PAYSTACK_BASE_URL: str = "https://api.paystack.co"
+    PAYSTACK_WEBHOOK_URL: Optional[str] = None
+
+    # Wallet fees (% of funded amount; cap in naira)
+    WALLET_FUNDING_FEE_PERCENT: float = 1.0
+    WALLET_FUNDING_FEE_CAP_NAIRA: int = 500
+
     # Resend Email
     RESEND_API_KEY: Optional[str] = None
     EMAIL_FROM_ADDRESS: str = "noreply@timpbills.com"
