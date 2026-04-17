@@ -202,3 +202,16 @@ def get_paystack_provider() -> PaymentProvider:
 def reset_fake_paystack() -> None:
     global _fake_paystack_singleton
     _fake_paystack_singleton = FakePaystackClient()
+
+
+# --- Added by B7 (wallet + transaction services) ---
+from app.services.transaction_service import TransactionService
+from app.services.wallet_service import WalletService
+
+
+def get_wallet_service(db: Session = Depends(get_db)) -> WalletService:
+    return WalletService(db=db)
+
+
+def get_transaction_service(db: Session = Depends(get_db)) -> TransactionService:
+    return TransactionService(db=db)
