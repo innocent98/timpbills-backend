@@ -8,6 +8,7 @@ from app.integrations.termii.fake import FakeTermiiClient
 from app.integrations.email.fake import FakeEmailClient
 from app.db.models.user import User, KycLevel
 from app.db.models.otp import OtpCode, OtpPurpose
+from app.services.token_store import NullTokenStore
 
 
 async def _register(svc: AuthService, email_client: FakeEmailClient, phone="+2348011111111", email="user@test.co"):
@@ -24,7 +25,7 @@ async def _register(svc: AuthService, email_client: FakeEmailClient, phone="+234
 async def test_verify_email_otp_happy_path(db_session):
     sms = FakeTermiiClient()
     email = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=email)
+    svc = AuthService(db=db_session, sms=sms, email=email, token_store=NullTokenStore())
     await _register(svc, email)
 
     code = email.sent[0].code_or_body
@@ -47,7 +48,7 @@ async def test_verify_email_otp_happy_path(db_session):
 async def test_verify_email_otp_wrong_code_increments_attempts(db_session):
     sms = FakeTermiiClient()
     email = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=email)
+    svc = AuthService(db=db_session, sms=sms, email=email, token_store=NullTokenStore())
     await _register(svc, email)
 
     req = VerifyEmailOtpRequest(email="user@test.co", code="000000")
@@ -66,7 +67,7 @@ async def test_verify_email_otp_wrong_code_increments_attempts(db_session):
 async def test_verify_email_otp_exceeds_attempts(db_session):
     sms = FakeTermiiClient()
     email = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=email)
+    svc = AuthService(db=db_session, sms=sms, email=email, token_store=NullTokenStore())
     await _register(svc, email)
 
     otp = (
@@ -86,7 +87,7 @@ async def test_verify_email_otp_exceeds_attempts(db_session):
 async def test_verify_email_otp_expired(db_session):
     sms = FakeTermiiClient()
     email = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=email)
+    svc = AuthService(db=db_session, sms=sms, email=email, token_store=NullTokenStore())
     await _register(svc, email)
 
     otp = (
@@ -107,7 +108,7 @@ async def test_verify_email_otp_expired(db_session):
 async def test_verify_email_otp_user_not_found(db_session):
     sms = FakeTermiiClient()
     email = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=email)
+    svc = AuthService(db=db_session, sms=sms, email=email, token_store=NullTokenStore())
 
     req = VerifyEmailOtpRequest(email="ghost@test.co", code="123456")
     with pytest.raises(ValueError, match="USER_NOT_FOUND"):
@@ -118,7 +119,7 @@ async def test_verify_email_otp_user_not_found(db_session):
 async def test_send_email_otp_resend(db_session):
     sms = FakeTermiiClient()
     email = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=email)
+    svc = AuthService(db=db_session, sms=sms, email=email, token_store=NullTokenStore())
     await _register(svc, email)
 
     assert len(email.sent) == 1
@@ -132,7 +133,7 @@ async def test_send_email_otp_resend(db_session):
 async def test_send_email_otp_already_verified_raises(db_session):
     sms = FakeTermiiClient()
     email = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=email)
+    svc = AuthService(db=db_session, sms=sms, email=email, token_store=NullTokenStore())
     await _register(svc, email)
 
     code = email.sent[0].code_or_body

@@ -4,6 +4,7 @@ from app.services.auth_service import AuthService
 from app.schemas.auth import RegisterRequest, LoginRequest, VerifyEmailOtpRequest
 from app.integrations.termii.fake import FakeTermiiClient
 from app.integrations.email.fake import FakeEmailClient
+from app.services.token_store import NullTokenStore
 
 
 async def _register(svc, sms, em, phone="+2348011111111"):
@@ -18,7 +19,7 @@ async def _register(svc, sms, em, phone="+2348011111111"):
 async def test_reset_password_happy_path(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
     await _register(svc, sms, em)
     sms.sent.clear()
 
@@ -40,7 +41,7 @@ async def test_reset_password_happy_path(db_session):
 async def test_reset_password_wrong_code(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
     await _register(svc, sms, em)
 
     await svc.forgot_password("+2348011111111")
@@ -53,7 +54,7 @@ async def test_reset_password_wrong_code(db_session):
 async def test_reset_password_user_not_found(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
 
     with pytest.raises(ValueError, match="USER_NOT_FOUND"):
         await svc.reset_password("ghost@test.co", "123456", "NewSecret1!")

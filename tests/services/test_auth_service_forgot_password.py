@@ -5,6 +5,7 @@ from app.schemas.auth import RegisterRequest, VerifyEmailOtpRequest
 from app.integrations.termii.fake import FakeTermiiClient
 from app.integrations.email.fake import FakeEmailClient
 from app.db.models.otp import OtpCode, OtpPurpose
+from app.services.token_store import NullTokenStore
 
 
 async def _register(svc, sms, em, phone="+2348011111111"):
@@ -19,7 +20,7 @@ async def _register(svc, sms, em, phone="+2348011111111"):
 async def test_forgot_password_sends_otp(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
     await _register(svc, sms, em)
     sms.sent.clear()  # clear previous messages
 
@@ -38,7 +39,7 @@ async def test_forgot_password_sends_otp(db_session):
 async def test_forgot_password_silent_for_unknown(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
 
     # Should not raise, should not send SMS
     await svc.forgot_password("ghost@test.co")

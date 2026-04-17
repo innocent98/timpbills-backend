@@ -4,6 +4,7 @@ from app.services.auth_service import AuthService
 from app.schemas.auth import RegisterRequest, LoginRequest, VerifyEmailOtpRequest
 from app.integrations.termii.fake import FakeTermiiClient
 from app.integrations.email.fake import FakeEmailClient
+from app.services.token_store import NullTokenStore
 
 
 async def _get_tokens(svc, em):
@@ -18,7 +19,7 @@ async def _get_tokens(svc, em):
 async def test_refresh_issues_new_token_pair(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
     tokens = await _get_tokens(svc, em)
 
     new_tokens = await svc.refresh(tokens.refresh_token)
@@ -32,7 +33,7 @@ async def test_refresh_issues_new_token_pair(db_session):
 async def test_refresh_rejects_access_token(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
     tokens = await _get_tokens(svc, em)
 
     with pytest.raises(ValueError, match="INVALID_TOKEN"):
@@ -43,7 +44,7 @@ async def test_refresh_rejects_access_token(db_session):
 async def test_refresh_rejects_garbage_token(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
 
     with pytest.raises(ValueError, match="INVALID_TOKEN"):
         await svc.refresh("this.is.garbage")

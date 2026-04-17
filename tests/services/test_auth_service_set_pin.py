@@ -6,6 +6,7 @@ from app.schemas.auth import RegisterRequest, VerifyEmailOtpRequest
 from app.integrations.termii.fake import FakeTermiiClient
 from app.integrations.email.fake import FakeEmailClient
 from app.db.models.user import User
+from app.services.token_store import NullTokenStore
 
 
 async def _register_user(svc, em, phone="+2348011111111"):
@@ -21,7 +22,7 @@ async def _register_user(svc, em, phone="+2348011111111"):
 async def test_set_pin_persists(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
     user_id_str = await _register_user(svc, em)
     user_id = uuid.UUID(user_id_str)
 
@@ -35,7 +36,7 @@ async def test_set_pin_persists(db_session):
 async def test_set_pin_unknown_user(db_session):
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
 
     with pytest.raises(ValueError, match="USER_NOT_FOUND"):
         await svc.set_pin(uuid.uuid4(), "1234")

@@ -9,13 +9,14 @@ from app.integrations.termii.fake import FakeTermiiClient
 from app.integrations.email.fake import FakeEmailClient
 from app.db.models.user import User, KycLevel
 from app.db.models.otp import OtpCode, OtpPurpose
+from app.services.token_store import NullTokenStore
 
 
 async def _register_and_verify_email(db_session, phone="+2348011111111", email="user@test.co"):
     """Helper: register user and verify email to get tokens."""
     sms = FakeTermiiClient()
     em = FakeEmailClient()
-    svc = AuthService(db=db_session, sms=sms, email=em)
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
     req = RegisterRequest(full_name="Phone User", phone=phone, email=email, password="Secret1!")
     await svc.register(req)
     code = em.sent[0].code_or_body
