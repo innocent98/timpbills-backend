@@ -1,9 +1,11 @@
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
+from app.core.logger import log
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -30,9 +32,23 @@ from app.schemas.auth import (
 )
 from app.services.token_store import NullTokenStore, TokenStore
 
-_ACCESS_EXPIRE = timedelta(minutes=60)
+_ACCESS_EXPIRE = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 _REFRESH_EXPIRE = timedelta(days=30)
 REFRESH_TOKEN_TTL_SECONDS = int(_REFRESH_EXPIRE.total_seconds())
+
+
+def _ensure_aware_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to timezone-aware UTC.
+
+    SQLite (used in tests) strips tzinfo on round-trip even with
+    DateTime(timezone=True); Postgres preserves it. This helper lets the same
+    comparison code work against both backends.
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _is_expired(expires_at: datetime) -> bool:
+    return datetime.now(timezone.utc) > _ensure_aware_utc(expires_at)
 
 
 def _issue_token_pair(user_id: str) -> tuple[AuthTokens, str]:
@@ -55,12 +71,12 @@ class AuthService:
         db: Session,
         sms: SmsProvider,
         email: EmailProvider,
-        token_store: TokenStore | None = None,
+        token_store: TokenStore,
     ) -> None:
         self._db = db
         self._sms = sms
         self._email = email
-        self._tokens: TokenStore = token_store if token_store is not None else NullTokenStore()
+        self._tokens: TokenStore = token_store
 
     async def register(self, req: RegisterRequest) -> RegisterResponse:
         existing = (
@@ -87,7 +103,7 @@ class AuthService:
             email=user.email,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.email_verification,
-            expires_at=datetime.utcnow() + timedelta(minutes=5),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -110,7 +126,7 @@ class AuthService:
             email=user.email,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.email_verification,
-            expires_at=datetime.utcnow() + timedelta(minutes=5),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -135,7 +151,7 @@ class AuthService:
         if not otp:
             raise ValueError("NO_ACTIVE_OTP")
 
-        if datetime.utcnow() > otp.expires_at:
+        if _is_expired(otp.expires_at):
             raise ValueError("OTP_EXPIRED")
 
         if otp.attempts >= 3:
@@ -146,7 +162,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.utcnow()
+        otp.used_at = datetime.now(timezone.utc)
         user.email_verified = True
         self._db.commit()
 
@@ -173,7 +189,7 @@ class AuthService:
             phone=user.phone,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.phone_verification,
-            expires_at=datetime.utcnow() + timedelta(minutes=5),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -199,7 +215,7 @@ class AuthService:
         if not otp:
             raise ValueError("NO_ACTIVE_OTP")
 
-        if datetime.utcnow() > otp.expires_at:
+        if _is_expired(otp.expires_at):
             raise ValueError("OTP_EXPIRED")
 
         if otp.attempts >= 3:
@@ -210,7 +226,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.utcnow()
+        otp.used_at = datetime.now(timezone.utc)
         user.kyc_level = KycLevel.tier_1
         user.is_phone_verified = True
         self._db.commit()
@@ -242,7 +258,7 @@ class AuthService:
         if not otp:
             raise ValueError("NO_ACTIVE_OTP")
 
-        if datetime.utcnow() > otp.expires_at:
+        if _is_expired(otp.expires_at):
             raise ValueError("OTP_EXPIRED")
 
         if otp.attempts >= 3:
@@ -253,7 +269,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.utcnow()
+        otp.used_at = datetime.now(timezone.utc)
         user.kyc_level = KycLevel.tier_1
         user.is_phone_verified = True
         self._db.commit()
@@ -270,6 +286,11 @@ class AuthService:
         )
         if not user or not verify_password(req.password, user.password_hash):
             raise ValueError("INVALID_CREDENTIALS")
+
+        if not user.email_verified:
+            raise ValueError("EMAIL_NOT_VERIFIED")
+        if not user.is_active:
+            raise ValueError("ACCOUNT_DISABLED")
 
         tokens, jti = _issue_token_pair(str(user.id))
         await self._tokens.save(user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
@@ -294,6 +315,11 @@ class AuthService:
 
         if not await self._tokens.is_valid(user_id=user_id, jti=old_jti):
             # Replay attack or revoked token — nuke all sessions for this user
+            log.warning(
+                "Refresh token replay detected — revoking all sessions for user_id=%s jti=%s",
+                user_id,
+                old_jti,
+            )
             await self._tokens.revoke_all(user_id=user_id)
             raise ValueError("INVALID_TOKEN")
 
@@ -334,7 +360,7 @@ class AuthService:
             phone=user.phone,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.password_reset,
-            expires_at=datetime.utcnow() + timedelta(minutes=5),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -363,7 +389,7 @@ class AuthService:
         if not otp:
             raise ValueError("NO_ACTIVE_OTP")
 
-        if datetime.utcnow() > otp.expires_at:
+        if _is_expired(otp.expires_at):
             raise ValueError("OTP_EXPIRED")
 
         if otp.attempts >= 3:
@@ -374,7 +400,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.utcnow()
+        otp.used_at = datetime.now(timezone.utc)
         user.password_hash = hash_password(new_password)
         self._db.commit()
 
