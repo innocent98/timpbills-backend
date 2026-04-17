@@ -32,6 +32,8 @@ _ERROR_MAP: dict[str, tuple[int, str]] = {
     "INVALID_TOKEN": (401, "Invalid or expired token"),
     "EMAIL_ALREADY_VERIFIED": (409, "Email already verified"),
     "PHONE_ALREADY_VERIFIED": (409, "Phone already verified"),
+    "EMAIL_NOT_VERIFIED": (403, "Email not verified"),
+    "ACCOUNT_DISABLED": (403, "Account is disabled"),
 }
 
 
@@ -91,6 +93,7 @@ async def resend_email_otp(
 # ---------------------------------------------------------------------------
 
 @router.post("/phone/send-otp")
+@limiter.limit("3/minute")
 async def send_phone_otp(
     request: Request,
     svc: AuthService = Depends(get_auth_service),

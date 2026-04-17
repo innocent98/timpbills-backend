@@ -217,3 +217,121 @@ async def test_login_rate_limited(rate_limited_client):
     for _ in range(6):
         last_response = await rate_limited_client.post("/api/v1/auth/login", json=payload)
     assert last_response.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_login_rejects_unverified_email(client):
+    """Register → skip email verify → login → expect 403 EMAIL_NOT_VERIFIED."""
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "full_name": "Unverified",
+            "phone": "+2348022222230",
+            "email": "unverified@flow.co",
+            "password": "Secret1!",
+        },
+    )
+    # Do NOT verify email — attempt login immediately
+    r = await client.post(
+        "/api/v1/auth/login",
+        json={"identifier": "unverified@flow.co", "password": "Secret1!"},
+    )
+    assert r.status_code == 403, r.text
+    assert r.json()["error"]["code"] == "EMAIL_NOT_VERIFIED"
+
+
+@pytest.mark.asyncio
+async def test_login_rejects_inactive_user(db_session):
+    """Register → verify → set is_active=False → login → expect 403 ACCOUNT_DISABLED."""
+    from app.db.models.user import User
+    from app.main import app
+    from app.api.deps import get_db, get_token_store, get_email_provider
+    from fakeredis.aioredis import FakeRedis
+    from app.services.token_store import RedisTokenStore
+    from app.core.limiter import limiter
+
+    inactive_email_client = FakeEmailClient()
+
+    def _get_db():
+        try:
+            yield db_session
+        finally:
+            pass
+
+    fake_redis = FakeRedis(decode_responses=True)
+
+    def _get_token_store():
+        return RedisTokenStore(redis=fake_redis)
+
+    def _get_email():
+        return inactive_email_client
+
+    app.dependency_overrides[get_db] = _get_db
+    app.dependency_overrides[get_token_store] = _get_token_store
+    app.dependency_overrides[get_email_provider] = _get_email
+    limiter.enabled = False
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            # Register
+            await c.post(
+                "/api/v1/auth/register",
+                json={
+                    "full_name": "Inactive User",
+                    "phone": "+2348022222231",
+                    "email": "inactive@flow.co",
+                    "password": "Secret1!",
+                },
+            )
+            # Verify email
+            code = inactive_email_client.sent[-1].code_or_body
+            await c.post(
+                "/api/v1/auth/email/verify",
+                json={"email": "inactive@flow.co", "code": code},
+            )
+
+            # Disable user directly in DB
+            user = db_session.query(User).filter_by(email="inactive@flow.co").one()
+            user.is_active = False
+            db_session.commit()
+
+            r = await c.post(
+                "/api/v1/auth/login",
+                json={"identifier": "inactive@flow.co", "password": "Secret1!"},
+            )
+            assert r.status_code == 403, r.text
+            assert r.json()["error"]["code"] == "ACCOUNT_DISABLED"
+    finally:
+        limiter.enabled = True
+        await fake_redis.aclose()
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_not_accepted_as_access(client):
+    """Register → verify → get refresh token → use as Bearer on /auth/me → expect 401."""
+    # Register
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "full_name": "Token Type User",
+            "phone": "+2348022222232",
+            "email": "tokentype@flow.co",
+            "password": "Secret1!",
+        },
+    )
+    # Verify email to get tokens
+    code = _test_email_client.sent[-1].code_or_body
+    r_ev = await client.post(
+        "/api/v1/auth/email/verify",
+        json={"email": "tokentype@flow.co", "code": code},
+    )
+    refresh_token = r_ev.json()["data"]["tokens"]["refresh_token"]
+
+    # Use refresh token as Bearer on /auth/me — should be rejected
+    r = await client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {refresh_token}"},
+    )
+    assert r.status_code == 401, r.text
+    assert r.json()["error"]["code"] == "INVALID_TOKEN"
