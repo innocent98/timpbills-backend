@@ -29,6 +29,9 @@ up:
 restart:
 	docker compose restart
 
+ps:
+	docker ps
+
 down:
 	docker compose down
 
