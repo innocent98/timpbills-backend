@@ -110,7 +110,7 @@ async def test_full_funding_journey(client):
 
 
 @pytest.mark.asyncio
-async def test_failed_payment_does_not_credit(client):
+async def test_failed_payment_issues_refund_to_wallet(client):
     _, headers = await _seed_logged_in_user(client)
     pin_r = await client.post("/api/v1/auth/pin/verify", json={"pin": "8527"}, headers=headers)
     pin_token = pin_r.json()["data"]["pin_token"]
@@ -127,8 +127,19 @@ async def test_failed_payment_does_not_credit(client):
         content=json.dumps(body).encode(),
         headers={"x-paystack-signature": "FAKE_SIG"},
     )
-    r = await client.get("/api/v1/wallet", headers=headers)
-    assert r.json()["data"]["balance"] == "0.00"
 
+    # Wallet is credited with the refund amount.
+    r = await client.get("/api/v1/wallet", headers=headers)
+    assert r.json()["data"]["balance"] == "3000.00"  # refunded
+
+    # Original tx is still failed.
     detail = await client.get(f"/api/v1/transactions/{ref}", headers=headers)
     assert detail.json()["data"]["status"] == "failed"
+
+    # A separate refund tx exists.
+    list_r = await client.get("/api/v1/transactions", headers=headers)
+    items = list_r.json()["data"]["items"]
+    refunds = [i for i in items if i["type"] == "refund"]
+    assert len(refunds) == 1
+    assert refunds[0]["status"] == "success"
+    assert refunds[0]["amount"] == "3000.00"

@@ -76,6 +76,12 @@ async def _reconcile() -> dict:
                         tx, to_status=TransactionStatus.failed,
                         reason="reconcile.verify.failed",
                     )
+                    refund = tx_svc.create_refund(
+                        original_tx=tx,
+                        amount=tx.amount,
+                        reason="reconcile.verify.failed",
+                    )
+                    wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
                     settled += 1
             # abandoned → leave pending for next poll
         db.commit()

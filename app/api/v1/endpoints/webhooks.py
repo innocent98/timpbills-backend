@@ -126,6 +126,13 @@ async def paystack_webhook(
                 reason=f"paystack.webhook.{event_type}",
                 context={"paystack_event_id": event_id},
             )
+            # Issue a refund: new refund tx + wallet credit.
+            refund = tx_svc.create_refund(
+                original_tx=tx,
+                amount=tx.amount,
+                reason=f"paystack.webhook.{event_type}",
+            )
+            wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
 
     we.processed = True
     db.commit()

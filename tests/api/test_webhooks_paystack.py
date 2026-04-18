@@ -141,3 +141,34 @@ async def test_duplicate_event_is_deduped(client):
     # Wallet credited exactly once
     w = await client.get("/api/v1/wallet", headers=headers)
     assert w.json()["data"]["balance"] == "5000.00"
+
+
+@pytest.mark.asyncio
+async def test_charge_failed_creates_refund_and_credits_wallet(client):
+    _, headers = await _seed_logged_in_user(client)
+    ref = await _init_funding(client, headers, amount="5000.00")
+
+    body = {"event": "charge.failed", "data": {"id": "evt_fail", "reference": ref}}
+    r = await client.post(
+        "/api/v1/webhooks/paystack",
+        content=json.dumps(body).encode(),
+        headers={"x-paystack-signature": "FAKE_SIG"},
+    )
+    assert r.status_code == 200
+
+    # Fetch transactions list — original should be failed; a refund row should exist.
+    list_r = await client.get("/api/v1/transactions", headers=headers)
+    items = list_r.json()["data"]["items"]
+
+    original = next((i for i in items if i["reference"] == ref), None)
+    assert original is not None
+    assert original["status"] == "failed"
+
+    refunds = [i for i in items if i["type"] == "refund"]
+    assert len(refunds) == 1
+    assert refunds[0]["status"] == "success"
+    assert refunds[0]["amount"] == "5000.00"
+
+    # Wallet credited with the refund amount.
+    w = await client.get("/api/v1/wallet", headers=headers)
+    assert w.json()["data"]["balance"] == "5000.00"
