@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     PAYSTACK_PUBLIC_KEY: Optional[str] = None
     PAYSTACK_BASE_URL: str = "https://api.paystack.co"
     PAYSTACK_WEBHOOK_URL: Optional[str] = None
+    # URL Paystack redirects the user's browser to after a successful payment.
+    # Doesn't need to resolve — the in-app WebView intercepts the URL change
+    # and navigates to the FundingStatusPage. If None, Paystack falls back to
+    # its own "/close" page which requires a manual tap.
+    PAYSTACK_CALLBACK_URL: str = "https://timpbills.com/paystack/callback"
 
     # Paystack card-fee pass-through (no Timpbills margin on wallet funding per PRD §6.3).
     # Defaults match Paystack's published local-card fee structure:

@@ -104,6 +104,7 @@ async def fund_wallet(
         amount_kobo=gross_kobo,
         email=user.email,
         reference=tx.reference,
+        callback_url=settings.PAYSTACK_CALLBACK_URL,
         metadata={"transaction_id": str(tx.id), "user_id": str(user.id)},
     )
 
