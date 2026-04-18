@@ -34,3 +34,8 @@ class Payment(Base, TimestampMixin):
         nullable=False,
         default=PaymentStatus.pending,
     )
+
+    # Populated from Paystack verify.authorization on success.
+    method    = Column(String, nullable=True)      # 'card' | 'bank_transfer' | 'ussd' | ...
+    last4     = Column(String(4), nullable=True)   # only for card method
+    bank_name = Column(String, nullable=True)      # populated for bank_transfer / ussd
