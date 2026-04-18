@@ -14,8 +14,18 @@ _fake_singleton: FakePaystackClient = FakePaystackClient()
 
 
 def _is_fake_env() -> bool:
+    """Decide whether to return the fake Paystack client.
+
+    Rules:
+      * production never uses the fake — safety net against shipping a
+        misconfigured deploy that silently mints fake authorization URLs
+      * otherwise, `FORCE_FAKE_PROVIDERS` is authoritative: True → fake,
+        False → real. Set it to False in dev when testing real Paystack.
+    """
     env = getattr(settings, "ENVIRONMENT", "dev").lower()
-    return bool(settings.FORCE_FAKE_PROVIDERS) or env in ("dev", "test", "development")
+    if env == "production":
+        return False
+    return bool(settings.FORCE_FAKE_PROVIDERS)
 
 
 def select_paystack_client() -> PaymentProvider:

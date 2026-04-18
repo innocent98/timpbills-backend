@@ -5,12 +5,25 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import settings
 from app.main import app
 from app.db.base import Base
 from app.db.session import get_db
 # Import all models so metadata knows about them
 from app.db.models import user, otp  # noqa: F401
 from app.integrations.email.fake import FakeEmailClient
+
+
+@pytest.fixture(autouse=True)
+def _force_fake_providers():
+    """Tests always run against fake external providers — no real HTTP to
+    Paystack/Termii/etc. Individual tests that override the factory
+    (e.g. test_paystack_factory) use monkeypatch, which restores after the
+    test regardless of this fixture."""
+    original = settings.FORCE_FAKE_PROVIDERS
+    settings.FORCE_FAKE_PROVIDERS = True
+    yield
+    settings.FORCE_FAKE_PROVIDERS = original
 
 # Test database (file-based, used for integration client tests)
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
