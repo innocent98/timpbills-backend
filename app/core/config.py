@@ -65,9 +65,13 @@ class Settings(BaseSettings):
     PAYSTACK_BASE_URL: str = "https://api.paystack.co"
     PAYSTACK_WEBHOOK_URL: Optional[str] = None
 
-    # Wallet fees (% of funded amount; cap in naira)
-    WALLET_FUNDING_FEE_PERCENT: float = 1.0
-    WALLET_FUNDING_FEE_CAP_NAIRA: int = 500
+    # Paystack card-fee pass-through (no Timpbills margin on wallet funding per PRD §6.3).
+    # Defaults match Paystack's published local-card fee structure:
+    #   fee = amount * 1.5% + (₦100 if amount >= ₦2,500), capped at ₦2,000 total.
+    PAYSTACK_CARD_FEE_PERCENT: float = 1.5
+    PAYSTACK_CARD_FEE_FIXED_NAIRA: int = 100
+    PAYSTACK_CARD_FEE_FIXED_THRESHOLD_NAIRA: int = 2500
+    PAYSTACK_CARD_FEE_CAP_NAIRA: int = 2000
 
     # Resend Email
     RESEND_API_KEY: Optional[str] = None

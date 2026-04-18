@@ -41,9 +41,24 @@ async def get_wallet(
 
 
 def _calculate_fee(amount: Decimal) -> Decimal:
-    pct = Decimal(str(settings.WALLET_FUNDING_FEE_PERCENT)) / Decimal("100")
-    cap = Decimal(settings.WALLET_FUNDING_FEE_CAP_NAIRA)
-    fee = (amount * pct).quantize(Decimal("0.01"))
+    """Paystack local-card fee passed through to the user.
+
+    Wallet funding is break-even for Timpbills per PRD §6.3 — we don't add
+    a margin here. The fee shown is exactly what Paystack will deduct from
+    the settlement for this transaction, so the user's wallet receives
+    their requested amount in full.
+
+        fee = amount * 1.5% + (₦100 when amount ≥ ₦2,500), capped at ₦2,000
+    """
+    pct = Decimal(str(settings.PAYSTACK_CARD_FEE_PERCENT)) / Decimal("100")
+    fixed = Decimal(settings.PAYSTACK_CARD_FEE_FIXED_NAIRA)
+    threshold = Decimal(settings.PAYSTACK_CARD_FEE_FIXED_THRESHOLD_NAIRA)
+    cap = Decimal(settings.PAYSTACK_CARD_FEE_CAP_NAIRA)
+
+    fee = amount * pct
+    if amount >= threshold:
+        fee += fixed
+    fee = fee.quantize(Decimal("0.01"))
     return min(fee, cap)
 
 
