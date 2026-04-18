@@ -4,7 +4,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db
 from app.db.models.transaction import Transaction
 from app.db.models.user import User
-from app.schemas.transaction import TransactionListResponse, TransactionView
+from app.schemas.transaction import TransactionEventView, TransactionEventsResponse, TransactionListResponse, TransactionView
+from app.services.transaction_service import TransactionService
 from app.utils.responses import success
 
 
@@ -64,3 +65,43 @@ async def get_transaction(
         created_at=t.created_at, meta=t.meta,
     )
     return success(view.model_dump(mode="json"), request_id=getattr(request.state, "request_id", None))
+
+
+@router.get("/{reference}/events", response_model=None)
+async def get_transaction_events(
+    reference: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    tx = (
+        db.query(Transaction)
+        .filter(
+            Transaction.user_id == user.id,
+            Transaction.reference == reference,
+        )
+        .first()
+    )
+    if not tx:
+        raise HTTPException(status_code=404, detail={
+            "code": "TRANSACTION_NOT_FOUND",
+            "message": "Transaction not found",
+        })
+
+    tx_svc = TransactionService(db=db)
+    events = tx_svc.events_for(tx)
+    items = [
+        TransactionEventView(
+            at=e.created_at,
+            from_status=e.from_status.value if e.from_status else None,
+            to_status=e.to_status.value,
+            reason=e.reason,
+            context=e.context or {},
+        )
+        for e in events
+    ]
+    body = TransactionEventsResponse(items=items)
+    return success(
+        body.model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
