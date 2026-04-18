@@ -26,3 +26,16 @@ def test_fake_signature_accepts_FAKE_SIG():
     c = FakePaystackClient()
     assert c.verify_signature(raw_body=b"{}", signature="FAKE_SIG") is True
     assert c.verify_signature(raw_body=b"{}", signature="nope") is False
+
+
+@pytest.mark.asyncio
+async def test_fake_verify_returns_authorization_block():
+    client = FakePaystackClient()
+    client.will_succeed("TMP-TEST-1")
+    await client.initialize(
+        amount_kobo=100000, email="u@x.co", reference="TMP-TEST-1",
+    )
+    v = await client.verify(reference="TMP-TEST-1")
+    assert v.authorization is not None
+    assert v.authorization.channel == "card"
+    assert v.authorization.last4 == "4081"

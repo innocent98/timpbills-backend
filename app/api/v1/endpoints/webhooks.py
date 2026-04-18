@@ -104,6 +104,11 @@ async def paystack_webhook(
                 "code": "PAYSTACK_VERIFY_MISMATCH",
                 "message": f"Webhook says success but verify says {v.status}",
             })
+        # Populate Payment with authorization details (method, last4, bank).
+        if v.authorization is not None:
+            payment.method    = v.authorization.channel
+            payment.last4     = v.authorization.last4
+            payment.bank_name = v.authorization.bank
         # Race guard: reconcile worker may have claimed this payment already.
         if _claim_payment(db, payment.id, PaymentStatus.success):
             wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)

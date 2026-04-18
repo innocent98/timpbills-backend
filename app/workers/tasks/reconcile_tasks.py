@@ -59,6 +59,10 @@ async def _reconcile() -> dict:
                 )
                 continue
             if v.status == "success":
+                if v.authorization is not None:
+                    payment.method    = v.authorization.channel
+                    payment.last4     = v.authorization.last4
+                    payment.bank_name = v.authorization.bank
                 if _claim_payment(db, payment.id, PaymentStatus.success):
                     wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
                     tx_svc.transition(

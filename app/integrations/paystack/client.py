@@ -6,7 +6,7 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
-from app.integrations.paystack.schemas import InitResponse, VerifyResponse
+from app.integrations.paystack.schemas import InitResponse, VerifyResponse, PaystackAuthorization
 from app.integrations.paystack.signature import verify_paystack_signature
 
 
@@ -77,11 +77,17 @@ class PaystackClient:
         if not body.get("status"):
             raise PaystackError(body.get("message", "verify failed"))
         d = body["data"]
+        auth = d.get("authorization") or {}
         return VerifyResponse(
             reference=d["reference"],
             status=d["status"],
             amount=Decimal(d["amount"]) / Decimal(100),
             paid_at=d.get("paid_at"),
+            authorization=PaystackAuthorization(
+                channel=auth.get("channel"),
+                last4=auth.get("last4"),
+                bank=auth.get("bank"),
+            ) if auth else None,
         )
 
     def verify_signature(self, *, raw_body: bytes, signature: str) -> bool:

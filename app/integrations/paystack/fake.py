@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from app.integrations.paystack.schemas import InitResponse, VerifyResponse
+from app.integrations.paystack.schemas import InitResponse, VerifyResponse, PaystackAuthorization
 
 
 @dataclass
@@ -41,6 +41,11 @@ class FakePaystackClient:
             status=outcome,
             amount=Decimal(amount_kobo) / Decimal(100),
             paid_at="2026-04-17T12:00:00Z",
+            authorization=PaystackAuthorization(
+                channel="card",
+                last4="4081",
+                bank=None,
+            ),
         )
 
     def verify_signature(self, *, raw_body: bytes, signature: str) -> bool:
