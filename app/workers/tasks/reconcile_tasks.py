@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from app.core.logger import log
-from app.db.models._enums import TransactionStatus
+from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
 from app.db.session import SessionLocal
@@ -17,6 +17,18 @@ from app.integrations.paystack.factory import select_paystack_client
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import WalletService
 from app.workers.celery_app import celery_app
+
+
+# Keep in sync with the same-named set in webhooks.py. Only outbound tx
+# types debit the user before the provider settles, so only these
+# warrant a refund when the charge ultimately fails.
+_REFUNDABLE_ON_FAILURE = {
+    TransactionType.airtime,
+    TransactionType.data,
+    TransactionType.electricity,
+    TransactionType.cable,
+    TransactionType.flight,
+}
 
 
 @celery_app.task(name="app.workers.tasks.reconcile_tasks.reconcile_pending_payments")
@@ -76,12 +88,14 @@ async def _reconcile() -> dict:
                         tx, to_status=TransactionStatus.failed,
                         reason="reconcile.verify.failed",
                     )
-                    refund = tx_svc.create_refund(
-                        original_tx=tx,
-                        amount=tx.amount,
-                        reason="reconcile.verify.failed",
-                    )
-                    wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
+                    # See webhooks.py: only refund outbound tx types.
+                    if tx.type in _REFUNDABLE_ON_FAILURE:
+                        refund = tx_svc.create_refund(
+                            original_tx=tx,
+                            amount=tx.amount,
+                            reason="reconcile.verify.failed",
+                        )
+                        wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
                     settled += 1
             # abandoned → leave pending for next poll
         db.commit()

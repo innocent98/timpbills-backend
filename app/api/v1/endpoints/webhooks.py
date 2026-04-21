@@ -5,6 +5,8 @@
 3. For charge.success: mark Payment.success, credit wallet,
    transition Transaction to success.
 4. For charge.failed: mark Payment.failed, transition Transaction to failed.
+   For OUTBOUND tx types (airtime/data/etc.) a refund is also issued;
+   for wallet_funding we must NOT refund — the user was never debited.
 """
 import json
 
@@ -12,7 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_paystack_provider, get_wallet_service
-from app.db.models._enums import TransactionStatus
+from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
 from app.db.models.webhook_event import WebhookEvent
@@ -20,6 +22,20 @@ from app.integrations.paystack.base import PaymentProvider
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import WalletService
 from app.utils.responses import success
+
+
+# Transaction types where a failed Paystack charge means we already debited the
+# user's wallet (or equivalent) — so we issue a refund on failure. Wallet
+# funding is excluded because the charge going through was what would have
+# credited the wallet in the first place; a declined card never took money
+# from the user, so there is nothing to refund.
+_REFUNDABLE_ON_FAILURE = {
+    TransactionType.airtime,
+    TransactionType.data,
+    TransactionType.electricity,
+    TransactionType.cable,
+    TransactionType.flight,
+}
 
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -126,13 +142,16 @@ async def paystack_webhook(
                 reason=f"paystack.webhook.{event_type}",
                 context={"paystack_event_id": event_id},
             )
-            # Issue a refund: new refund tx + wallet credit.
-            refund = tx_svc.create_refund(
-                original_tx=tx,
-                amount=tx.amount,
-                reason=f"paystack.webhook.{event_type}",
-            )
-            wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
+            # Only issue a refund when the original tx actually debited the
+            # user (outbound services). A declined wallet-funding charge
+            # never collected money, so there is nothing to refund.
+            if tx.type in _REFUNDABLE_ON_FAILURE:
+                refund = tx_svc.create_refund(
+                    original_tx=tx,
+                    amount=tx.amount,
+                    reason=f"paystack.webhook.{event_type}",
+                )
+                wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
 
     we.processed = True
     db.commit()

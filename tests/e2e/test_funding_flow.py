@@ -110,7 +110,14 @@ async def test_full_funding_journey(client):
 
 
 @pytest.mark.asyncio
-async def test_failed_payment_issues_refund_to_wallet(client):
+async def test_failed_wallet_funding_does_not_credit_wallet(client):
+    """A declined card during wallet funding must NOT credit the wallet.
+
+    Paystack never collected the money from the user, so there is nothing to
+    refund. Prior to the Sprint 2 closure fix this test asserted the opposite
+    behaviour — a free-money bug that would let any user mint balance by
+    repeatedly funding with a declined card.
+    """
     _, headers = await _seed_logged_in_user(client)
     pin_r = await client.post("/api/v1/auth/pin/verify", json={"pin": "8527"}, headers=headers)
     pin_token = pin_r.json()["data"]["pin_token"]
@@ -128,18 +135,16 @@ async def test_failed_payment_issues_refund_to_wallet(client):
         headers={"x-paystack-signature": "FAKE_SIG"},
     )
 
-    # Wallet is credited with the refund amount.
+    # Wallet balance stays at zero — no free credit.
     r = await client.get("/api/v1/wallet", headers=headers)
-    assert r.json()["data"]["balance"] == "3000.00"  # refunded
+    assert r.json()["data"]["balance"] == "0.00"
 
-    # Original tx is still failed.
+    # Original tx is marked failed.
     detail = await client.get(f"/api/v1/transactions/{ref}", headers=headers)
     assert detail.json()["data"]["status"] == "failed"
 
-    # A separate refund tx exists.
+    # No refund row was created for the funding failure.
     list_r = await client.get("/api/v1/transactions", headers=headers)
     items = list_r.json()["data"]["items"]
     refunds = [i for i in items if i["type"] == "refund"]
-    assert len(refunds) == 1
-    assert refunds[0]["status"] == "success"
-    assert refunds[0]["amount"] == "3000.00"
+    assert refunds == []
