@@ -12,6 +12,7 @@ from app.api.deps import (
     require_pin_token,
 )
 from app.core.config import settings
+from app.core.limiter import limiter, per_user_or_ip
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.user import User
@@ -27,6 +28,7 @@ router = APIRouter(prefix="/wallet", tags=["wallet"])
 
 
 @router.get("", response_model=None)
+@limiter.limit("30/minute", key_func=per_user_or_ip)
 async def get_wallet(
     request: Request,
     user: User = Depends(get_current_user),
@@ -63,6 +65,7 @@ def _calculate_fee(amount: Decimal) -> Decimal:
 
 
 @router.post("/fund", response_model=None, status_code=200)
+@limiter.limit("30/minute", key_func=per_user_or_ip)
 async def fund_wallet(
     request: Request,
     body: FundWalletRequest,

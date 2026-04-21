@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_paystack_provider, get_wallet_service
+from app.core.limiter import limiter
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
@@ -57,6 +58,7 @@ def _claim_payment(db: Session, payment_id, target_status: PaymentStatus) -> boo
 
 
 @router.post("/paystack", response_model=None)
+@limiter.limit("60/minute")
 async def paystack_webhook(
     request: Request,
     x_paystack_signature: str | None = Header(default=None, alias="x-paystack-signature"),

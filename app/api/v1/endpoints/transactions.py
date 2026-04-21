@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
+from app.core.limiter import limiter, per_user_or_ip
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.transaction import Transaction
 from app.db.models.user import User
@@ -48,6 +49,7 @@ def _parse_statuses(values: list[str] | None) -> list[TransactionStatus] | None:
 
 
 @router.get("", response_model=None)
+@limiter.limit("60/minute", key_func=per_user_or_ip)
 async def list_transactions(
     request: Request,
     user: User = Depends(get_current_user),
