@@ -16,13 +16,14 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_paystack_provider, get_wallet_service
 from app.core.limiter import limiter
+from app.core.logger import log
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
 from app.db.models.webhook_event import WebhookEvent
 from app.integrations.paystack.base import PaymentProvider
 from app.services.transaction_service import TransactionService
-from app.services.wallet_service import WalletService
+from app.services.wallet_service import KycCapExceeded, WalletService
 from app.utils.responses import success
 
 
@@ -131,7 +132,21 @@ async def paystack_webhook(
             payment.bank_name = v.authorization.bank
         # Race guard: reconcile worker may have claimed this payment already.
         if _claim_payment(db, payment.id, PaymentStatus.success):
-            wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+            try:
+                wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+            except KycCapExceeded as exc:
+                # Don't leak partial state: roll back the claim and the
+                # WebhookEvent insert so Paystack can retry (or so an
+                # operator can raise the user's tier and try again).
+                db.rollback()
+                log.warning(
+                    "webhook: credit would exceed KYC cap — user=%s ref=%s event=%s err=%s",
+                    tx.user_id, reference, event_id, exc,
+                )
+                raise HTTPException(status_code=422, detail={
+                    "code": "KYC_LIMIT_EXCEEDED",
+                    "message": "Credit would exceed the user's KYC balance cap",
+                })
             tx_svc.transition(
                 tx,
                 to_status=TransactionStatus.success,

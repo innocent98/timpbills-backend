@@ -1,16 +1,14 @@
-"""Regression for S2C-2 (M9): reconcile worker handling of KycCapExceeded.
+"""Regression for S2C-2 / S2C-8: reconcile worker handling of KycCapExceeded.
 
 When a Paystack verify returns success on a payment whose credit would push
-the wallet over the user's KYC cap, the current reconcile worker raises
-KycCapExceeded out of the loop. This test documents that behaviour so S2C-8
-(reconcile error taxonomy) can replace it with a dead-letter path without
-regressing silently.
+the wallet over the user's KYC cap, the worker now defers that specific
+payment (logs DEFERRED, rolls back, increments the `deferred` counter) and
+keeps processing the rest of the batch. Pre-S2C-8 the exception propagated
+out of the loop and every other pending payment was skipped.
 """
 import uuid
 from decimal import Decimal
 from unittest.mock import patch
-
-import pytest
 
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
@@ -18,7 +16,6 @@ from app.db.models.transaction import Transaction
 from app.db.models.user import User
 from app.db.models.wallet import Wallet
 from app.integrations.paystack.schemas import PaystackAuthorization, VerifyResponse
-from app.services.wallet_service import KycCapExceeded
 
 
 def _seed_user_wallet_tx(db, balance: Decimal, amount: Decimal) -> Payment:
@@ -78,10 +75,11 @@ class _FakeVerifyingClient:
         )
 
 
-def test_reconcile_raises_kyc_cap_current_behaviour(db_session, monkeypatch):
-    """Current behaviour: KycCapExceeded propagates out of _reconcile and the
-    payment stays pending. No partial state is committed (wallet balance
-    unchanged). S2C-8 will replace the raise with a dead-letter.
+def test_reconcile_defers_kyc_cap_and_keeps_batch_going(db_session, monkeypatch):
+    """S2C-8 behaviour: KycCapExceeded on one payment defers that payment
+    (leaves it pending, rolls back partial state) but doesn't derail the
+    rest of the sweep. The `deferred` counter in the summary reflects the
+    defer; the overall result is a successful task run, not a crash.
     """
     # Seed: balance ₦46k, funding ₦5k → would push to ₦51k > ₦50k cap.
     payment = _seed_user_wallet_tx(
@@ -93,7 +91,6 @@ def test_reconcile_raises_kyc_cap_current_behaviour(db_session, monkeypatch):
     payment.created_at = datetime.now(timezone.utc) - timedelta(minutes=5)
     db_session.commit()
 
-    # Wire the reconcile worker to use our session + a stub verifying client.
     from app.workers.tasks import reconcile_tasks as rt
 
     with patch.object(rt, "SessionLocal", lambda: db_session), \
@@ -102,13 +99,15 @@ def test_reconcile_raises_kyc_cap_current_behaviour(db_session, monkeypatch):
         original_close = db_session.close
         db_session.close = lambda: None
         try:
-            with pytest.raises(KycCapExceeded):
-                rt.reconcile_pending_payments()
+            result = rt.reconcile_pending_payments()
         finally:
             db_session.close = original_close
 
-    # Payment still pending — the claim wasn't committed by the worker because
-    # the exception fired before the db.commit() at the end of _reconcile.
+    assert result["checked"] == 1
+    assert result["settled"] == 0
+    assert result["deferred"] == 1
+
+    # Payment still pending — the claim was rolled back by the deferred branch.
     db_session.expire_all()
     fresh = db_session.query(Payment).filter(Payment.id == payment.id).one()
     assert fresh.status == PaymentStatus.pending

@@ -216,18 +216,16 @@ async def test_charge_success_over_kyc_cap_does_not_commit_partial_state(
     fps.will_succeed(ref)
 
     body = {"event": "charge.success", "data": {"id": "evt_cap", "reference": ref}}
-    # Current behaviour: KycCapExceeded leaks out because Starlette's
-    # BaseHTTPMiddleware (LoggingMiddleware) re-raises past the FastAPI
-    # handlers. S2C-8 will catch KycCapExceeded inside the webhook and
-    # return a 422 with a distinct code so Paystack stops retrying and
-    # the condition is surfaced to ops.
-    from app.services.wallet_service import KycCapExceeded
-    with pytest.raises(KycCapExceeded):
-        await client.post(
-            "/api/v1/webhooks/paystack",
-            content=json.dumps(body).encode(),
-            headers={"x-paystack-signature": "FAKE_SIG"},
-        )
+    # S2C-8 behaviour: the webhook catches KycCapExceeded and returns 422
+    # with a distinct error code so Paystack stops retrying (4xx ≠ retry),
+    # ops can triage, and no partial state lands in the DB.
+    r = await client.post(
+        "/api/v1/webhooks/paystack",
+        content=json.dumps(body).encode(),
+        headers={"x-paystack-signature": "FAKE_SIG"},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "KYC_LIMIT_EXCEEDED"
 
     # Wallet balance unchanged — no partial credit committed.
     db_session.expire_all()

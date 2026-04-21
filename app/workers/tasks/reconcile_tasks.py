@@ -15,7 +15,11 @@ from app.db.models.transaction import Transaction
 from app.db.session import SessionLocal
 from app.integrations.paystack.factory import select_paystack_client
 from app.services.transaction_service import TransactionService
-from app.services.wallet_service import WalletService
+from app.services.wallet_service import (
+    InsufficientBalance,
+    KycCapExceeded,
+    WalletService,
+)
 from app.workers.celery_app import celery_app
 
 
@@ -61,10 +65,12 @@ async def _reconcile() -> dict:
         wallet_svc = WalletService(db=db)
         tx_svc = TransactionService(db=db)
         settled = 0
+        deferred = 0
         for payment, tx in pending:
             try:
                 v = await client.verify(reference=payment.provider_reference)
             except Exception as exc:
+                # Provider / network error — retry on the next tick.
                 log.warning(
                     "reconcile: verify failed for %s: %s",
                     payment.provider_reference, exc,
@@ -76,7 +82,21 @@ async def _reconcile() -> dict:
                     payment.last4     = v.authorization.last4
                     payment.bank_name = v.authorization.bank
                 if _claim_payment(db, payment.id, PaymentStatus.success):
-                    wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+                    try:
+                        wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+                    except (KycCapExceeded, InsufficientBalance) as exc:
+                        # Domain exception on an otherwise-valid payment —
+                        # defer. Leave Payment pending so the next tick can
+                        # retry (ops may raise the user's cap meanwhile).
+                        # Partial state is discarded by the db.rollback().
+                        db.rollback()
+                        deferred += 1
+                        log.warning(
+                            "reconcile: DEFERRED credit — ref=%s user=%s err=%s",
+                            payment.provider_reference, tx.user_id, exc,
+                        )
+                        # Skip the transition + settled++; move to next row.
+                        continue
                     tx_svc.transition(
                         tx, to_status=TransactionStatus.success,
                         reason="reconcile.verify.success",
@@ -99,7 +119,7 @@ async def _reconcile() -> dict:
                     settled += 1
             # abandoned → leave pending for next poll
         db.commit()
-        return {"checked": len(pending), "settled": settled}
+        return {"checked": len(pending), "settled": settled, "deferred": deferred}
     finally:
         db.close()
 
