@@ -176,6 +176,76 @@ async def test_charge_failed_on_funding_does_not_refund(client):
 
 
 @pytest.mark.asyncio
+async def test_charge_success_over_kyc_cap_does_not_commit_partial_state(
+    db_session, client
+):
+    """Regression for S2C-2 (M9): a charge.success that would push the wallet
+    over the user's KYC cap must not commit partial state.
+
+    Specifically: the Payment row must stay in `pending` (so a later retry /
+    reconcile can still act on it), the wallet balance must stay at its
+    pre-webhook value, and no refund row is introduced. The webhook returning
+    5xx is acceptable here — S2C-8 will upgrade this to a dead-letter with a
+    distinct error code so Paystack stops retrying.
+    """
+    from decimal import Decimal
+
+    from app.db.models.user import User
+    from app.db.models.wallet import Wallet
+
+    _tokens, headers = await _seed_logged_in_user(client)
+
+    # Seed wallet near tier-0 cap (₦50,000). A ₦5,000 funding will overshoot.
+    user_row = db_session.query(User).filter(User.email == "e@e.co").one()
+    existing_wallet = (
+        db_session.query(Wallet).filter(Wallet.user_id == user_row.id).first()
+    )
+    if existing_wallet is None:
+        existing_wallet = Wallet(
+            user_id=user_row.id,
+            balance=Decimal("46000.00"),
+            balance_cap=Decimal("50000.00"),
+        )
+        db_session.add(existing_wallet)
+    else:
+        existing_wallet.balance = Decimal("46000.00")
+    db_session.commit()
+
+    ref = await _init_funding(client, headers, amount="5000.00")
+    from app.api.deps import _fake_paystack_singleton as fps
+    fps.will_succeed(ref)
+
+    body = {"event": "charge.success", "data": {"id": "evt_cap", "reference": ref}}
+    # Current behaviour: KycCapExceeded leaks out because Starlette's
+    # BaseHTTPMiddleware (LoggingMiddleware) re-raises past the FastAPI
+    # handlers. S2C-8 will catch KycCapExceeded inside the webhook and
+    # return a 422 with a distinct code so Paystack stops retrying and
+    # the condition is surfaced to ops.
+    from app.services.wallet_service import KycCapExceeded
+    with pytest.raises(KycCapExceeded):
+        await client.post(
+            "/api/v1/webhooks/paystack",
+            content=json.dumps(body).encode(),
+            headers={"x-paystack-signature": "FAKE_SIG"},
+        )
+
+    # Wallet balance unchanged — no partial credit committed.
+    db_session.expire_all()
+    w = db_session.query(Wallet).filter(Wallet.user_id == user_row.id).one()
+    assert w.balance == Decimal("46000.00")
+
+    # No refund tx was created.
+    list_r = await client.get("/api/v1/transactions", headers=headers)
+    items = list_r.json()["data"]["items"]
+    refunds = [i for i in items if i["type"] == "refund"]
+    assert refunds == []
+
+    # Original tx still in pending/processing — not prematurely flipped to success.
+    detail = await client.get(f"/api/v1/transactions/{ref}", headers=headers)
+    assert detail.json()["data"]["status"] in ("pending", "processing")
+
+
+@pytest.mark.asyncio
 async def test_charge_failed_on_outbound_tx_issues_refund(db_session, client):
     """For outbound tx types (airtime/data/cable/electricity/flight) a failed
     charge means the user was debited from their wallet but the service was
