@@ -86,6 +86,25 @@ class Settings(BaseSettings):
     # Force fake providers (useful for local dev without real keys)
     FORCE_FAKE_PROVIDERS: bool = False
 
+    # ── VTPass (bill payments: airtime, data, electricity, cable) ────────
+    # Sandbox: https://sandbox-api.vtpass.com — Prod: https://api.vtpass.com
+    # The three keys are obtained from the VTPass dashboard; the webhook
+    # secret is a shared secret we choose and configure on both sides
+    # (VTPass does not HMAC-sign webhook bodies).
+    VTPASS_API_KEY: Optional[str] = None
+    VTPASS_PUBLIC_KEY: Optional[str] = None
+    VTPASS_SECRET_KEY: Optional[str] = None
+    VTPASS_BASE_URL: str = "https://sandbox-api.vtpass.com"
+    VTPASS_WEBHOOK_SECRET: Optional[str] = None
+
+    # ── Firebase Cloud Messaging (push notifications) ────────────────────
+    # Either FCM_CREDENTIALS_PATH (service-account JSON file) OR
+    # FCM_CREDENTIALS_JSON (inline base64/raw JSON) — one of them. When
+    # both are unset the FakePushClient is used (tests + dev).
+    FCM_CREDENTIALS_PATH: Optional[str] = None
+    FCM_CREDENTIALS_JSON: Optional[str] = None
+    FCM_PROJECT_ID: Optional[str] = None
+
     # Observability — Sentry (optional; no-op when DSN unset)
     SENTRY_DSN: Optional[str] = None
     SENTRY_ENVIRONMENT: Optional[str] = None  # defaults to ENVIRONMENT if unset
