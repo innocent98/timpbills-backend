@@ -214,3 +214,28 @@ def get_wallet_service(db: Session = Depends(get_db)) -> WalletService:
 
 def get_transaction_service(db: Session = Depends(get_db)) -> TransactionService:
     return TransactionService(db=db)
+
+
+# --- Sprint 3 · B4+B6: VTPass provider + BillService ---
+from app.integrations.vtpass.base import BillProvider
+from app.integrations.vtpass import factory as _vtpass_factory
+from app.services.bill_service import BillService
+
+
+def get_vtpass_provider() -> BillProvider:
+    return _vtpass_factory.select_vtpass_client()
+
+
+def reset_fake_vtpass() -> None:
+    _vtpass_factory.reset_fake_singleton()
+
+
+def get_bill_service(
+    db: Session = Depends(get_db),
+    tx_svc: TransactionService = Depends(get_transaction_service),
+    wallet_svc: WalletService = Depends(get_wallet_service),
+    provider: BillProvider = Depends(get_vtpass_provider),
+) -> BillService:
+    return BillService(
+        db=db, tx_svc=tx_svc, wallet_svc=wallet_svc, provider=provider,
+    )
