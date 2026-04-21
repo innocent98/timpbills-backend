@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from app.main import app
 from app.api.deps import (
@@ -18,7 +19,7 @@ from app.services.token_store import RedisTokenStore
 _test_email_client = FakeEmailClient()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client(db_session):
     # Override get_db to use our test session
     def _get_db():
@@ -177,7 +178,7 @@ async def test_phone_upgrade_flow(client):
     assert body_pv["data"]["tokens"]["access_token"]
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def rate_limited_client(db_session):
     """Client with rate limiting enabled for rate limit tests."""
     def _get_db():

@@ -1,5 +1,6 @@
 """API tests for POST /auth/pin/verify."""
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 
 from app.main import app
@@ -19,7 +20,7 @@ from app.services.token_store import RedisTokenStore
 _test_email_client = FakeEmailClient()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client(db_session):
     """Async client with DB, Redis, email all faked out."""
 

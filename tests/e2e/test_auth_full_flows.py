@@ -8,6 +8,7 @@ defined in tests/api/test_auth_flow.py via the conftest-provided fixtures
 one in test_auth_flow.py so this module is fully self-contained.
 """
 import pytest
+import pytest_asyncio
 from datetime import datetime, timedelta
 from httpx import AsyncClient, ASGITransport
 
@@ -35,7 +36,7 @@ _e2e_email_client = FakeEmailClient()
 _e2e_sms_client = FakeTermiiClient()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client(db_session):
     """Async HTTP client with all external dependencies overridden."""
 
@@ -79,7 +80,7 @@ async def client(db_session):
     app.dependency_overrides.clear()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def rate_limited_client(db_session):
     """Client with rate limiting enabled for rate-limit enforcement tests."""
 

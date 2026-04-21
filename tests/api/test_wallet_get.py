@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 
 from app.main import app
@@ -23,7 +24,7 @@ from tests.e2e.test_auth_full_flows import _seed_logged_in_user  # noqa: E402
 import tests.e2e.test_auth_full_flows as _e2e_mod
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client(db_session):
     def _get_db():
         try:
