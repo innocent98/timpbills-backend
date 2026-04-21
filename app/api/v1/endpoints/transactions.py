@@ -1,7 +1,10 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
+from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.transaction import Transaction
 from app.db.models.user import User
 from app.schemas.transaction import TransactionEventView, TransactionEventsResponse, TransactionListResponse, TransactionView
@@ -12,6 +15,38 @@ from app.utils.responses import success
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
+def _parse_types(values: list[str] | None) -> list[TransactionType] | None:
+    """Convert raw ?type= values into TransactionType enums. Unknown values
+    raise 400 rather than silently filtering nothing."""
+    if not values:
+        return None
+    out: list[TransactionType] = []
+    for v in values:
+        try:
+            out.append(TransactionType(v))
+        except ValueError:
+            raise HTTPException(status_code=400, detail={
+                "code": "INVALID_TX_TYPE",
+                "message": f"Unknown transaction type: {v}",
+            })
+    return out
+
+
+def _parse_statuses(values: list[str] | None) -> list[TransactionStatus] | None:
+    if not values:
+        return None
+    out: list[TransactionStatus] = []
+    for v in values:
+        try:
+            out.append(TransactionStatus(v))
+        except ValueError:
+            raise HTTPException(status_code=400, detail={
+                "code": "INVALID_TX_STATUS",
+                "message": f"Unknown transaction status: {v}",
+            })
+    return out
+
+
 @router.get("", response_model=None)
 async def list_transactions(
     request: Request,
@@ -19,8 +54,24 @@ async def list_transactions(
     db: Session = Depends(get_db),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    type: list[str] | None = Query(default=None, description="Filter by type; repeatable"),
+    status: list[str] | None = Query(default=None, description="Filter by status; repeatable"),
+    date_from: datetime | None = Query(default=None, description="Inclusive lower bound on created_at (ISO 8601)"),
+    date_to: datetime | None = Query(default=None, description="Exclusive upper bound on created_at (ISO 8601)"),
 ):
+    types = _parse_types(type)
+    statuses = _parse_statuses(status)
+
     q = db.query(Transaction).filter(Transaction.user_id == user.id)
+    if types:
+        q = q.filter(Transaction.type.in_(types))
+    if statuses:
+        q = q.filter(Transaction.status.in_(statuses))
+    if date_from is not None:
+        q = q.filter(Transaction.created_at >= date_from)
+    if date_to is not None:
+        q = q.filter(Transaction.created_at < date_to)
+
     total = q.count()
     rows = (
         q.order_by(Transaction.created_at.desc())
