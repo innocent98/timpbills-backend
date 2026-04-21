@@ -44,6 +44,63 @@ _SUCCESS_CODE = "000"
 _PENDING_CODE = "099"
 
 
+def translate_response(
+    body: dict[str, Any], *, request_id: str, requested: Decimal
+) -> BillPurchaseResponse:
+    """Map a VTPass envelope (purchase response, requery response, or
+    webhook body — all share the same shape) to our normalized
+    BillPurchaseResponse. Used by both VTPassClient and the
+    /webhooks/vtpass endpoint.
+
+    Handles the three branches:
+      code == 000  → delivered (potentially partial if amount differs)
+      code == 099  → pending (reconcile worker will requery)
+      otherwise    → failed
+    """
+    code = str(body.get("code", ""))
+    description = str(body.get("response_description", ""))
+    content = body.get("content") or {}
+    tx = (content.get("transactions") or {}) if isinstance(content, dict) else {}
+    tx_id = str(tx.get("transactionId") or tx.get("transaction_id") or "")
+
+    if code == _SUCCESS_CODE:
+        delivered_amt = _safe_decimal(
+            tx.get("amount")
+            or body.get("amount")
+            or requested
+        )
+        return BillPurchaseResponse(
+            request_id=request_id, transaction_id=tx_id,
+            status=BillDeliveryStatus.delivered, code=code,
+            requested_amount_ngn=requested,
+            delivered_amount_ngn=delivered_amt,
+            description=description,
+            raw=body,
+        )
+    if code == _PENDING_CODE:
+        return BillPurchaseResponse(
+            request_id=request_id, transaction_id=tx_id,
+            status=BillDeliveryStatus.pending, code=code,
+            requested_amount_ngn=requested,
+            delivered_amount_ngn=Decimal("0.00"),
+            description=description or "Pending upstream confirmation",
+            raw=body,
+        )
+    # Anything else is a failure. Log the code for ops triage.
+    log.warning(
+        "vtpass: purchase failed request_id=%s code=%s description=%s",
+        request_id, code, description,
+    )
+    return BillPurchaseResponse(
+        request_id=request_id, transaction_id=tx_id,
+        status=BillDeliveryStatus.failed, code=code,
+        requested_amount_ngn=requested,
+        delivered_amount_ngn=Decimal("0.00"),
+        description=description or "Transaction failed",
+        raw=body,
+    )
+
+
 class VTPassClient(BillProvider):
     """Production client. Constructed only when VTPass credentials are set
     AND the env is not in the fake allowlist (factory.py enforces that)."""
@@ -70,7 +127,7 @@ class VTPassClient(BillProvider):
             "amount":      str(int(amount_ngn)),  # VTPass wants a whole number
             "phone":       phone,
         })
-        return self._translate(body, request_id=request_id, requested=amount_ngn)
+        return translate_response(body, request_id=request_id, requested=amount_ngn)
 
     async def purchase_data(
         self, *, request_id: str, service_id: str, phone: str, variation_code: str
@@ -92,7 +149,7 @@ class VTPassClient(BillProvider):
             "variation_code": variation_code,
             "phone":         phone,
         })
-        return self._translate(body, request_id=request_id, requested=match.price_ngn)
+        return translate_response(body, request_id=request_id, requested=match.price_ngn)
 
     async def list_data_plans(self, *, service_id: str) -> DataPlanList:
         body = await self._get("/api/service-variations", {"serviceID": service_id})
@@ -119,7 +176,7 @@ class VTPassClient(BillProvider):
         # whatever VTPass reports. BillService knows the expected amount
         # from its own Transaction row.
         requested = _safe_decimal(body.get("amount", "0"))
-        return self._translate(body, request_id=request_id, requested=requested)
+        return translate_response(body, request_id=request_id, requested=requested)
 
     # ── Internals ──────────────────────────────────────────────────────
 
@@ -177,61 +234,6 @@ class VTPassClient(BillProvider):
             raise ProviderPermanentFailure(
                 f"vtpass returned non-JSON body: {r.text[:200]}"
             ) from exc
-
-    @staticmethod
-    def _translate(
-        body: dict[str, Any], *, request_id: str, requested: Decimal
-    ) -> BillPurchaseResponse:
-        """Map VTPass envelope to our normalized response.
-
-        Handles the three branches:
-          code == 000  → delivered (potentially partial if amount differs)
-          code == 099  → pending (reconcile worker will requery)
-          otherwise    → failed
-        """
-        code = str(body.get("code", ""))
-        description = str(body.get("response_description", ""))
-        content = body.get("content") or {}
-        tx = (content.get("transactions") or {}) if isinstance(content, dict) else {}
-        tx_id = str(tx.get("transactionId") or tx.get("transaction_id") or "")
-
-        if code == _SUCCESS_CODE:
-            delivered_amt = _safe_decimal(
-                tx.get("amount")
-                or body.get("amount")
-                or requested
-            )
-            return BillPurchaseResponse(
-                request_id=request_id, transaction_id=tx_id,
-                status=BillDeliveryStatus.delivered, code=code,
-                requested_amount_ngn=requested,
-                delivered_amount_ngn=delivered_amt,
-                description=description,
-                raw=body,
-            )
-        if code == _PENDING_CODE:
-            return BillPurchaseResponse(
-                request_id=request_id, transaction_id=tx_id,
-                status=BillDeliveryStatus.pending, code=code,
-                requested_amount_ngn=requested,
-                delivered_amount_ngn=Decimal("0.00"),
-                description=description or "Pending upstream confirmation",
-                raw=body,
-            )
-        # Anything else is a failure. Log the code for ops triage.
-        log.warning(
-            "vtpass: purchase failed request_id=%s code=%s description=%s",
-            request_id, code, description,
-        )
-        return BillPurchaseResponse(
-            request_id=request_id, transaction_id=tx_id,
-            status=BillDeliveryStatus.failed, code=code,
-            requested_amount_ngn=requested,
-            delivered_amount_ngn=Decimal("0.00"),
-            description=description or "Transaction failed",
-            raw=body,
-        )
-
 
 def _safe_decimal(v: Any) -> Decimal:
     """Coerce VTPass amount values (sometimes str, sometimes int/float) to

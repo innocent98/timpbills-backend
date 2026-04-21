@@ -240,11 +240,17 @@ class BillService:
             )
 
         # 5. Translate the normalized response into state changes.
-        return self._apply_provider_result(tx=tx, amount=amount, result=result)
+        return self.apply_provider_result(tx=tx, amount=amount, result=result)
 
-    def _apply_provider_result(
+    def apply_provider_result(
         self, *, tx: Transaction, amount: Decimal, result: BillPurchaseResponse
     ) -> BillResult:
+        """Apply a provider result (either from the synchronous purchase
+        path or from the /webhooks/vtpass handler) to the tx state.
+
+        Assumes the caller has already verified the tx is not yet in a
+        terminal state — calling this on an already-final tx raises
+        InvalidStateTransition via TransactionService.transition."""
         if result.status == BillDeliveryStatus.delivered:
             if result.delivered_amount_ngn < amount:
                 # Partial — refund the difference and annotate the tx.

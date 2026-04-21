@@ -1,15 +1,16 @@
-"""Pure-function tests for VTPassClient._translate — the envelope-to-
-normalized-schema mapper. The real HTTP calls are exercised against the
-VTPass sandbox during sprint closure (V2); here we only verify that
-whatever JSON VTPass produces is interpreted correctly."""
+"""Pure-function tests for translate_response — the envelope-to-
+normalized-schema mapper shared by VTPassClient and /webhooks/vtpass.
+The real HTTP calls are exercised against the VTPass sandbox during
+sprint closure (V2); here we only verify that whatever JSON VTPass
+produces is interpreted correctly."""
 from decimal import Decimal
 
-from app.integrations.vtpass.client import VTPassClient, _safe_decimal
+from app.integrations.vtpass.client import _safe_decimal, translate_response
 from app.integrations.vtpass.schemas import BillDeliveryStatus
 
 
 def _trans(body: dict, request_id="TMP-X", requested=Decimal("500.00")):
-    return VTPassClient._translate(body, request_id=request_id, requested=requested)
+    return translate_response(body, request_id=request_id, requested=requested)
 
 
 def test_translate_success_envelope():

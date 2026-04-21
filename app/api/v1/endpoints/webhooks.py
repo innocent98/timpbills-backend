@@ -14,7 +14,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db, get_paystack_provider, get_wallet_service
+from app.api.deps import (
+    get_bill_service,
+    get_db,
+    get_paystack_provider,
+    get_wallet_service,
+)
 from app.core.limiter import limiter
 from app.core.logger import log
 from app.db.models._enums import TransactionStatus, TransactionType
@@ -22,6 +27,12 @@ from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
 from app.db.models.webhook_event import WebhookEvent
 from app.integrations.paystack.base import PaymentProvider
+from app.integrations.vtpass.client import translate_response as vtpass_translate
+from app.integrations.vtpass.signature import (
+    WebhookSecretNotConfigured,
+    verify_vtpass_secret,
+)
+from app.services.bill_service import BillService
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import KycCapExceeded, WalletService
 from app.utils.responses import success
@@ -171,6 +182,136 @@ async def paystack_webhook(
                     reason=f"paystack.webhook.{event_type}",
                 )
                 wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
+
+    we.processed = True
+    db.commit()
+    return success({"ok": True})
+
+
+# ─── VTPass webhook ──────────────────────────────────────────────────────
+
+# Tx states that are already final — a late webhook here is a no-op
+# (typically the synchronous purchase path already handled this tx, or
+# the reconcile worker got there first). We still record the event so
+# ops can see it arrived.
+_TX_FINAL_STATES = {
+    TransactionStatus.success,
+    TransactionStatus.failed,
+    TransactionStatus.refund_pending,
+    TransactionStatus.refunded,
+    TransactionStatus.refund_failed,
+}
+
+
+@router.post("/vtpass", response_model=None)
+@limiter.limit("60/minute")
+async def vtpass_webhook(
+    request: Request,
+    x_vtpass_secret: str | None = Header(default=None, alias="X-VTPass-Secret"),
+    db: Session = Depends(get_db),
+    bill_svc: BillService = Depends(get_bill_service),
+):
+    # 1. Shared-secret auth. VTPass doesn't HMAC-sign bodies like Paystack;
+    #    a configured secret header is our only auth surface. The helper
+    #    raises WebhookSecretNotConfigured if VTPASS_WEBHOOK_SECRET is
+    #    unset — we translate that to 500 rather than silently accept
+    #    every forged request.
+    try:
+        if not verify_vtpass_secret(header_value=x_vtpass_secret):
+            raise HTTPException(status_code=401, detail={
+                "code": "INVALID_SECRET", "message": "Bad or missing X-VTPass-Secret header",
+            })
+    except WebhookSecretNotConfigured as exc:
+        log.error("vtpass webhook: server misconfigured: %s", exc)
+        raise HTTPException(status_code=500, detail={
+            "code": "WEBHOOK_NOT_CONFIGURED",
+            "message": "Server-side VTPass webhook secret is not set",
+        })
+
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail={
+            "code": "MALFORMED_WEBHOOK", "message": "Body is not valid JSON",
+        })
+
+    # 2. Identifiers. VTPass echoes our `request_id` back as `requestId`
+    #    (camelCase) at the top level. Their own transaction id lives in
+    #    `content.transactions.transactionId`. We use the latter for
+    #    dedupe when available, falling back to request_id + code so
+    #    events that arrive before VTPass assigns a transaction id still
+    #    have a stable natural key.
+    reference = payload.get("requestId") or payload.get("request_id")
+    content = payload.get("content") or {}
+    tx_block = (content.get("transactions") or {}) if isinstance(content, dict) else {}
+    vtpass_event_id = (
+        tx_block.get("transactionId")
+        or tx_block.get("transaction_id")
+        or f"{reference}:{payload.get('code', '')}"
+    )
+    event_type = payload.get("type") or "transaction-update"
+
+    if not reference:
+        raise HTTPException(status_code=400, detail={
+            "code": "MALFORMED_WEBHOOK", "message": "Missing requestId",
+        })
+
+    # 3. Atomic dedupe — identical to Paystack's S2C-4 pattern. Two
+    #    concurrent retries of the same event race at the unique
+    #    constraint; the loser rolls back and returns deduped.
+    we = WebhookEvent(
+        provider="vtpass",
+        provider_event_id=str(vtpass_event_id),
+        event_type=str(event_type),
+        raw=payload,
+        processed=False,
+    )
+    db.add(we)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        return success({"ok": True, "deduped": True})
+
+    # 4. Route webhook → Transaction via the Payment row BillService
+    #    wrote on wallet-debit (provider="wallet", provider_reference=tx.reference).
+    payment = (
+        db.query(Payment)
+        .filter(Payment.provider == "wallet")
+        .filter(Payment.provider_reference == reference)
+        .first()
+    )
+    if payment is None:
+        # Unknown reference — still record the event so ops can audit
+        # stray posts (wrong env, secret leaked, etc.), but don't error.
+        db.commit()
+        return success({"ok": True, "note": "unknown_reference"})
+
+    # 5. Lock the tx row. This is the race guard — both the reconcile
+    #    worker and the webhook can arrive concurrently; the second
+    #    caller waits here, sees a terminal status, and skips.
+    tx = (
+        db.query(Transaction)
+        .filter(Transaction.id == payment.transaction_id)
+        .with_for_update()
+        .one()
+    )
+    if tx.status in _TX_FINAL_STATES:
+        we.processed = True
+        db.commit()
+        return success({"ok": True, "already_processed": True})
+
+    # 6. Translate VTPass envelope → normalized BillPurchaseResponse.
+    #    Same shape as purchase + requery responses, so we reuse the
+    #    client's parser.
+    result = vtpass_translate(payload, request_id=reference, requested=tx.amount)
+
+    # 7. Apply state changes. For delivered → success (refunds the
+    #    shortfall on partial); for failed → failed + refund (gated by
+    #    _REFUNDABLE_ON_FAILURE — bills are all IN the set); for pending
+    #    → no-op, reconcile worker will finish.
+    bill_svc.apply_provider_result(tx=tx, amount=tx.amount, result=result)
 
     we.processed = True
     db.commit()
