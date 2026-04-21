@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     # Force fake providers (useful for local dev without real keys)
     FORCE_FAKE_PROVIDERS: bool = False
 
+    # Observability — Sentry (optional; no-op when DSN unset)
+    SENTRY_DSN: Optional[str] = None
+    SENTRY_ENVIRONMENT: Optional[str] = None  # defaults to ENVIRONMENT if unset
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.05
+    SENTRY_PROFILES_SAMPLE_RATE: float = 0.0
+
     # Admin
     FIRST_SUPERUSER_EMAIL: EmailStr
     FIRST_SUPERUSER_PASSWORD: str

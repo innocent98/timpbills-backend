@@ -8,9 +8,14 @@ import time
 from app.core.config import settings
 from app.core.logger import log
 from app.core.limiter import limiter
+from app.core.sentry_setup import setup_sentry
 from app.api.v1.api import api_router
 from app.middleware.error_handler import install_error_handlers
 from app.middleware.request_id import RequestIdMiddleware
+
+
+# Sentry must init before FastAPI so its integrations can wrap ASGI lifecycle.
+setup_sentry()
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
