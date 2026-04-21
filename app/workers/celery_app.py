@@ -32,4 +32,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.tasks.reconcile_tasks.reconcile_pending_payments",
         "schedule": crontab(minute="*/2"),
     },
+    "reconcile-pending-bills-every-2min": {
+        "task": "app.workers.tasks.reconcile_tasks.reconcile_pending_bills",
+        "schedule": crontab(minute="*/2"),
+    },
 }

@@ -4,6 +4,12 @@ Runs every 2 minutes via Celery beat. Catches transactions where the
 webhook didn't arrive (network blip, Paystack outage). Races safely
 against the webhook handler: before mutating a Payment row, both paths
 re-fetch with SELECT FOR UPDATE and no-op if status is no longer pending.
+
+Sprint 3 B12: a companion `reconcile_pending_bills` task uses VTPass
+requery() to finalize bill txs where the vtpass webhook went missing.
+Same 2-minute cadence, same S2C-8 domain-exception taxonomy (defer on
+KycCapExceeded / InsufficientBalance, log-and-continue on transient
+provider errors, refund on permanent failure via apply_provider_result).
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -14,6 +20,12 @@ from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
 from app.db.session import SessionLocal
 from app.integrations.paystack.factory import select_paystack_client
+from app.integrations.vtpass.base import (
+    ProviderPermanentFailure,
+    ProviderTemporaryFailure,
+)
+from app.integrations.vtpass.factory import select_vtpass_client
+from app.services.bill_service import BillService
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import (
     InsufficientBalance,
@@ -21,6 +33,17 @@ from app.services.wallet_service import (
     WalletService,
 )
 from app.workers.celery_app import celery_app
+
+
+# Tx states that are already final — the webhook handler beat us to it,
+# or ops manually resolved. Skip them rather than InvalidStateTransition.
+_TX_FINAL_STATES = {
+    TransactionStatus.success,
+    TransactionStatus.failed,
+    TransactionStatus.refund_pending,
+    TransactionStatus.refunded,
+    TransactionStatus.refund_failed,
+}
 
 
 # Keep in sync with the same-named set in webhooks.py. Only outbound tx
@@ -138,3 +161,118 @@ def _claim_payment(db, payment_id, target_status: PaymentStatus) -> bool:
         return False
     locked.status = target_status
     return True
+
+
+# ─── Bill reconciliation (Sprint 3 B12) ──────────────────────────────────
+
+# All bill types BillService produces. Kept aligned with
+# _REFUNDABLE_ON_FAILURE above — if a type isn't in this set, we don't
+# touch it here (e.g. wallet_funding has its own Paystack-driven path).
+_BILL_TX_TYPES = (
+    TransactionType.airtime,
+    TransactionType.data,
+    TransactionType.electricity,
+    TransactionType.cable,
+    TransactionType.flight,
+)
+
+
+@celery_app.task(name="app.workers.tasks.reconcile_tasks.reconcile_pending_bills")
+def reconcile_pending_bills() -> dict:
+    """Query bill txs in pending/processing >30s, requery VTPass, apply."""
+    return asyncio.run(_reconcile_bills())
+
+
+async def _reconcile_bills() -> dict:
+    db = SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=30)
+        pending_bills = (
+            db.query(Transaction)
+            .filter(
+                Transaction.type.in_(_BILL_TX_TYPES),
+                Transaction.status.in_([
+                    TransactionStatus.pending, TransactionStatus.processing,
+                ]),
+                Transaction.created_at < cutoff,
+            )
+            .limit(50)
+            .all()
+        )
+        if not pending_bills:
+            return {"checked": 0, "settled": 0, "deferred": 0, "skipped": 0}
+
+        provider = select_vtpass_client()
+        tx_svc = TransactionService(db=db)
+        wallet_svc = WalletService(db=db)
+        bill_svc = BillService(
+            db=db, tx_svc=tx_svc, wallet_svc=wallet_svc, provider=provider,
+        )
+
+        settled = 0
+        deferred = 0
+        skipped = 0
+
+        for tx in pending_bills:
+            # 1. Ask VTPass what happened to this request_id.
+            try:
+                result = await provider.requery(request_id=tx.reference)
+            except ProviderTemporaryFailure as exc:
+                # Network / 5xx / timeout — retry on the next tick.
+                log.warning(
+                    "reconcile_bills: transient for %s: %s", tx.reference, exc,
+                )
+                continue
+            except ProviderPermanentFailure as exc:
+                # VTPass rejected the requery itself (4xx). We don't know the
+                # actual bill outcome; flag for ops, don't auto-refund.
+                log.warning(
+                    "reconcile_bills: permanent requery error for %s: %s",
+                    tx.reference, exc,
+                )
+                continue
+            except Exception as exc:
+                # Never let a single bad row kill the batch.
+                log.warning(
+                    "reconcile_bills: unexpected error for %s: %s",
+                    tx.reference, exc,
+                )
+                continue
+
+            # 2. Lock the tx row. If the vtpass webhook already landed,
+            #    the tx will be in a terminal state here — skip.
+            locked = (
+                db.query(Transaction)
+                .filter(Transaction.id == tx.id)
+                .with_for_update()
+                .one()
+            )
+            if locked.status in _TX_FINAL_STATES:
+                skipped += 1
+                continue
+
+            # 3. Apply via the shared BillService path. Domain exceptions
+            #    (S2C-8 taxonomy): defer rather than leave partial state.
+            try:
+                bill_svc.apply_provider_result(
+                    tx=locked, amount=locked.amount, result=result,
+                )
+                settled += 1
+            except (KycCapExceeded, InsufficientBalance) as exc:
+                db.rollback()
+                deferred += 1
+                log.warning(
+                    "reconcile_bills: DEFERRED — ref=%s user=%s err=%s",
+                    locked.reference, locked.user_id, exc,
+                )
+                continue
+
+        db.commit()
+        return {
+            "checked":  len(pending_bills),
+            "settled":  settled,
+            "deferred": deferred,
+            "skipped":  skipped,
+        }
+    finally:
+        db.close()
