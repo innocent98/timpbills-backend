@@ -11,6 +11,7 @@
 import json
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_paystack_provider, get_wallet_service
@@ -79,15 +80,12 @@ async def paystack_webhook(
             "code": "MALFORMED_WEBHOOK", "message": "Missing data.id or data.reference"
         })
 
-    # Dedupe
-    existing = (
-        db.query(WebhookEvent)
-        .filter(WebhookEvent.provider_event_id == event_id)
-        .first()
-    )
-    if existing:
-        return success({"ok": True, "deduped": True})
-
+    # Dedupe atomically — attempt the insert and let the unique constraint on
+    # provider_event_id be the arbiter. Two concurrent retries of the same
+    # event both reach here; the DB serialises them and the loser rolls back
+    # and returns deduped. This replaces an earlier query-then-insert pattern
+    # that had a race window where both requests could pass the existence
+    # check before either committed.
     we = WebhookEvent(
         provider="paystack",
         provider_event_id=event_id,
@@ -96,7 +94,11 @@ async def paystack_webhook(
         processed=False,
     )
     db.add(we)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        return success({"ok": True, "deduped": True})
 
     # Lookup payment → transaction
     payment = (
