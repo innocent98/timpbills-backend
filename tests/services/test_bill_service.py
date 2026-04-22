@@ -294,3 +294,61 @@ async def test_list_data_plans_passthrough(db_session):
     plans = await svc.list_data_plans(network="MTN")
     assert plans.service_id == "mtn-data"
     assert any(v.variation_code == "mtn-1gb-monthly" for v in plans.variations)
+
+
+# ── S3C-P2: concurrent-finalizer race on the sync path ────────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_path_skips_apply_when_tx_already_finalized(db_session):
+    """If the VTPass webhook or reconcile worker finalizes the tx while
+    the sync purchase call is still awaiting the provider, the sync
+    path MUST NOT re-apply state (it would double-refund via
+    _refund_and_credit, and/or raise InvalidStateTransition at transition).
+
+    The simulated race: provider_fn flips the tx to `failed` before
+    returning — mimicking a concurrent vtpass webhook landing the
+    failed status mid-request. Sync path sees the row-lock terminal
+    status and bails without re-applying.
+    """
+    user = _seed_user(db_session)
+
+    class RacingFake(FakeVTPassClient):
+        def __init__(self, db):
+            super().__init__()
+            self._db = db
+
+        async def purchase_airtime(self, **kw):  # type: ignore[override]
+            # Mid-provider-call: pretend the vtpass webhook just landed
+            # and flipped the tx to failed (via reconcile, whichever).
+            ref = kw["request_id"]
+            tx = self._db.query(Transaction).filter(
+                Transaction.reference == ref,
+            ).one()
+            tx.status = TransactionStatus.failed
+            self._db.commit()
+            # Provider still returns a delivered response — a real
+            # VTPass would. The sync path now has a stale view.
+            return await super().purchase_airtime(**kw)
+
+    fake = RacingFake(db_session)
+    svc = _bill_service(db_session, fake=fake)
+
+    result = await svc.purchase_airtime(
+        user_id=user.id, network="MTN", phone="08012345678",
+        amount_ngn=Decimal("500.00"),
+    )
+
+    # The sync path honored the concurrent finalizer.
+    assert result.tx.status == TransactionStatus.failed
+
+    # NO refund tx was minted by the sync path (the webhook path owns that).
+    db_session.expire_all()
+    refunds = db_session.query(Transaction).filter(
+        Transaction.user_id == user.id,
+        Transaction.type == TransactionType.refund,
+    ).count()
+    assert refunds == 0
+
+    # And the wallet wasn't credited back by the sync path.
+    assert _wallet_balance(db_session, user.id) == Decimal("4500.00")

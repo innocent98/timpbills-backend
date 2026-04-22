@@ -72,6 +72,20 @@ class DataPlanNotFound(Exception):
     """Client asked for a variation_code that VTPass doesn't know."""
 
 
+# Tx states that are already final — hitting any state-changing path
+# with the tx in one of these would raise InvalidStateTransition. Kept
+# here (not imported from webhooks.py) so BillService can row-lock +
+# skip before calling transition()/create_refund(). Kept in lock-step
+# with webhooks.vtpass_webhook and reconcile_tasks._reconcile_bills.
+_TX_FINAL_STATES = {
+    TransactionStatus.success,
+    TransactionStatus.failed,
+    TransactionStatus.refund_pending,
+    TransactionStatus.refunded,
+    TransactionStatus.refund_failed,
+}
+
+
 # ── Service ──────────────────────────────────────────────────────────────
 
 
@@ -207,6 +221,8 @@ class BillService:
         )
 
         # 4. Call the provider.
+        permanent_err: ProviderPermanentFailure | None = None
+        result: BillPurchaseResponse | None = None
         try:
             result = await provider_fn(tx.reference)
         except ProviderTemporaryFailure as exc:
@@ -225,29 +241,65 @@ class BillService:
             )
         except ProviderPermanentFailure as exc:
             # 4xx / bad request / unknown variation — provider will never
-            # deliver. Mark failed, then refund + credit back to wallet.
+            # deliver. We'll transition + refund after the row-lock step
+            # below so a concurrent webhook doesn't trip InvalidStateTransition.
             log.warning(
                 "bill provider permanent failure tx=%s err=%s",
                 tx.reference, exc,
             )
+            permanent_err = exc
+
+        # 5. Re-fetch the tx with a row-lock. While we were awaiting the
+        #    provider, the VTPass webhook or reconcile worker may have
+        #    finalized this tx — applying state changes blind would race
+        #    with them and either double-refund or raise InvalidStateTransition.
+        #    Guard: if the tx is already terminal, the concurrent finalizer
+        #    owns the outcome; we return their state. This is S3C-P2.
+        locked_tx = (
+            self._db.query(Transaction)
+            .filter(Transaction.id == tx.id)
+            .with_for_update()
+            .one()
+        )
+        if locked_tx.status in _TX_FINAL_STATES:
+            log.info(
+                "bill sync: tx %s finalized concurrently (status=%s); "
+                "skipping apply",
+                locked_tx.reference, locked_tx.status.value,
+            )
+            placeholder = (
+                result
+                if result is not None
+                else _placeholder_failed(
+                    locked_tx.reference, amount,
+                    description=str(permanent_err or "concurrent finalization"),
+                )
+            )
+            return BillResult(tx=locked_tx, response=placeholder)
+
+        # 6. Apply. Permanent failure has its own path (refund + transition);
+        #    everything else goes through apply_provider_result.
+        if permanent_err is not None:
             self._tx.transition(
-                tx, to_status=TransactionStatus.failed,
-                reason=f"provider_permanent_failure: {exc}",
+                locked_tx, to_status=TransactionStatus.failed,
+                reason=f"provider_permanent_failure: {permanent_err}",
             )
             self._refund_and_credit(
-                tx, amount=amount,
-                reason=f"provider_permanent_failure: {exc}",
+                locked_tx, amount=amount,
+                reason=f"provider_permanent_failure: {permanent_err}",
             )
             _notify_bill_failure_refund(
-                db=self._db, tx=tx, amount=amount, reason=str(exc),
+                db=self._db, tx=locked_tx, amount=amount, reason=str(permanent_err),
             )
             return BillResult(
-                tx=tx,
-                response=_placeholder_failed(tx.reference, amount, description=str(exc)),
+                tx=locked_tx,
+                response=_placeholder_failed(
+                    locked_tx.reference, amount, description=str(permanent_err),
+                ),
             )
 
-        # 5. Translate the normalized response into state changes.
-        return self.apply_provider_result(tx=tx, amount=amount, result=result)
+        assert result is not None  # narrowed by the except branches above
+        return self.apply_provider_result(tx=locked_tx, amount=amount, result=result)
 
     def apply_provider_result(
         self, *, tx: Transaction, amount: Decimal, result: BillPurchaseResponse
