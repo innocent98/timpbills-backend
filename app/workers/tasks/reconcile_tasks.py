@@ -14,6 +14,8 @@ provider errors, refund on permanent failure via apply_provider_result).
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+import httpx
+
 from app.core.logger import log
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
@@ -92,10 +94,16 @@ async def _reconcile() -> dict:
         for payment, tx in pending:
             try:
                 v = await client.verify(reference=payment.provider_reference)
-            except Exception as exc:
-                # Provider / network error — retry on the next tick.
+            except (httpx.HTTPError, TimeoutError, asyncio.TimeoutError) as exc:
+                # Transient network issues — retry on the next tick.
+                # (S3C-H2) Previously this was bare `except Exception`,
+                # which swallowed programming errors (AttributeError
+                # from a bad Paystack SDK upgrade, KeyError from a
+                # response-shape change, 401 from a rotated key) as if
+                # they were transient blips. Those deserve to propagate
+                # so Sentry + Celery surface them.
                 log.warning(
-                    "reconcile: verify failed for %s: %s",
+                    "reconcile: verify transient failure for %s: %s",
                     payment.provider_reference, exc,
                 )
                 continue
