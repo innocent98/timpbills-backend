@@ -73,6 +73,7 @@ async def fund_wallet(
     user: User = Depends(get_current_user),
     pin_token: str = Depends(require_pin_token),
     tx_svc: TransactionService = Depends(get_transaction_service),
+    wallet_svc: WalletService = Depends(get_wallet_service),
     idem: IdempotencyService = Depends(get_idempotency_service),
     paystack: PaymentProvider = Depends(get_paystack_provider),
 ):
@@ -93,6 +94,34 @@ async def fund_wallet(
         )
     if cached is not None:
         return cached[1]
+
+    # Pre-flight KYC gate (S3C-P4b). Refuse the fund request before we
+    # call Paystack if the credit would eventually overshoot the user's
+    # balance cap. Without this, an over-cap amount would: call Paystack
+    # → user pays → charge.success webhook tries to credit →
+    # WalletService.credit raises KycCapExceeded → 422 + Paystack retries
+    # until ops raises the tier — meanwhile the user's money sits at
+    # Paystack's merchant balance. Short-circuiting here gives the mobile
+    # client a clear error + a `remaining_headroom` to drive an "Upgrade
+    # KYC" CTA.
+    wallet_row = wallet_svc.get_or_create(user_id=user.id)
+    projected = wallet_row.balance + body.amount
+    if projected > wallet_row.balance_cap:
+        remaining = max(wallet_row.balance_cap - wallet_row.balance, Decimal("0"))
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "KYC_LIMIT_EXCEEDED",
+                "message": (
+                    "This amount would push your wallet past your tier cap. "
+                    "Fund a smaller amount or upgrade your KYC tier."
+                ),
+                "details": {
+                    "remaining_headroom": str(remaining),
+                    "balance_cap":        str(wallet_row.balance_cap),
+                },
+            },
+        )
 
     fee = _calculate_fee(body.amount)
     tx = tx_svc.create(

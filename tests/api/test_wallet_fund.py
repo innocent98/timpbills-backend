@@ -146,3 +146,88 @@ async def test_fund_wallet_key_reuse_with_different_body_conflicts(client):
     r2 = await client.post("/api/v1/wallet/fund", json={"amount": "2000.00"}, headers=hdrs)
     assert r2.status_code == 409
     assert r2.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_fund_wallet_over_kyc_cap_returns_422_preflight(client, db_session):
+    """S3C-P4b — server-side pre-flight KYC gate. An amount that would
+    push balance past the tier cap is rejected BEFORE Paystack is
+    called. Response body carries `remaining_headroom` so the client
+    can show an "Upgrade KYC" CTA. Without this, the user would be
+    sent through Paystack checkout only for the charge.success webhook
+    to fail on credit — their money held at Paystack meanwhile."""
+    from decimal import Decimal
+    from app.db.models.user import User
+    from app.db.models.wallet import Wallet
+
+    _, headers = await _seed_logged_in_user(client)
+    pin_token = await _pin_token(client, headers)
+
+    # Seed near-cap balance to simulate tier-0 user (₦50k cap) with ₦46k in.
+    user_row = db_session.query(User).filter(User.email == "e@e.co").one()
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == user_row.id).first()
+    if wallet is None:
+        wallet = Wallet(
+            user_id=user_row.id,
+            balance=Decimal("46000.00"),
+            balance_cap=Decimal("50000.00"),
+        )
+        db_session.add(wallet)
+    else:
+        wallet.balance = Decimal("46000.00")
+        wallet.balance_cap = Decimal("50000.00")
+    db_session.commit()
+
+    # Ask to fund ₦5000 — cap is ₦50000, current is ₦46000, headroom is ₦4000.
+    r = await client.post(
+        "/api/v1/wallet/fund",
+        json={"amount": "5000.00"},
+        headers={
+            **headers,
+            "X-Pin-Token": pin_token,
+            "Idempotency-Key": str(uuid4()),
+        },
+    )
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert err["code"] == "KYC_LIMIT_EXCEEDED"
+    assert err["details"]["remaining_headroom"] == "4000.00"
+    assert err["details"]["balance_cap"] == "50000.00"
+
+
+@pytest.mark.asyncio
+async def test_fund_wallet_exactly_at_cap_edge_is_accepted(client, db_session):
+    """Complement to the 422 test — exactly hitting the cap
+    (projected == cap) is accepted. Pre-flight uses `>` not `>=`."""
+    from decimal import Decimal
+    from app.db.models.user import User
+    from app.db.models.wallet import Wallet
+
+    _, headers = await _seed_logged_in_user(client)
+    pin_token = await _pin_token(client, headers)
+
+    user_row = db_session.query(User).filter(User.email == "e@e.co").one()
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == user_row.id).first()
+    if wallet is None:
+        wallet = Wallet(
+            user_id=user_row.id,
+            balance=Decimal("46000.00"),
+            balance_cap=Decimal("50000.00"),
+        )
+        db_session.add(wallet)
+    else:
+        wallet.balance = Decimal("46000.00")
+        wallet.balance_cap = Decimal("50000.00")
+    db_session.commit()
+
+    # Exactly ₦4000 = ₦50000 − ₦46000 → lands right at cap.
+    r = await client.post(
+        "/api/v1/wallet/fund",
+        json={"amount": "4000.00"},
+        headers={
+            **headers,
+            "X-Pin-Token": pin_token,
+            "Idempotency-Key": str(uuid4()),
+        },
+    )
+    assert r.status_code == 200, r.text

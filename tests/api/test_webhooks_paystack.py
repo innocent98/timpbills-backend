@@ -188,9 +188,20 @@ async def test_charge_success_over_kyc_cap_does_not_commit_partial_state(
     pre-webhook value, and no refund row is introduced. The webhook returning
     5xx is acceptable here — S2C-8 will upgrade this to a dead-letter with a
     distinct error code so Paystack stops retrying.
-    """
-    from decimal import Decimal
 
+    Note: since S3C-P4b added a pre-flight KYC gate to POST /wallet/fund,
+    the funding-init path can't normally reach the webhook with an over-cap
+    amount. This test seeds the tx + payment directly to exercise the
+    webhook's DEFENSIVE second-line-of-defense catch — important because
+    (a) old mobile clients may pre-date the pre-flight gate, (b) admin
+    tooling may create txs directly, and (c) ops can lower a user's tier
+    between pre-flight and the webhook landing."""
+    from decimal import Decimal
+    from uuid import uuid4 as _uuid
+
+    from app.db.models._enums import TransactionStatus, TransactionType
+    from app.db.models.payment import Payment, PaymentStatus
+    from app.db.models.transaction import Transaction
     from app.db.models.user import User
     from app.db.models.wallet import Wallet
 
@@ -212,7 +223,21 @@ async def test_charge_success_over_kyc_cap_does_not_commit_partial_state(
         existing_wallet.balance = Decimal("46000.00")
     db_session.commit()
 
-    ref = await _init_funding(client, headers, amount="5000.00")
+    # Seed the tx + payment directly, bypassing the pre-flight gate.
+    ref = f"TMP-fund-{_uuid().hex[:8]}"
+    tx = Transaction(
+        user_id=user_row.id, reference=ref,
+        type=TransactionType.wallet_funding, status=TransactionStatus.processing,
+        amount=Decimal("5000.00"), fee=Decimal("0.00"), currency="NGN",
+    )
+    db_session.add(tx)
+    db_session.flush()
+    db_session.add(Payment(
+        transaction_id=tx.id, provider="paystack",
+        provider_reference=ref, status=PaymentStatus.pending,
+    ))
+    db_session.commit()
+
     from app.api.deps import _fake_paystack_singleton as fps
     fps.will_succeed(ref)
 
