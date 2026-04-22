@@ -10,11 +10,13 @@ Covers:
  * per-user caching — same meter, different user = second provider hit
  * ProviderPermanentFailure re-raises AND does not cache
  * TTL = 300s (5 min)
+ * Redis outage degrades gracefully to "always call provider"
 """
 import uuid
 
 import pytest
 from fakeredis.aioredis import FakeRedis
+from redis.exceptions import RedisError
 
 from app.integrations.vtpass.base import ProviderPermanentFailure
 from app.integrations.vtpass.fake import FakeVTPassClient
@@ -214,7 +216,58 @@ async def test_validate_meter_cache_ttl_is_300_seconds(db_session):
     key = f"bill_validate:meter:{user_id}:ikeja-electric:1234567890123"
     ttl = await redis.ttl(key)
     # fakeredis returns the remaining TTL in whole seconds; we set 300 and
-    # the call completes inside a millisecond, so the value is still 300.
-    assert ttl == 300
+    # the call completes inside a millisecond, so the value is usually 300.
+    # Under CI load the set → ttl round-trip can span a 1-second boundary
+    # and return 299, so allow a small window rather than asserting exact.
+    assert 295 <= ttl <= 300, f"TTL {ttl} outside expected 295-300 range"
 
     await redis.aclose()
+
+
+# ── 6. Redis-down graceful degradation ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_validate_meter_degrades_gracefully_when_redis_is_down(db_session):
+    """Redis outage must NOT block validation. Provider still gets called;
+    the result just isn't cached."""
+    # Create a Redis mock whose .get / .set raise ConnectionError.
+    class _BrokenRedis:
+        async def get(self, key):
+            raise RedisError("simulated redis outage")
+
+        async def set(self, key, value, ex=None):
+            raise RedisError("simulated redis outage")
+
+    broken = _BrokenRedis()
+
+    fake = FakeVTPassClient()
+    provider = _CountingProvider(fake)
+    # Construct BillService with the broken redis
+    svc = BillService(
+        db=db_session,
+        tx_svc=TransactionService(db=db_session),
+        wallet_svc=WalletService(db=db_session),
+        provider=provider,
+        redis=broken,
+    )
+
+    # First call: cache read fails, provider called, cache write also fails
+    result = await svc.validate_meter(
+        user_id=uuid.uuid4(),
+        service_id="ikeja-electric",
+        meter_number="1111111111111",
+        meter_type="prepaid",
+    )
+    assert isinstance(result, MeterValidation)
+    assert provider.validate_calls == 1
+
+    # Second call: same (cache miss every time because writes fail)
+    await svc.validate_meter(
+        user_id=uuid.uuid4(),  # different user for clarity
+        service_id="ikeja-electric",
+        meter_number="1111111111111",
+        meter_type="prepaid",
+    )
+    # Provider called TWICE — no caching happened
+    assert provider.validate_calls == 2

@@ -32,6 +32,7 @@ from typing import Awaitable, Callable
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy.orm import Session
 
 from app.core.logger import log
@@ -230,8 +231,17 @@ class BillService:
         key = f"bill_validate:meter:{user_id}:{service_id}:{meter_number}"
 
         # 1. Cache lookup — fast-path the common "user submits then edits
-        #    one character" pattern.
-        cached = await self._redis.get(key)
+        #    one character" pattern. Redis outages must NOT block validation
+        #    (no money at stake here); degrade to "call VTPass every time".
+        try:
+            cached = await self._redis.get(key)
+        except RedisError as exc:
+            log.warning(
+                "validate_meter: cache read failed, falling through to provider: %s",
+                exc,
+            )
+            cached = None
+
         if cached is not None:
             return MeterValidation.model_validate_json(cached)
 
@@ -249,8 +259,16 @@ class BillService:
         )
 
         # 3. Success → cache for 5 minutes. pydantic's JSON round-trip
-        #    handles Decimal + enum serialization for us.
-        await self._redis.set(key, validation.model_dump_json(), ex=300)
+        #    handles Decimal + enum serialization for us. Cache write
+        #    failure is non-fatal — we've already produced the result,
+        #    so just log and return.
+        try:
+            await self._redis.set(key, validation.model_dump_json(), ex=300)
+        except RedisError as exc:
+            log.warning(
+                "validate_meter: cache write failed, continuing without caching: %s",
+                exc,
+            )
         return validation
 
     # ── Orchestration internals ─────────────────────────────────────────
