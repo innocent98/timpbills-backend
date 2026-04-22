@@ -350,3 +350,373 @@ async def test_list_cable_plans_invalid_mode_raises_value_error(db_session):
         await svc.list_cable_plans(service_id="dstv", mode="invalid")
 
     await redis.aclose()
+
+
+# ── B8: BillService.purchase_cable (renew + change) ──────────────────────
+#
+# Routes through the shared `_execute_bill` machinery with
+# TransactionType.cable. Two modes:
+#   * "renew" — reads current_plan_code + renewal_amount_ngn from the
+#     SmartcardValidation cache (seeded in each test via validate_smartcard
+#     or direct Redis write). Wire serviceID stays at the base slug.
+#   * "change" — caller supplies variation_code; price is server-resolved
+#     from the catalog (spoof prevention). Wire serviceID is
+#     "{service_id}-change".
+#
+# Tests below use a _CableCountingProvider that captures the last-seen
+# wire service_id + variation_code on purchase_cable, so we can assert the
+# "-change" suffix forwarding without poking at VTPass wire internals.
+
+from app.db.models._enums import TransactionStatus, TransactionType
+from app.db.models.user import User
+from app.db.models.wallet import Wallet
+from app.services.bill_service import (
+    CablePlanNotFound,
+    CableRenewalUnavailable,
+)
+
+
+class _CableCountingProvider:
+    """Counting proxy for the B8 purchase_cable tests.
+
+    Forwards validate_smartcard / list_cable_plans / purchase_cable to the
+    underlying FakeVTPassClient while capturing the last-seen call args
+    on purchase_cable. Forwards everything else via ``__getattr__`` so the
+    BillProvider Protocol is still structurally satisfied if another path
+    is accidentally exercised."""
+
+    def __init__(self, inner: FakeVTPassClient) -> None:
+        self._inner = inner
+        self.purchase_calls: int = 0
+        self.last_purchase_kwargs: dict | None = None
+
+    async def purchase_cable(self, **kw):
+        self.purchase_calls += 1
+        self.last_purchase_kwargs = dict(kw)
+        # Strip the "-change" suffix before forwarding so the FakeVTPassClient's
+        # seeded bouquet catalog (keyed on base slugs like "dstv") resolves
+        # the variation. The suffix is purely a wire-level serviceID; our
+        # assertions inspect ``last_purchase_kwargs`` to verify BillService
+        # forwarded the suffixed form correctly. The real VTPass sandbox
+        # accepts both "dstv" and "dstv-change" on the purchase endpoint —
+        # the fake hasn't split its catalog, so we normalize here.
+        forward = dict(kw)
+        if forward["service_id"].endswith("-change"):
+            forward["service_id"] = forward["service_id"][: -len("-change")]
+        return await self._inner.purchase_cable(**forward)
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+
+def _seed_cable_user(db, *, balance: Decimal = Decimal("60000.00")) -> User:
+    user = User(
+        id=uuid.uuid4(),
+        email=f"cable-{uuid.uuid4().hex[:6]}@t.co",
+        phone=f"+234{uuid.uuid4().int % 10**10:010d}",
+        full_name="Cable Test",
+        password_hash="x",
+        is_active=True,
+    )
+    db.add(user)
+    db.flush()
+    db.add(Wallet(
+        id=uuid.uuid4(), user_id=user.id,
+        balance=balance, balance_cap=Decimal("100000.00"),
+    ))
+    db.commit()
+    return user
+
+
+def _wallet_balance_of(db, user_id) -> Decimal:
+    db.expire_all()
+    return db.query(Wallet).filter(Wallet.user_id == user_id).one().balance
+
+
+async def _seed_smartcard_cache(
+    redis,
+    *,
+    user_id,
+    service_id: str,
+    smartcard_number: str,
+    current_plan_code: str,
+    current_plan_name: str,
+    renewal_amount_ngn: Decimal,
+    status: str = "active",
+    customer_name: str = "FAKE SUBSCRIBER CACHED",
+) -> None:
+    """Pre-populate the SmartcardValidation cache under the exact key that
+    validate_smartcard (B6) writes to. Keeps the B8 renew tests free of
+    dependence on the B6 method's side effects — one feature per test."""
+    key = (
+        f"bill_validate:smartcard:{user_id}:{service_id}:{smartcard_number}"
+    )
+    value = SmartcardValidation(
+        service_id=service_id,
+        smartcard_number=smartcard_number,
+        customer_name=customer_name,
+        current_plan_name=current_plan_name,
+        current_plan_code=current_plan_code,
+        status=status,
+        renewal_amount_ngn=renewal_amount_ngn,
+    )
+    await redis.set(key, value.model_dump_json(), ex=300)
+
+
+# ── B8-1: renew happy path ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_renew_happy_path(db_session):
+    """Cached SmartcardValidation drives the renewal: current_plan_code +
+    renewal_amount_ngn are pulled from Redis, price is NOT the client's
+    to choose, and the wire serviceID stays at the base slug ("dstv")
+    rather than "-change"."""
+    user = _seed_cable_user(db_session)
+    redis = FakeRedis(decode_responses=True)
+    provider = _CableCountingProvider(FakeVTPassClient())
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    await _seed_smartcard_cache(
+        redis,
+        user_id=user.id,
+        service_id="dstv",
+        smartcard_number="1234567890",
+        current_plan_code="dstv-compact",
+        current_plan_name="DStv Compact",
+        renewal_amount_ngn=Decimal("15500.00"),
+    )
+
+    result = await svc.purchase_cable(
+        user_id=user.id,
+        service_id="dstv",
+        smartcard_number="1234567890",
+        mode="renew",
+    )
+
+    assert result.tx.status == TransactionStatus.success
+    assert result.tx.type == TransactionType.cable
+    assert result.tx.amount == Decimal("15500.00")
+    # Meta fields: base service_id (not -change), mode, plan_code/plan_name.
+    meta = result.tx.meta
+    assert meta["service_id"]       == "dstv"
+    assert meta["smartcard_number"] == "1234567890"
+    assert meta["mode"]             == "renew"
+    assert meta["plan_code"]        == "dstv-compact"
+    assert meta["plan_name"]        == "DStv Compact"
+
+    # Wallet debited by the renewal amount.
+    assert _wallet_balance_of(db_session, user.id) == Decimal("44500.00")
+
+    # Wire assertions: provider called with base service_id (NOT -change)
+    # and the cached variation_code.
+    assert provider.purchase_calls == 1
+    assert provider.last_purchase_kwargs is not None
+    assert provider.last_purchase_kwargs["service_id"]     == "dstv"
+    assert provider.last_purchase_kwargs["variation_code"] == "dstv-compact"
+    assert provider.last_purchase_kwargs["smartcard_number"] == "1234567890"
+    assert provider.last_purchase_kwargs["amount_ngn"]     == Decimal("15500.00")
+
+    await redis.aclose()
+
+
+# ── B8-2: renew with empty cache → CableRenewalUnavailable ───────────────
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_renew_cache_empty_raises(db_session):
+    """No SmartcardValidation cached (user never validated, or the 5-min
+    TTL expired) → CableRenewalUnavailable with the "Validate first"
+    hint. We refuse to guess a renewal price."""
+    user = _seed_cable_user(db_session)
+    redis = FakeRedis(decode_responses=True)
+    provider = _CableCountingProvider(FakeVTPassClient())
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    with pytest.raises(CableRenewalUnavailable, match="Validate smartcard first"):
+        await svc.purchase_cable(
+            user_id=user.id,
+            service_id="dstv",
+            smartcard_number="1234567890",
+            mode="renew",
+        )
+
+    # Provider was NOT reached — we bailed before touching the wallet.
+    assert provider.purchase_calls == 0
+    # Wallet untouched.
+    assert _wallet_balance_of(db_session, user.id) == Decimal("60000.00")
+
+    await redis.aclose()
+
+
+# ── B8-3: renew but cached plan is empty (inactive card) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_renew_inactive_card_raises(db_session):
+    """Cached validation shows an inactive/fresh smartcard (empty
+    current_plan_code) → CableRenewalUnavailable with the "no active plan"
+    hint. Distinguishing this from cache-miss helps the UI write a more
+    helpful error ("upgrade first" vs "validate first")."""
+    user = _seed_cable_user(db_session)
+    redis = FakeRedis(decode_responses=True)
+    provider = _CableCountingProvider(FakeVTPassClient())
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    await _seed_smartcard_cache(
+        redis,
+        user_id=user.id,
+        service_id="dstv",
+        smartcard_number="1234567890",
+        current_plan_code="",        # fresh / inactive
+        current_plan_name="",
+        renewal_amount_ngn=Decimal("0.00"),
+        status="inactive",
+    )
+
+    with pytest.raises(CableRenewalUnavailable, match="no active plan"):
+        await svc.purchase_cable(
+            user_id=user.id,
+            service_id="dstv",
+            smartcard_number="1234567890",
+            mode="renew",
+        )
+
+    assert provider.purchase_calls == 0
+    assert _wallet_balance_of(db_session, user.id) == Decimal("60000.00")
+
+    await redis.aclose()
+
+
+# ── B8-4: change happy path ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_change_happy_path(db_session):
+    """Change mode: client picks a variation, price is server-resolved
+    from the catalog (NOT trusted from the client), wire serviceID is
+    "dstv-change"."""
+    user = _seed_cable_user(db_session)
+    redis = FakeRedis(decode_responses=True)
+    provider = _CableCountingProvider(FakeVTPassClient())
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    result = await svc.purchase_cable(
+        user_id=user.id,
+        service_id="dstv",
+        smartcard_number="1234567890",
+        mode="change",
+        variation_code="dstv-premium",
+    )
+
+    # Fake's seeded dstv-premium price is ₦44500.
+    assert result.tx.status == TransactionStatus.success
+    assert result.tx.type == TransactionType.cable
+    assert result.tx.amount == Decimal("44500.00")
+
+    meta = result.tx.meta
+    assert meta["service_id"]       == "dstv"   # base slug in meta
+    assert meta["smartcard_number"] == "1234567890"
+    assert meta["mode"]             == "change"
+    assert meta["plan_code"]        == "dstv-premium"
+    assert meta["plan_name"]        == "Premium"
+
+    # Wallet debited by the catalog price.
+    assert _wallet_balance_of(db_session, user.id) == Decimal("15500.00")
+
+    # Wire: serviceID MUST be "dstv-change" on the provider call.
+    assert provider.purchase_calls == 1
+    assert provider.last_purchase_kwargs is not None
+    assert provider.last_purchase_kwargs["service_id"]     == "dstv-change"
+    assert provider.last_purchase_kwargs["variation_code"] == "dstv-premium"
+    assert provider.last_purchase_kwargs["amount_ngn"]     == Decimal("44500.00")
+
+    await redis.aclose()
+
+
+# ── B8-5: change with unknown variation_code → CablePlanNotFound ─────────
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_change_unknown_variation_raises(db_session):
+    """Catalog lookup misses → CablePlanNotFound BEFORE any wallet debit.
+    Mirrors DataPlanNotFound behavior on the purchase_data path."""
+    user = _seed_cable_user(db_session)
+    redis = FakeRedis(decode_responses=True)
+    provider = _CableCountingProvider(FakeVTPassClient())
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    with pytest.raises(CablePlanNotFound):
+        await svc.purchase_cable(
+            user_id=user.id,
+            service_id="dstv",
+            smartcard_number="1234567890",
+            mode="change",
+            variation_code="dstv-does-not-exist",
+        )
+
+    # Provider's purchase_cable was NOT called (catalog lookup went through
+    # list_cable_plans, but not purchase_cable).
+    assert provider.purchase_calls == 0
+    # Wallet untouched — failure was pre-debit.
+    assert _wallet_balance_of(db_session, user.id) == Decimal("60000.00")
+
+    await redis.aclose()
+
+
+# ── B8-6: change without variation_code → ValueError ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_change_missing_variation_raises_value_error(
+    db_session,
+):
+    """mode="change" but caller omitted variation_code → ValueError. This
+    is a programmer error at the endpoint layer (the route handler should
+    reject it earlier); surfacing as ValueError rather than silently
+    falling back to renew keeps the behavior obvious."""
+    user = _seed_cable_user(db_session)
+    redis = FakeRedis(decode_responses=True)
+    provider = _CableCountingProvider(FakeVTPassClient())
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    with pytest.raises(ValueError, match="variation_code required"):
+        await svc.purchase_cable(
+            user_id=user.id,
+            service_id="dstv",
+            smartcard_number="1234567890",
+            mode="change",
+            variation_code=None,
+        )
+
+    assert provider.purchase_calls == 0
+    assert _wallet_balance_of(db_session, user.id) == Decimal("60000.00")
+
+    await redis.aclose()
+
+
+# ── B8-7: invalid mode → ValueError ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_invalid_mode_raises_value_error(db_session):
+    """Mode validation runs FIRST (before any cache/catalog lookup) so a
+    typo fails fast with a clear message rather than surfacing as "cache
+    empty" or "plan not found"."""
+    user = _seed_cable_user(db_session)
+    redis = FakeRedis(decode_responses=True)
+    provider = _CableCountingProvider(FakeVTPassClient())
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    with pytest.raises(ValueError, match="mode must be"):
+        await svc.purchase_cable(
+            user_id=user.id,
+            service_id="dstv",
+            smartcard_number="1234567890",
+            mode="upgrade",   # not a real mode
+        )
+
+    assert provider.purchase_calls == 0
+    assert _wallet_balance_of(db_session, user.id) == Decimal("60000.00")
+
+    await redis.aclose()

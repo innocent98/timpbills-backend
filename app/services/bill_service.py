@@ -78,6 +78,16 @@ class DataPlanNotFound(Exception):
     """Client asked for a variation_code that VTPass doesn't know."""
 
 
+class CablePlanNotFound(Exception):
+    """Client asked for a variation_code that isn't in the provider's catalog."""
+
+
+class CableRenewalUnavailable(Exception):
+    """Renew requested but the smartcard validation cache is empty
+    (user never validated, or 5-minute TTL expired), or the cached
+    validation reports no active plan to renew."""
+
+
 # Tx states that are already final — hitting any state-changing path
 # with the tx in one of these would raise InvalidStateTransition. Used
 # by BillService (sync purchase path), the vtpass webhook, and the
@@ -443,6 +453,105 @@ class BillService:
         if mode not in ("renew", "change"):
             raise ValueError("mode must be 'renew' or 'change'")
         return await self._provider.list_cable_plans(service_id=service_id)
+
+    # ── Cable TV: purchase (renew + change) ─────────────────────────────
+
+    async def purchase_cable(
+        self,
+        *,
+        user_id: UUID,
+        service_id: str,                    # base slug, e.g. "dstv"
+        smartcard_number: str,
+        mode: str,                          # "renew" | "change"
+        variation_code: str | None = None,
+    ) -> BillResult:
+        """Purchase a cable subscription in one of two modes.
+
+        ``renew``: caller does NOT supply ``variation_code``. We read the
+        smartcard's ``current_plan_code`` + ``renewal_amount_ngn`` from
+        the cached ``SmartcardValidation`` (populated by ``validate_smartcard``
+        within the last 5 minutes). Wire ``serviceID`` stays at the base
+        slug (e.g. ``"dstv"``).
+
+        ``change``: caller supplies ``variation_code``. We fetch the bouquet
+        catalog and server-resolve the price — never trust a client-sent
+        amount (cf. S3 data-plan precedent). Wire ``serviceID`` is
+        ``"{service_id}-change"`` (e.g. ``"dstv-change"``) — that's how
+        VTPass distinguishes "switch bouquet" from "renew current bouquet".
+
+        Mode validation happens FIRST so a programmer-typo "renewal" / "switch"
+        fails fast with a ValueError rather than surfacing as "cache empty".
+        """
+        # 1. Mode validation FIRST — before any cache / catalog lookup.
+        if mode not in ("renew", "change"):
+            raise ValueError("mode must be 'renew' or 'change'")
+
+        if mode == "renew":
+            # Renew ignores any client-sent variation_code; source of truth
+            # is the cached SmartcardValidation written by validate_smartcard.
+            key = (
+                f"bill_validate:smartcard:{user_id}:{service_id}:{smartcard_number}"
+            )
+            try:
+                cached = await self._redis.get(key)
+            except RedisError as exc:
+                # Treat a Redis outage as "renewal cache unavailable" — we
+                # have no other way to know the current plan / price, and
+                # we refuse to guess (spoof prevention).
+                log.warning(
+                    "purchase_cable[renew]: cache read failed: %s", exc,
+                )
+                cached = None
+            if cached is None:
+                raise CableRenewalUnavailable(
+                    "Validate smartcard first; renewal cache expired."
+                )
+            validation = SmartcardValidation.model_validate_json(cached)
+            if not validation.current_plan_code:
+                raise CableRenewalUnavailable(
+                    "Smartcard has no active plan to renew."
+                )
+            resolved_code = validation.current_plan_code
+            plan_name = validation.current_plan_name
+            price = validation.renewal_amount_ngn
+            wire_service_id = service_id
+        else:  # mode == "change"
+            if variation_code is None:
+                raise ValueError("variation_code required for mode=change")
+            plans = await self._provider.list_cable_plans(service_id=service_id)
+            match = next(
+                (v for v in plans.variations if v.variation_code == variation_code),
+                None,
+            )
+            if match is None:
+                raise CablePlanNotFound(
+                    f"Unknown cable plan {variation_code!r} for {service_id}"
+                )
+            resolved_code = variation_code
+            plan_name = match.name
+            price = match.price_ngn
+            wire_service_id = f"{service_id}-change"
+
+        meta = {
+            "service_id":       service_id,          # base slug (not -change)
+            "smartcard_number": smartcard_number,
+            "mode":             mode,                # for pay-again + audit
+            "plan_code":        resolved_code,
+            "plan_name":        plan_name,
+        }
+        return await self._execute_bill(
+            user_id=user_id,
+            tx_type=TransactionType.cable,
+            amount=price,
+            meta=meta,
+            provider_fn=lambda req_id: self._provider.purchase_cable(
+                request_id=req_id,
+                service_id=wire_service_id,
+                smartcard_number=smartcard_number,
+                variation_code=resolved_code,
+                amount_ngn=price,
+            ),
+        )
 
     # ── Orchestration internals ─────────────────────────────────────────
 
