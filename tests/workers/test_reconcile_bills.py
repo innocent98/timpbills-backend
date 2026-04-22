@@ -52,6 +52,7 @@ def _seed_bill(
     tx_status: TransactionStatus = TransactionStatus.processing,
     tx_type: TransactionType = TransactionType.airtime,
     age_seconds: int = 120,
+    meta: dict | None = None,
 ) -> Transaction:
     """Seed a bill tx that's `age_seconds` old — old enough to pass the
     30s reconcile cutoff by default. Wallet already debited (BillService
@@ -83,7 +84,7 @@ def _seed_bill(
         amount=amount,
         fee=Decimal("0.00"),
         currency="NGN",
-        meta={"network": "MTN", "phone": "08012345678", "service_id": "mtn"},
+        meta=meta or {"network": "MTN", "phone": "08012345678", "service_id": "mtn"},
     )
     db.add_all([wallet, tx])
     db.flush()
@@ -226,6 +227,80 @@ def test_reconcile_bills_failed_transitions_and_refunds(db_session):
     tx = _seed_bill(
         db_session, amount=Decimal("500.00"),
         wallet_balance_after_debit=Decimal("4500.00"),
+    )
+    provider = _FakeRequeryProvider()
+    provider.set_response(tx.reference, _failed(tx.reference, Decimal("500.00")))
+
+    result = _run_reconcile_bills(db_session, provider)
+    assert result["settled"] == 1
+
+    db_session.expire_all()
+    fresh = db_session.query(Transaction).filter(Transaction.id == tx.id).one()
+    assert fresh.status == TransactionStatus.failed
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == tx.user_id).one()
+    assert wallet.balance == Decimal("5000.00")   # restored by refund credit
+    refunds = (
+        db_session.query(Transaction)
+        .filter(Transaction.user_id == tx.user_id, Transaction.type == TransactionType.refund)
+        .all()
+    )
+    assert len(refunds) == 1
+    assert refunds[0].amount == Decimal("500.00")
+
+
+# ─── S4-B9: electricity + cable regression for the failed→refund path ──
+
+
+def test_reconcile_bills_electricity_failed_triggers_refund_and_wallet_restore(db_session):
+    """S4-B9 regression: electricity txs stuck in processing with a
+    VTPass failure on requery must refund via the same machinery as
+    airtime/data. _BILL_TX_TYPES (from S3C-M10) already includes
+    electricity — this test pins that invariant."""
+    tx = _seed_bill(
+        db_session,
+        amount=Decimal("500.00"),
+        wallet_balance_after_debit=Decimal("4500.00"),
+        tx_type=TransactionType.electricity,
+        meta={
+            "service_id": "ikeja-electric",
+            "meter_number": "1111111111111",
+            "meter_type": "prepaid",
+        },
+    )
+    provider = _FakeRequeryProvider()
+    provider.set_response(tx.reference, _failed(tx.reference, Decimal("500.00")))
+
+    result = _run_reconcile_bills(db_session, provider)
+    assert result["settled"] == 1
+
+    db_session.expire_all()
+    fresh = db_session.query(Transaction).filter(Transaction.id == tx.id).one()
+    assert fresh.status == TransactionStatus.failed
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == tx.user_id).one()
+    assert wallet.balance == Decimal("5000.00")   # restored by refund credit
+    refunds = (
+        db_session.query(Transaction)
+        .filter(Transaction.user_id == tx.user_id, Transaction.type == TransactionType.refund)
+        .all()
+    )
+    assert len(refunds) == 1
+    assert refunds[0].amount == Decimal("500.00")
+
+
+def test_reconcile_bills_cable_failed_triggers_refund_and_wallet_restore(db_session):
+    """S4-B9 regression: same invariant for cable txs."""
+    tx = _seed_bill(
+        db_session,
+        amount=Decimal("500.00"),
+        wallet_balance_after_debit=Decimal("4500.00"),
+        tx_type=TransactionType.cable,
+        meta={
+            "service_id": "dstv",
+            "smartcard_number": "1212121212",
+            "mode": "renew",
+            "plan_code": "dstv-compact",
+            "plan_name": "DStv Compact",
+        },
     )
     provider = _FakeRequeryProvider()
     provider.set_response(tx.reference, _failed(tx.reference, Decimal("500.00")))
