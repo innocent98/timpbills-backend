@@ -236,3 +236,60 @@ def test_dispatch_swallows_email_failure_and_still_sends_push():
         ),
     ))
     assert len(push.sent) == 1
+
+
+# ─── S3C-L3: pin sequential (not gather/create_task) semantics ──────────
+
+
+def test_dispatch_is_sequential_not_gather_or_create_task():
+    """Pins the invariant that NotificationService.dispatch awaits its
+    channels SEQUENTIALLY, not via asyncio.gather / create_task. See
+    the LANDMINE comment in app/workers/tasks/notification_tasks.py :: _run_async
+    — if dispatch ever schedules background tasks inside its coroutine,
+    exceptions from those tasks get silently swallowed when the
+    _run_async worker thread's asyncio.run() closes its loop.
+
+    We assert the ordering: email channel records its timestamp before
+    push does. If someone refactors to gather, the order would become
+    non-deterministic (even if both fires) — this test would flake,
+    flagging the refactor for deliberate review."""
+    import time
+
+    class _OrderedFakeEmail(FakeEmailClient):
+        ts: float = 0.0
+
+        async def send_text(self, **kw):
+            await super().send_text(**kw)
+            self.ts = time.monotonic()
+
+    class _OrderedFakePush(FakePushClient):
+        ts: float = 0.0
+
+        async def send(self, **kw):
+            await super().send(**kw)
+            self.ts = time.monotonic()
+
+    email = _OrderedFakeEmail()
+    push = _OrderedFakePush()
+    svc = NotificationService(email_client=email, push_client=push)
+    asyncio.run(svc.dispatch(
+        user_id="u9", user_email="h@t.co",
+        event=NotificationEvent.bill_success,
+        context=build_bill_context(
+            tx_type="airtime", amount=Decimal("100"),
+            destination="080", reference="R",
+            when="now", partial=False,
+        ),
+    ))
+    # Both fired, and email completed strictly before push. (gather
+    # would complete them concurrently with non-deterministic ordering;
+    # create_task in the dispatch body would detach push and not even
+    # record a timestamp before asyncio.run closes the loop.)
+    assert email.ts > 0
+    assert push.ts > 0
+    assert email.ts <= push.ts, (
+        "NotificationService.dispatch must await channels sequentially "
+        "(email, then push). Asyncio.gather / create_task would allow "
+        "background tasks to be swallowed when _run_async closes the "
+        "loop — see S3C-L3 LANDMINE comment in notification_tasks.py."
+    )

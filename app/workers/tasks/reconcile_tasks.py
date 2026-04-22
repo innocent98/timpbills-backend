@@ -207,7 +207,10 @@ async def _reconcile_bills() -> dict:
             .all()
         )
         if not pending_bills:
-            return {"checked": 0, "settled": 0, "deferred": 0, "skipped": 0}
+            return {
+                "checked": 0, "settled": 0, "deferred": 0,
+                "skipped": 0, "escalated": 0,
+            }
 
         provider = select_vtpass_client()
         tx_svc = TransactionService(db=db)

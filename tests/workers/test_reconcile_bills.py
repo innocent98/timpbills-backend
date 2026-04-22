@@ -447,8 +447,58 @@ def test_reconcile_bills_skips_bills_newer_than_30s(db_session):
     provider.set_response(tx.reference, _delivered(tx.reference, Decimal("500.00")))
 
     result = _run_reconcile_bills(db_session, provider)
-    assert result == {"checked": 0, "settled": 0, "deferred": 0, "skipped": 0}
+    assert result == {
+        "checked": 0, "settled": 0, "deferred": 0, "skipped": 0, "escalated": 0,
+    }
 
     db_session.expire_all()
     fresh = db_session.query(Transaction).filter(Transaction.id == tx.id).one()
     assert fresh.status == TransactionStatus.processing   # unchanged
+
+
+# ─── S3C-L2: S2C-8 defer regression for reconcile_pending_bills ─────────
+
+
+def test_reconcile_bills_defers_on_kyc_cap_and_keeps_batch_going(db_session):
+    """S2C-8 taxonomy for the reconcile_bills path: when apply_provider_result
+    raises KycCapExceeded (user's tier was lowered post-debit, refund
+    credit now overshoots), the reconciler must roll back that row's
+    partial state and continue the batch. Increments `deferred` in the
+    result dict so ops can alert on non-zero.
+
+    The module docstring advertised this behavior; no test existed
+    before S3C-L2."""
+    # Seed user near their cap so the refund credit will overshoot.
+    # Balance ₦48k, cap ₦50k. A failed ₦5000 bill tries to refund
+    # credit → 48 + 5 = 53 > 50 → KycCapExceeded.
+    tx = _seed_bill(
+        db_session,
+        amount=Decimal("5000.00"),
+        wallet_balance_after_debit=Decimal("48000.00"),
+        wallet_cap=Decimal("50000.00"),
+    )
+    provider = _FakeRequeryProvider()
+    provider.set_response(tx.reference, _failed(tx.reference, Decimal("5000.00")))
+
+    result = _run_reconcile_bills(db_session, provider)
+    assert result["deferred"] == 1
+    assert result["settled"] == 0
+    assert result["escalated"] == 0
+
+    # Tx stays in processing so the next tick can retry (maybe ops
+    # raises the cap in the interval). No partial state committed.
+    db_session.expire_all()
+    fresh = db_session.query(Transaction).filter(Transaction.id == tx.id).one()
+    assert fresh.status == TransactionStatus.processing
+
+    # Wallet unchanged — the rollback wiped the credit attempt.
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == tx.user_id).one()
+    assert wallet.balance == Decimal("48000.00")
+
+    # No refund tx was committed.
+    refunds = (
+        db_session.query(Transaction)
+        .filter(Transaction.user_id == tx.user_id, Transaction.type == TransactionType.refund)
+        .count()
+    )
+    assert refunds == 0

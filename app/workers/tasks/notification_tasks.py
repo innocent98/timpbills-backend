@@ -84,7 +84,17 @@ def _run_async(coro: Awaitable) -> Any:
     so a loop IS running and `asyncio.run` raises. Running the coroutine
     on a short-lived background thread sidesteps both cases with one
     code path — and costs ~1ms per dispatch, well under the email /
-    push latency we're already accepting."""
+    push latency we're already accepting.
+
+    LANDMINE (S3C-L3): the coroutine MUST await its work sequentially.
+    If someone ever refactors `NotificationService.dispatch` to use
+    `asyncio.gather` or `asyncio.create_task` internally, any exception
+    from a background task is silently dropped when `asyncio.run` closes
+    its loop (asyncio's default handler logs and discards). Today the
+    dispatch awaits email then push sequentially — see the pinning
+    test in tests/services/test_notification_service.py named
+    `test_dispatch_is_sequential_not_gather_or_create_task` which
+    enforces this invariant."""
     result: dict[str, Any] = {}
     captured: dict[str, BaseException] = {}
 
