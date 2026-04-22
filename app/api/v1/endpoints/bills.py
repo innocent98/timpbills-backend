@@ -1,5 +1,6 @@
 """/bills/* endpoints — airtime, data, and electricity. Cable endpoints
 are appended alongside electricity as Sprint 4 lands."""
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,9 +11,11 @@ from app.api.deps import (
     get_current_user,
     get_db,
     get_idempotency_service,
+    get_wallet_service,
     require_idempotency_key,
     require_pin_token,
 )
+from app.core.config import settings
 from app.core.limiter import limiter, per_user_or_ip
 from app.db.models.user import User
 from app.integrations.vtpass.base import (
@@ -26,6 +29,8 @@ from app.schemas.bills import (
     DataPlanView,
     DataPurchaseRequest,
     DataPurchaseResponse,
+    ElectricityPurchaseRequest,
+    ElectricityPurchaseResponse,
     MeterValidationRequest,
     MeterValidationResponse,
     NetworkListResponse,
@@ -33,7 +38,7 @@ from app.schemas.bills import (
 )
 from app.services.bill_service import BillService, DataPlanNotFound
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
-from app.services.wallet_service import InsufficientBalance
+from app.services.wallet_service import InsufficientBalance, WalletService
 from app.utils.responses import success
 
 
@@ -61,6 +66,18 @@ _NETWORK_CATALOG = [
         prefixes=["0809", "0817", "0818", "0909", "0908"],
     ),
 ]
+
+
+def _cap_for(service_id: str) -> Decimal:
+    """Per-DisCo purchase cap with the default-cap fallback.
+
+    Kept at module scope (not a BillService method) so tests can
+    monkeypatch ``settings.ELECTRICITY_DISCO_CAPS`` without wiring a
+    service, and so the resolution stays pure — no DB, no I/O.
+    """
+    return settings.ELECTRICITY_DISCO_CAPS.get(
+        service_id, settings.ELECTRICITY_DEFAULT_CAP
+    )
 
 
 # ── Networks ─────────────────────────────────────────────────────────────
@@ -188,6 +205,104 @@ async def validate_meter(
         body_out.model_dump(mode="json"),
         request_id=getattr(request.state, "request_id", None),
     )
+
+
+@router.post("/electricity", response_model=None, status_code=200)
+@limiter.limit("30/minute", key_func=per_user_or_ip)
+async def purchase_electricity(
+    request: Request,
+    body: ElectricityPurchaseRequest,
+    idem_key: str = Depends(require_idempotency_key),
+    user: User = Depends(get_current_user),
+    _pin_token: str = Depends(require_pin_token),
+    bill_svc: BillService = Depends(get_bill_service),
+    idem: IdempotencyService = Depends(get_idempotency_service),
+    wallet_svc: WalletService = Depends(get_wallet_service),
+):
+    """Debit-and-deliver a prepaid/postpaid electricity top-up.
+
+    Pre-flight order is cap-first (pure dict lookup) then balance (DB
+    read) so obviously-over-cap requests short-circuit without touching
+    the wallet row. Both gates run BEFORE the idempotency cache so
+    transient rejections are never cached. The InsufficientBalance
+    catch after the provider call is defence-in-depth against a
+    concurrent debit racing the pre-flight read.
+    """
+    # ── Pre-flight 1: DisCo cap (S3C-P4b pattern) ───────────────────────
+    cap = _cap_for(body.service_id)
+    if body.amount > cap:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DISCO_CAP_EXCEEDED",
+                "message": f"Amount exceeds the maximum allowed for {body.service_id}",
+                "details": {"max_allowed": str(cap), "disco": body.service_id},
+            },
+        )
+
+    # ── Pre-flight 2: wallet balance ────────────────────────────────────
+    if wallet_svc.balance(user_id=UUID(str(user.id))) < body.amount:
+        raise HTTPException(
+            status_code=402,
+            detail={"code": "INSUFFICIENT_BALANCE",
+                    "message": "Wallet balance is not enough for this purchase"},
+        )
+
+    # ── Idempotency gate ────────────────────────────────────────────────
+    req_hash = idem.hash_body(
+        user_id=str(user.id),
+        endpoint="/bills/electricity",
+        body=body.model_dump(mode="json"),
+    )
+    try:
+        cached = await idem.lookup(
+            user_id=str(user.id), key=idem_key, request_hash=req_hash,
+        )
+    except IdempotencyConflict:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "IDEMPOTENCY_CONFLICT",
+                    "message": "Idempotency key reused with different request"},
+        )
+    if cached is not None:
+        return cached[1]
+
+    try:
+        result = await bill_svc.purchase_electricity(
+            user_id=UUID(str(user.id)),
+            service_id=body.service_id,
+            meter_number=body.meter_number,
+            meter_type=body.meter_type,
+            phone=body.phone,
+            amount_ngn=body.amount,
+        )
+    except InsufficientBalance:
+        raise HTTPException(
+            status_code=402,
+            detail={"code": "INSUFFICIENT_BALANCE",
+                    "message": "Wallet balance is not enough for this purchase"},
+        )
+
+    tx = result.tx
+    meta = tx.meta or {}
+    body_out = success(
+        ElectricityPurchaseResponse(
+            reference=tx.reference,
+            status=tx.status.value,
+            service_id=body.service_id,
+            meter_number=body.meter_number,
+            amount=tx.amount,
+            token=meta.get("token"),
+            units=meta.get("units"),
+        ).model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+    await idem.store(
+        user_id=str(user.id), key=idem_key, request_hash=req_hash,
+        response_status=200, response_body=body_out,
+    )
+    return body_out
 
 
 # ── Data ─────────────────────────────────────────────────────────────────

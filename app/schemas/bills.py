@@ -79,6 +79,30 @@ class MeterValidationResponse(BaseModel):
     meter_type: Literal["prepaid", "postpaid"]
 
 
+class ElectricityPurchaseRequest(BaseModel):
+    service_id: str = Field(min_length=1)             # DisCo slug, e.g. "ikeja-electric"
+    meter_number: str = Field(min_length=1, max_length=20)
+    meter_type: Literal["prepaid", "postpaid"]
+    # VTPass wire requirement — the DisCo wants a contact number on file
+    # so the token can be SMS-resent on loss. We pass through whatever the
+    # client sends; BillService does not persist it beyond tx.meta.
+    phone: str = Field(min_length=11, max_length=14)
+    amount: Decimal = Field(gt=Decimal("0"))
+
+
+class ElectricityPurchaseResponse(BaseModel):
+    reference: str
+    status: str                              # value of TransactionStatus
+    service_id: str
+    meter_number: str
+    amount: Decimal
+    # Populated from tx.meta["token"] / tx.meta["units"] on delivered
+    # responses; None on failed or pending. A pending tx gets populated
+    # by the reconcile worker if the upstream DisCo later lands it.
+    token: str | None = None
+    units: str | None = None
+
+
 # ── Networks catalog (for GET /bills/airtime/networks) ─────────────────
 
 
