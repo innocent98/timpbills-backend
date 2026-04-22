@@ -45,13 +45,14 @@ def test_create_refund_creates_new_transaction_linked_to_original(db_session):
     original = _seed_failed_tx(db_session, user.id)
     svc = TransactionService(db=db_session)
 
-    refund = svc.create_refund(
+    refund, was_created = svc.create_refund(
         original_tx=original,
         amount=Decimal('1000.00'),
         reason='paystack.charge.failed',
     )
     db_session.commit()
 
+    assert was_created is True
     assert refund.type == TransactionType.refund
     assert refund.status == TransactionStatus.success
     assert refund.amount == Decimal('1000.00')
@@ -66,13 +67,21 @@ def test_create_refund_is_idempotent_by_original_reference(db_session):
     original = _seed_failed_tx(db_session, user.id)
     svc = TransactionService(db=db_session)
 
-    first = svc.create_refund(original_tx=original, amount=Decimal('1000.00'), reason='r1')
+    first, first_created = svc.create_refund(
+        original_tx=original, amount=Decimal('1000.00'), reason='r1',
+    )
     db_session.commit()
-    second = svc.create_refund(original_tx=original, amount=Decimal('1000.00'), reason='r2')
+    second, second_created = svc.create_refund(
+        original_tx=original, amount=Decimal('1000.00'), reason='r2',
+    )
     db_session.commit()
 
     # Same refund returned — no second row created.
     assert first.id == second.id
+    # And the was_created flag flips False on the second call so callers
+    # can gate their wallet credits on it. See S3C-P1.
+    assert first_created is True
+    assert second_created is False
 
     count = db_session.query(Transaction).filter(
         Transaction.type == TransactionType.refund,
@@ -81,12 +90,38 @@ def test_create_refund_is_idempotent_by_original_reference(db_session):
     assert count == 1
 
 
+def test_create_refund_was_created_false_even_when_same_reason(db_session):
+    """S3C-P1 regression — two callers with identical `reason` strings
+    must still see was_created=False on the second call. The old
+    event-list heuristic (len(events) == 1 AND any event.reason matches)
+    silently returned True for both, enabling a double-credit race."""
+    user = _seed_user(db_session)
+    original = _seed_failed_tx(db_session, user.id)
+    svc = TransactionService(db=db_session)
+
+    # Both calls use the SAME reason — this is exactly the race pattern
+    # the old code got wrong (sync + webhook both pass "provider_failed_code_016").
+    _, first_created = svc.create_refund(
+        original_tx=original, amount=Decimal('1000.00'),
+        reason='provider_failed_code_016',
+    )
+    db_session.commit()
+    _, second_created = svc.create_refund(
+        original_tx=original, amount=Decimal('1000.00'),
+        reason='provider_failed_code_016',
+    )
+    db_session.commit()
+
+    assert first_created is True
+    assert second_created is False
+
+
 def test_create_refund_records_event(db_session):
     user = _seed_user(db_session)
     original = _seed_failed_tx(db_session, user.id)
     svc = TransactionService(db=db_session)
 
-    refund = svc.create_refund(
+    refund, _ = svc.create_refund(
         original_tx=original,
         amount=Decimal('1000.00'),
         reason='paystack.charge.failed',

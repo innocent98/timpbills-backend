@@ -133,12 +133,18 @@ async def _reconcile() -> dict:
                     )
                     # See webhooks.py: only refund outbound tx types.
                     if tx.type in _REFUNDABLE_ON_FAILURE:
-                        refund = tx_svc.create_refund(
+                        refund, was_created = tx_svc.create_refund(
                             original_tx=tx,
                             amount=tx.amount,
                             reason="reconcile.verify.failed",
                         )
-                        wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
+                        # Idempotency guard — if the webhook already
+                        # refunded this tx, was_created is False and we
+                        # must NOT credit again. See S3C-P1.
+                        if was_created:
+                            wallet_svc.credit(
+                                user_id=tx.user_id, amount=refund.amount,
+                            )
                     settled += 1
             # abandoned → leave pending for next poll
         db.commit()

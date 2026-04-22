@@ -203,12 +203,16 @@ async def paystack_webhook(
             # user (outbound services). A declined wallet-funding charge
             # never collected money, so there is nothing to refund.
             if tx.type in _REFUNDABLE_ON_FAILURE:
-                refund = tx_svc.create_refund(
+                refund, was_created = tx_svc.create_refund(
                     original_tx=tx,
                     amount=tx.amount,
                     reason=f"paystack.webhook.{event_type}",
                 )
-                wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
+                # Idempotency guard — if reconcile already refunded this
+                # tx, was_created is False and we must NOT credit again.
+                # See S3C-P1.
+                if was_created:
+                    wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
 
     we.processed = True
     db.commit()

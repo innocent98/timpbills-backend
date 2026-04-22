@@ -309,25 +309,19 @@ class BillService:
     def _refund_and_credit(
         self, tx: Transaction, *, amount: Decimal, reason: str
     ) -> None:
-        """Create a refund tx and credit the wallet with that amount. The
-        refund row is idempotent by `original_tx.reference` (see Sprint 2
-        `create_refund`), so this is safe to call twice without
-        double-crediting — the second call returns the existing row and
-        skips the credit."""
-        refund = self._tx.create_refund(
+        """Create a refund tx and credit the wallet with that amount.
+
+        Safe against repeated invocation: ``create_refund`` is idempotent
+        by ``original_tx.reference`` and returns ``(refund, was_created)``.
+        We credit only when the refund row is freshly minted, so two
+        concurrent callers with the same reason (e.g. sync-purchase and
+        webhook racing on the same failed tx) can't double-credit — an
+        earlier heuristic that inferred "freshness" from the event list
+        was fragile; see S3C-P1 commit."""
+        refund, was_created = self._tx.create_refund(
             original_tx=tx, amount=amount, reason=reason,
         )
-        # `create_refund` is idempotent-by-original-reference; if it
-        # returned the pre-existing refund row we must NOT credit again.
-        # Detect this by matching reason on the event audit (freshly
-        # created refund has one event with our reason; a replay has a
-        # prior event with a different reason).
-        existing_events = self._tx.events_for(refund)
-        has_our_reason = any(
-            e.reason and e.reason == reason for e in existing_events
-        )
-        if has_our_reason and len(existing_events) == 1:
-            # This was a fresh create — apply the credit.
+        if was_created:
             self._wallet.credit(user_id=tx.user_id, amount=refund.amount)
 
 

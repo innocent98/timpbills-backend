@@ -110,11 +110,19 @@ class TransactionService:
         original_tx: Transaction,
         amount: Decimal,
         reason: str,
-    ) -> Transaction:
+    ) -> tuple[Transaction, bool]:
         """Create a refund Transaction linked to an original failed tx.
 
         Idempotent by ``original_tx.reference``: if a refund row already exists
         for this original, returns it without creating a duplicate.
+
+        Returns ``(refund, was_created)`` — callers gate wallet credits on
+        ``was_created`` so a repeat call never double-credits. Critical for
+        the race between webhook, reconcile, and sync-purchase paths all
+        attempting to finalize the same failed tx with the same reason.
+        The event-list heuristic this replaced (checking
+        ``len(events_for(refund)) == 1``) silently failed when two callers
+        passed identical reason strings — see S3C-P1.
         """
         # Idempotency: Python-level scan so JSON filtering works on both
         # SQLite (tests) and Postgres (production) without JSON operator differences.
@@ -128,7 +136,7 @@ class TransactionService:
         )
         for c in candidates:
             if c.meta and c.meta.get('original_reference') == original_tx.reference:
-                return c
+                return c, False
 
         refund_ref = new_transaction_reference(
             user_id=str(original_tx.user_id), prefix='TMP-R'
@@ -158,7 +166,7 @@ class TransactionService:
         )
         self._db.add(event)
         self._db.flush()
-        return refund
+        return refund, True
 
     def get_by_reference(self, reference: str) -> Transaction | None:
         return (
