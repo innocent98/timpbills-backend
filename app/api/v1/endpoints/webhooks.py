@@ -37,7 +37,7 @@ from app.services.notification_service import (
     NotificationEvent,
     build_wallet_funded_context,
 )
-from app.services.transaction_service import TransactionService
+from app.services.transaction_service import InvalidStateTransition, TransactionService
 from app.services.wallet_service import KycCapExceeded, WalletService
 from app.utils.responses import success
 from app.workers.tasks.notification_tasks import dispatch_delay
@@ -370,7 +370,42 @@ async def vtpass_webhook(
     #    shortfall on partial); for failed → failed + refund (gated by
     #    _REFUNDABLE_ON_FAILURE — bills are all IN the set); for pending
     #    → no-op, reconcile worker will finish.
-    bill_svc.apply_provider_result(tx=tx, amount=tx.amount, result=result)
+    #
+    #    Two defensive catches (S3C-H1):
+    #    • InvalidStateTransition — the row-lock above makes this
+    #      practically unreachable, but TransactionService commits
+    #      mid-apply, temporarily releasing the lock. A sufficiently
+    #      unlucky reconcile tick could still finalize the tx between
+    #      transitions. 500 would make VTPass retry uselessly; return
+    #      200 with already_processed=True so they stop.
+    #    • KycCapExceeded on the refund credit — mirror of S3C-P4a:
+    #      user's tier was lowered between the debit and the refund
+    #      attempt. 422 + rollback so VTPass retries on their cadence.
+    try:
+        bill_svc.apply_provider_result(tx=tx, amount=tx.amount, result=result)
+    except InvalidStateTransition as exc:
+        log.info(
+            "vtpass webhook: race lost to concurrent finalizer tx=%s event=%s: %s",
+            reference, vtpass_event_id, exc,
+        )
+        we.processed = True
+        db.commit()
+        return success({"ok": True, "already_processed": True})
+    except KycCapExceeded as exc:
+        db.rollback()
+        log.warning(
+            "vtpass webhook: refund credit would exceed KYC cap — "
+            "user=%s ref=%s event=%s err=%s",
+            tx.user_id, reference, vtpass_event_id, exc,
+        )
+        raise HTTPException(status_code=422, detail={
+            "code": "KYC_LIMIT_EXCEEDED",
+            "message": (
+                "Refund would exceed the user's KYC balance cap. "
+                "Ops must raise the tier before the refund can land; "
+                "VTPass will retry."
+            ),
+        })
 
     we.processed = True
     db.commit()

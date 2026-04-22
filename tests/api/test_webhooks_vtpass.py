@@ -465,3 +465,52 @@ async def test_vtpass_webhook_unknown_reference_logs_and_returns_200(client, db_
         WebhookEvent.provider_event_id == "vtp-evt-ghost",
     ).count()
     assert evts == 1
+
+
+# ── S3C-H1: defensive catches on apply_provider_result ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_vtpass_webhook_returns_422_on_refund_kyc_cap(client, db_session):
+    """S3C-H1 / S3C-P4a sibling — if the user's tier was lowered
+    between the original bill debit and the VTPass webhook's refund-
+    credit attempt, wallet_svc.credit raises KycCapExceeded. Webhook
+    must catch + rollback + return 422 so VTPass retries on cadence
+    until ops raises the tier, instead of 500 → WebhookEvent dedupe →
+    refund row orphaned."""
+    await _seed_logged_in_user(client)
+    # Near-cap balance simulating a post-downgrade scenario. Seed with
+    # ₦48k balance (= ₦5000-debited snapshot of an earlier state) and
+    # new cap of ₦50k. The failure-refund of ₦5k would push to ₦53k.
+    user, tx = _seed_bill_tx(
+        db_session, amount=Decimal("5000.00"),
+        wallet_start=Decimal("53000.00"),   # balance AFTER debit is ₦48k
+    )
+    # Tighten the cap (simulating ops lowering the user's tier).
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == user.id).one()
+    wallet.balance_cap = Decimal("50000.00")
+    db_session.commit()
+
+    body = _vtpass_body(reference=tx.reference, code="016")  # failed
+
+    r = await client.post(
+        "/api/v1/webhooks/vtpass",
+        content=json.dumps(body).encode(),
+        headers={"X-VTPass-Secret": _SECRET},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "KYC_LIMIT_EXCEEDED"
+
+    # No state leaked: tx still in its pre-webhook state, wallet
+    # unchanged, no refund row committed.
+    db_session.expire_all()
+    tx2 = db_session.query(Transaction).filter(Transaction.id == tx.id).one()
+    assert tx2.status == TransactionStatus.processing
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == user.id).one()
+    assert wallet.balance == Decimal("48000.00")
+    refunds = (
+        db_session.query(Transaction)
+        .filter(Transaction.user_id == user.id, Transaction.type == TransactionType.refund)
+        .count()
+    )
+    assert refunds == 0
