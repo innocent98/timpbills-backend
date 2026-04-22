@@ -1,4 +1,7 @@
-from typing import List, Optional
+import json
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
+
 from pydantic import AnyHttpUrl, field_validator, EmailStr
 from pydantic_settings import BaseSettings
 
@@ -103,7 +106,28 @@ class Settings(BaseSettings):
     # both are unset the FakePushClient is used (tests + dev).
     FCM_CREDENTIALS_PATH: Optional[str] = None
     FCM_CREDENTIALS_JSON: Optional[str] = None
-    FCM_PROJECT_ID: Optional[str] = None
+    FCM_PROJECT_ID: str = "timpbills"
+
+    # ── Electricity purchase caps (Sprint 4) ─────────────────────────────
+    # Max single-transaction amount (naira) for electricity purchases.
+    # Applied per-DisCo via ELECTRICITY_DISCO_CAPS overrides; falls back to
+    # ELECTRICITY_DEFAULT_CAP when a DisCo has no explicit entry.
+    ELECTRICITY_DEFAULT_CAP: Decimal = Decimal("200000")
+    # Per-DisCo overrides as a JSON dict parsed from env, e.g.
+    #   ELECTRICITY_DISCO_CAPS='{"jos-electric": 50000}'
+    # Values are in naira. Empty dict means "no overrides".
+    ELECTRICITY_DISCO_CAPS: Dict[str, int] = {}
+
+    @field_validator("ELECTRICITY_DISCO_CAPS", mode="before")
+    @classmethod
+    def parse_electricity_disco_caps(cls, v: Any) -> Dict[str, int]:
+        if v is None or v == "":
+            return {}
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            return json.loads(v)
+        raise ValueError(f"ELECTRICITY_DISCO_CAPS must be a JSON object, got {type(v).__name__}")
 
     # Observability — Sentry (optional; no-op when DSN unset)
     SENTRY_DSN: Optional[str] = None

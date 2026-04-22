@@ -41,6 +41,8 @@ sentry-sdk = {extras = ["fastapi"], version = "^2.17.0"}
 # wheels. Sprint 3 uses FakePushClient only. Real FCM ships as a follow-up
 # using the HTTP v1 API directly via httpx + google-auth — see
 # docs/superpowers/plans/2026-04-21-sprint-3-airtime-data.md §4 (B13).
+google-auth = ">=2.30"
+google-auth-oauthlib = ">=1.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"
