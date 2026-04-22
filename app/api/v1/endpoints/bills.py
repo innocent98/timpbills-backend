@@ -25,6 +25,8 @@ from app.integrations.vtpass.base import (
 from app.schemas.bills import (
     AirtimePurchaseRequest,
     AirtimePurchaseResponse,
+    CableProviderListResponse,
+    CableProviderView,
     DataPlanListResponse,
     DataPlanView,
     DataPurchaseRequest,
@@ -35,6 +37,8 @@ from app.schemas.bills import (
     MeterValidationResponse,
     NetworkListResponse,
     NetworkView,
+    SmartcardValidationRequest,
+    SmartcardValidationResponse,
 )
 from app.services.bill_service import BillService, DataPlanNotFound
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
@@ -78,6 +82,17 @@ def _cap_for(service_id: str) -> Decimal:
     return settings.ELECTRICITY_DISCO_CAPS.get(
         service_id, settings.ELECTRICITY_DEFAULT_CAP
     )
+
+
+# Cable bouquet providers. IDs match the VTPass ``service_id`` slug we
+# send through to ``/api/pay``. Static — VTPass doesn't add or retire
+# these often; when they do we bump the list and ship.
+_CABLE_CATALOG = [
+    CableProviderView(id="dstv",      name="DStv"),
+    CableProviderView(id="gotv",      name="GOtv"),
+    CableProviderView(id="startimes", name="StarTimes"),
+    CableProviderView(id="showmax",   name="Showmax"),
+]
 
 
 # ── Networks ─────────────────────────────────────────────────────────────
@@ -303,6 +318,63 @@ async def purchase_electricity(
         response_status=200, response_body=body_out,
     )
     return body_out
+
+
+# ── Cable ────────────────────────────────────────────────────────────────
+
+
+@router.get("/cable/providers", response_model=None)
+async def list_cable_providers(request: Request, user: User = Depends(get_current_user)):
+    body = CableProviderListResponse(providers=_CABLE_CATALOG)
+    return success(
+        body.model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+
+@router.post("/cable/validate-smartcard", response_model=None, status_code=200)
+@limiter.limit("30/minute", key_func=per_user_or_ip)
+async def validate_smartcard(
+    request: Request,
+    body: SmartcardValidationRequest,
+    user: User = Depends(get_current_user),
+    bill_svc: BillService = Depends(get_bill_service),
+):
+    """Smartcard lookup against a cable provider. Not money-moving — no
+    pin_token, no Idempotency-Key. Caching (5 min per-user) lives in
+    BillService so repeated keystroke-edits don't burn VTPass credits.
+    Fresh / inactive smartcards return a 200 with status="inactive" and
+    empty plan fields; only upstream permanent failures raise."""
+    try:
+        validation = await bill_svc.validate_smartcard(
+            user_id=UUID(str(user.id)),
+            service_id=body.service_id,
+            smartcard_number=body.smartcard_number,
+        )
+    except ProviderPermanentFailure as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_SMARTCARD", "message": str(exc)},
+        )
+    except ProviderTemporaryFailure as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "VTPASS_UNAVAILABLE", "message": str(exc)},
+        )
+
+    body_out = SmartcardValidationResponse(
+        service_id=validation.service_id,
+        smartcard_number=validation.smartcard_number,
+        customer_name=validation.customer_name,
+        current_plan_name=validation.current_plan_name,
+        current_plan_code=validation.current_plan_code,
+        status=validation.status,
+        renewal_amount=validation.renewal_amount_ngn,
+    )
+    return success(
+        body_out.model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
 
 
 # ── Data ─────────────────────────────────────────────────────────────────

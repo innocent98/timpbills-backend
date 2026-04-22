@@ -103,6 +103,34 @@ class ElectricityPurchaseResponse(BaseModel):
     units: str | None = None
 
 
+# ── Cable ────────────────────────────────────────────────────────────────
+
+
+class CableProviderView(BaseModel):
+    id: str                                  # "dstv"
+    name: str                                # "DStv"
+
+
+class CableProviderListResponse(BaseModel):
+    providers: list[CableProviderView]
+
+
+class SmartcardValidationRequest(BaseModel):
+    service_id: str = Field(min_length=1)    # cable slug, e.g. "dstv"
+    smartcard_number: str = Field(min_length=1, max_length=20)
+
+
+class SmartcardValidationResponse(BaseModel):
+    """Mirrors ``app.integrations.vtpass.schemas.SmartcardValidation``."""
+    service_id: str
+    smartcard_number: str
+    customer_name: str
+    current_plan_name: str                   # empty on fresh/inactive cards
+    current_plan_code: str                   # empty on fresh/inactive cards
+    status: str                              # "active" | "inactive" | …
+    renewal_amount: Decimal                  # 0 on inactive cards
+
+
 # ── Networks catalog (for GET /bills/airtime/networks) ─────────────────
 
 
