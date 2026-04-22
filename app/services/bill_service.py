@@ -197,6 +197,72 @@ class BillService:
             service_id=f"{network.lower()}-data"
         )
 
+    async def purchase_electricity(
+        self,
+        *,
+        user_id: UUID,
+        service_id: str,      # DisCo slug, e.g. "ikeja-electric"
+        meter_number: str,
+        meter_type: str,      # "prepaid" | "postpaid"
+        phone: str,           # user's phone — VTPass wire requirement (B3)
+        amount_ngn: Decimal,
+    ) -> BillResult:
+        """Debit-and-deliver a DisCo top-up. Shares the 6-step
+        ``_execute_bill`` machinery with airtime/data — the electricity-
+        specific bit is persisting the VTPass-returned meter ``token`` +
+        kWh ``units`` to ``tx.meta`` once delivery lands.
+
+        The token/units persistence is deliberately AFTER ``_execute_bill``
+        returns. ``apply_provider_result`` (inside ``_execute_bill``)
+        already commits the state transition + any partial_delivery meta,
+        so this update is its own commit on an already-final tx row.
+
+        The guard is ``BillDeliveryStatus.delivered`` — which covers BOTH
+        full and partial deliveries. VTPass returns a meter token on
+        partial too (the DisCo loaded what it could), so we persist there
+        as well and layer on top of the shortfall meta. Pending / failed
+        skip this path entirely (no token available to persist, and the
+        reconcile worker will write it from the requery response if the
+        pending tx later lands as delivered).
+        """
+        meta = {
+            "service_id":   service_id,
+            "meter_number": meter_number,
+            "meter_type":   meter_type,
+            "phone":        phone,
+        }
+        result = await self._execute_bill(
+            user_id=user_id,
+            tx_type=TransactionType.electricity,
+            amount=amount_ngn,
+            meta=meta,
+            provider_fn=lambda req_id: self._provider.purchase_electricity(
+                request_id=req_id,
+                service_id=service_id,
+                meter_number=meter_number,
+                meter_type=meter_type,
+                amount_ngn=amount_ngn,
+                phone=phone,
+            ),
+        )
+
+        # Post-processor: if the provider delivered (full or partial) and
+        # returned a token or units, persist them on tx.meta. Separate
+        # commit — _execute_bill's internal commits have already closed
+        # the state-transition unit of work.
+        if result.response.status == BillDeliveryStatus.delivered:
+            raw = result.response.raw or {}
+            token = raw.get("token")
+            units = raw.get("units")
+            if token or units:
+                result.tx.meta = {
+                    **(result.tx.meta or {}),
+                    **({"token": str(token)} if token else {}),
+                    **({"units": str(units)} if units else {}),
+                }
+                self._db.commit()
+        return result
+
     # ── Electricity: meter validation (no tx row, no wallet debit) ──────
 
     async def validate_meter(
