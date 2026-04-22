@@ -116,17 +116,23 @@ class Settings(BaseSettings):
     # Per-DisCo overrides as a JSON dict parsed from env, e.g.
     #   ELECTRICITY_DISCO_CAPS='{"jos-electric": 50000}'
     # Values are in naira. Empty dict means "no overrides".
-    ELECTRICITY_DISCO_CAPS: Dict[str, int] = {}
+    ELECTRICITY_DISCO_CAPS: Dict[str, Decimal] = {}
 
     @field_validator("ELECTRICITY_DISCO_CAPS", mode="before")
     @classmethod
-    def parse_electricity_disco_caps(cls, v: Any) -> Dict[str, int]:
+    def parse_electricity_disco_caps(cls, v: Any) -> Dict[str, Decimal]:
         if v is None or v == "":
             return {}
         if isinstance(v, dict):
-            return v
+            return {k: Decimal(str(val)) for k, val in v.items()}
         if isinstance(v, str):
-            return json.loads(v)
+            try:
+                parsed = json.loads(v)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"ELECTRICITY_DISCO_CAPS must be valid JSON: {e}")
+            if not isinstance(parsed, dict):
+                raise ValueError("ELECTRICITY_DISCO_CAPS must decode to a JSON object")
+            return {k: Decimal(str(val)) for k, val in parsed.items()}
         raise ValueError(f"ELECTRICITY_DISCO_CAPS must be a JSON object, got {type(v).__name__}")
 
     # Observability — Sentry (optional; no-op when DSN unset)
