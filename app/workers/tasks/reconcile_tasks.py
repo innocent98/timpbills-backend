@@ -182,6 +182,13 @@ _BILL_TX_TYPES = (
     TransactionType.flight,
 )
 
+# How many consecutive permanent-requery failures before we stop
+# retrying and transition the tx to failed with `needs_ops_review`.
+# Five = ~10 minutes of retries at the 2-min cadence; enough for a
+# transient backend config blip to self-heal, short enough that a
+# truly broken tx doesn't loop forever. See S3C-P3.
+_MAX_REQUERY_PERMANENT_ATTEMPTS = 5
+
 
 @celery_app.task(name="app.workers.tasks.reconcile_tasks.reconcile_pending_bills")
 def reconcile_pending_bills() -> dict:
@@ -218,6 +225,7 @@ async def _reconcile_bills() -> dict:
         settled = 0
         deferred = 0
         skipped = 0
+        escalated = 0
 
         for tx in pending_bills:
             # 1. Ask VTPass what happened to this request_id.
@@ -231,11 +239,43 @@ async def _reconcile_bills() -> dict:
                 continue
             except ProviderPermanentFailure as exc:
                 # VTPass rejected the requery itself (4xx). We don't know the
-                # actual bill outcome; flag for ops, don't auto-refund.
-                log.warning(
-                    "reconcile_bills: permanent requery error for %s: %s",
-                    tx.reference, exc,
+                # actual bill outcome and cannot auto-refund — a permanent
+                # requery rejection != a permanent bill failure. But we
+                # also can't spin on this row forever: track attempts in
+                # tx.meta; after N consecutive attempts, transition to
+                # failed with reason=needs_ops_review so ops sees a
+                # concrete handle in the tx list instead of having to
+                # grep logs. See S3C-P3.
+                attempts = int((tx.meta or {}).get("requery_permanent_attempts", 0)) + 1
+                tx.meta = {**(tx.meta or {}), "requery_permanent_attempts": attempts}
+                db.flush()
+                log.error(
+                    "reconcile_bills: permanent requery error for %s "
+                    "(attempt %d/%d): %s",
+                    tx.reference, attempts, _MAX_REQUERY_PERMANENT_ATTEMPTS, exc,
                 )
+                if attempts >= _MAX_REQUERY_PERMANENT_ATTEMPTS:
+                    # Escalate: transition to failed with a distinct
+                    # reason so the tx drops out of the pending/processing
+                    # sweep. We do NOT refund — the bill may have
+                    # actually delivered upstream; ops decides.
+                    locked = (
+                        db.query(Transaction)
+                        .filter(Transaction.id == tx.id)
+                        .with_for_update()
+                        .one()
+                    )
+                    if locked.status not in _TX_FINAL_STATES:
+                        tx_svc.transition(
+                            locked,
+                            to_status=TransactionStatus.failed,
+                            reason="needs_ops_review",
+                            context={
+                                "last_requery_error": str(exc),
+                                "attempts": attempts,
+                            },
+                        )
+                        escalated += 1
                 continue
             except Exception as exc:
                 # Never let a single bad row kill the batch.
@@ -275,10 +315,11 @@ async def _reconcile_bills() -> dict:
 
         db.commit()
         return {
-            "checked":  len(pending_bills),
-            "settled":  settled,
-            "deferred": deferred,
-            "skipped":  skipped,
+            "checked":   len(pending_bills),
+            "settled":   settled,
+            "deferred":  deferred,
+            "skipped":   skipped,
+            "escalated": escalated,
         }
     finally:
         db.close()

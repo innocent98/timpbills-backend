@@ -204,7 +204,9 @@ def test_reconcile_bills_delivered_transitions_tx_to_success(db_session):
     provider.set_response(tx.reference, _delivered(tx.reference, Decimal("500.00")))
 
     result = _run_reconcile_bills(db_session, provider)
-    assert result == {"checked": 1, "settled": 1, "deferred": 0, "skipped": 0}
+    assert result == {
+        "checked": 1, "settled": 1, "deferred": 0, "skipped": 0, "escalated": 0,
+    }
 
     db_session.expire_all()
     fresh = db_session.query(Transaction).filter(Transaction.id == tx.id).one()
@@ -363,10 +365,13 @@ def test_reconcile_bills_transient_failure_retries_next_tick(db_session):
 # ─── Permanent provider failure on requery itself ───────────────────────
 
 
-def test_reconcile_bills_permanent_requery_error_is_logged_not_refunded(db_session):
+def test_reconcile_bills_permanent_requery_error_bumps_attempts_counter(db_session):
     """ProviderPermanentFailure raised by requery means VTPass refused
     the requery call (e.g. 400). That does NOT tell us the bill outcome,
-    so we intentionally do not auto-refund. Ops-facing log is enough."""
+    so we don't auto-refund — but we also can't loop forever (see S3C-P3).
+    First N-1 attempts: bump the attempts counter in tx.meta and leave
+    the tx in processing. Nth attempt escalates via transition to failed.
+    """
     tx = _seed_bill(db_session, amount=Decimal("500.00"))
     provider = _FakeRequeryProvider()
     provider.set_raise(
@@ -376,10 +381,12 @@ def test_reconcile_bills_permanent_requery_error_is_logged_not_refunded(db_sessi
     result = _run_reconcile_bills(db_session, provider)
     assert result["settled"] == 0
     assert result["deferred"] == 0
+    assert result["escalated"] == 0   # only 1 attempt so far
 
     db_session.expire_all()
     fresh = db_session.query(Transaction).filter(Transaction.id == tx.id).one()
     assert fresh.status == TransactionStatus.processing
+    assert fresh.meta["requery_permanent_attempts"] == 1
     # Wallet unchanged — we didn't auto-refund based on a rejected requery.
     wallet = db_session.query(Wallet).filter(Wallet.user_id == tx.user_id).one()
     assert wallet.balance == Decimal("4500.00")
@@ -389,6 +396,43 @@ def test_reconcile_bills_permanent_requery_error_is_logged_not_refunded(db_sessi
         .count()
     )
     assert refunds == 0
+
+
+def test_reconcile_bills_escalates_after_max_permanent_attempts(db_session):
+    """After _MAX_REQUERY_PERMANENT_ATTEMPTS consecutive permanent
+    requery errors, the tx is transitioned to failed with reason
+    `needs_ops_review` so ops has a concrete handle. The tx drops out
+    of the pending/processing sweep on the next tick (no infinite loop).
+    No auto-refund — the bill may have actually delivered upstream; ops
+    decides. This is the S3C-P3 fix."""
+    from app.workers.tasks.reconcile_tasks import (
+        _MAX_REQUERY_PERMANENT_ATTEMPTS,
+    )
+
+    tx = _seed_bill(db_session, amount=Decimal("500.00"))
+    provider = _FakeRequeryProvider()
+    provider.set_raise(
+        tx.reference, ProviderPermanentFailure("vtpass 400 invalid request_id"),
+    )
+
+    # Simulate (N-1) prior attempts — this run is the Nth.
+    db_session.query(Transaction).filter(Transaction.id == tx.id).update(
+        {"meta": {
+            **tx.meta, "requery_permanent_attempts": _MAX_REQUERY_PERMANENT_ATTEMPTS - 1,
+        }},
+    )
+    db_session.commit()
+
+    result = _run_reconcile_bills(db_session, provider)
+    assert result["escalated"] == 1
+    assert result["settled"] == 0
+
+    db_session.expire_all()
+    fresh = db_session.query(Transaction).filter(Transaction.id == tx.id).one()
+    assert fresh.status == TransactionStatus.failed
+    # Wallet unchanged — escalation doesn't refund. Ops reviews.
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == tx.user_id).one()
+    assert wallet.balance == Decimal("4500.00")
 
 
 # ─── Cutoff: bills younger than 30s are skipped ─────────────────────────
