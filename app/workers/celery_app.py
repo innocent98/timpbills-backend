@@ -28,14 +28,13 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
-    # When FORCE_FAKE_PROVIDERS is on (tests + some dev setups), run
-    # `.delay()` calls synchronously so integration tests can assert on
-    # notification side-effects without spinning up a real worker. This
-    # is the canonical Celery test-harness pattern; it doesn't affect
-    # prod where the flag is False.
-    task_always_eager=settings.FORCE_FAKE_PROVIDERS,
-    task_eager_propagates=settings.FORCE_FAKE_PROVIDERS,
 )
+# Eager mode lives in tests/conftest.py — the Celery module is
+# imported before the autouse fixture can flip FORCE_FAKE_PROVIDERS,
+# so a settings-based read here would be dead code (prod reads False,
+# tests are overridden by conftest regardless). Keeping the flag
+# exclusively in the test harness makes the production config less
+# "clever" and the one place that toggles eager behavior obvious.
 
 celery_app.conf.beat_schedule = {
     "reconcile-pending-payments-every-2min": {
