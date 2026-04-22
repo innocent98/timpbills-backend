@@ -27,7 +27,7 @@ from app.integrations.vtpass.base import (
     ProviderTemporaryFailure,
 )
 from app.integrations.vtpass.factory import select_vtpass_client
-from app.services.bill_service import BillService
+from app.services.bill_service import BillService, REFUNDABLE_ON_FAILURE
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import (
     InsufficientBalance,
@@ -48,16 +48,9 @@ _TX_FINAL_STATES = {
 }
 
 
-# Keep in sync with the same-named set in webhooks.py. Only outbound tx
-# types debit the user before the provider settles, so only these
-# warrant a refund when the charge ultimately fails.
-_REFUNDABLE_ON_FAILURE = {
-    TransactionType.airtime,
-    TransactionType.data,
-    TransactionType.electricity,
-    TransactionType.cable,
-    TransactionType.flight,
-}
+# Lifted to app.services.bill_service (S3C-M10) — imported above.
+# Local alias keeps existing call sites terse without a rename.
+_REFUNDABLE_ON_FAILURE = REFUNDABLE_ON_FAILURE
 
 
 @celery_app.task(name="app.workers.tasks.reconcile_tasks.reconcile_pending_payments")
@@ -179,16 +172,9 @@ def _claim_payment(db, payment_id, target_status: PaymentStatus) -> bool:
 
 # ─── Bill reconciliation (Sprint 3 B12) ──────────────────────────────────
 
-# All bill types BillService produces. Kept aligned with
-# _REFUNDABLE_ON_FAILURE above — if a type isn't in this set, we don't
-# touch it here (e.g. wallet_funding has its own Paystack-driven path).
-_BILL_TX_TYPES = (
-    TransactionType.airtime,
-    TransactionType.data,
-    TransactionType.electricity,
-    TransactionType.cable,
-    TransactionType.flight,
-)
+# Bill types the reconciler handles. Same membership as REFUNDABLE_ON_FAILURE
+# by design; kept as a tuple here for use in `.in_(...)` filters.
+_BILL_TX_TYPES = tuple(REFUNDABLE_ON_FAILURE)
 
 # How many consecutive permanent-requery failures before we stop
 # retrying and transition the tx to failed with `needs_ops_review`.

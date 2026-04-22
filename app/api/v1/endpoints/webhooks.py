@@ -32,7 +32,7 @@ from app.integrations.vtpass.signature import (
     WebhookSecretNotConfigured,
     verify_vtpass_secret,
 )
-from app.services.bill_service import BillService
+from app.services.bill_service import BillService, REFUNDABLE_ON_FAILURE
 from app.services.notification_service import (
     NotificationEvent,
     build_wallet_funded_context,
@@ -43,18 +43,9 @@ from app.utils.responses import success
 from app.workers.tasks.notification_tasks import dispatch_delay
 
 
-# Transaction types where a failed Paystack charge means we already debited the
-# user's wallet (or equivalent) — so we issue a refund on failure. Wallet
-# funding is excluded because the charge going through was what would have
-# credited the wallet in the first place; a declined card never took money
-# from the user, so there is nothing to refund.
-_REFUNDABLE_ON_FAILURE = {
-    TransactionType.airtime,
-    TransactionType.data,
-    TransactionType.electricity,
-    TransactionType.cable,
-    TransactionType.flight,
-}
+# Lifted to app.services.bill_service (S3C-M10) — imported above.
+# Local alias to keep the existing call sites tidy without a big rename.
+_REFUNDABLE_ON_FAILURE = REFUNDABLE_ON_FAILURE
 
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -124,7 +115,15 @@ async def paystack_webhook(
         db.query(Payment).filter(Payment.provider_reference == reference).first()
     )
     if payment is None:
-        # Unknown reference — still record the event for audit.
+        # Unknown reference — still record the event for audit but
+        # log.warning so incident triage has a concrete signal beyond
+        # the webhook_events table (which nobody tails). Common
+        # causes: misrouted webhooks (wrong env pointing at prod),
+        # secret leaked and replayed. S3C-M3.
+        log.warning(
+            "paystack webhook: unknown reference %s event=%s",
+            reference, event_id,
+        )
         db.commit()
         return success({"ok": True, "note": "unknown_reference"})
 
@@ -344,6 +343,12 @@ async def vtpass_webhook(
     if payment is None:
         # Unknown reference — still record the event so ops can audit
         # stray posts (wrong env, secret leaked, etc.), but don't error.
+        # log.warning so incident triage has a concrete signal beyond
+        # the webhook_events table. S3C-M3.
+        log.warning(
+            "vtpass webhook: unknown reference %s event=%s",
+            reference, vtpass_event_id,
+        )
         db.commit()
         return success({"ok": True, "note": "unknown_reference"})
 

@@ -21,18 +21,20 @@ Failures are swallowed with a warning log. A missing push token or a
 transient email outage should never break the request that triggered
 the notification — the tx is already committed, money already moved.
 """
-import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+from app.core.logger import log
 from app.integrations.email.base import EmailProvider
 from app.integrations.email.renderer import render_email
 from app.integrations.push.base import BasePushClient
 
 
-log = logging.getLogger(__name__)
+# S3C-M11: uses the shared loguru-backed logger from app.core.logger
+# so Sentry breadcrumbs are wired consistently with the rest of app/services.
+# (No log = ... needed — `log` is imported above.)
 
 
 class NotificationEvent(str, Enum):

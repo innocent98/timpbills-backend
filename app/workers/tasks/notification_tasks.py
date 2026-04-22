@@ -103,7 +103,17 @@ def _run_async(coro: Awaitable) -> Any:
 
 
 def _resolve_clients() -> tuple[EmailProvider, BasePushClient]:
-    """Pick email + push clients the same way the API layer does.
+    """Pick email + push clients for the Celery worker.
+
+    Important seam (S3C-M9): the worker runs in its OWN process with
+    no FastAPI app context, so `app.dependency_overrides[get_email_provider]`
+    from tests has no effect here. We reach into the module-level
+    singletons directly (`_fake_email_singleton`, the push factory's
+    fake). Integration tests that assert on notification side-effects
+    must therefore check `app.api.deps._fake_email_singleton.sent`,
+    NOT the per-test FakeEmailClient passed through the DI override.
+    Already documented in `tests/api/test_notification_wiring.py`.
+
     Imports are inside the function so importing this module at Celery
     boot doesn't drag provider SDKs into the worker until a task runs."""
     from app.api.deps import _fake_email_singleton, _fake_push_singleton  # noqa: PLC0415

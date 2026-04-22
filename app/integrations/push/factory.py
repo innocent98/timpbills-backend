@@ -44,21 +44,41 @@ def get_fake_singleton() -> FakePushClient:
 
 
 def select_push_client() -> BasePushClient:
+    """Return the push client, honoring the same double-gate as
+    Paystack / VTPass: both `ENVIRONMENT` is in `_FAKE_OK_ENVS` AND
+    `FORCE_FAKE_PROVIDERS` is explicitly true. (S3C-M1)
+
+    Pre-M1 behavior had an env-only fallback: if `ENVIRONMENT=dev` with
+    `FORCE_FAKE_PROVIDERS` unset, the fake was returned. That silently
+    swallowed a prod misconfig (e.g. someone deploys with ENVIRONMENT=dev
+    to staging) — push notifications vanished with no error. The
+    double-gate aligns with Paystack's factory and matches the rule
+    "fake providers require an explicit opt-in." """
     env = (settings.ENVIRONMENT or "").lower()
-    if settings.FORCE_FAKE_PROVIDERS:
-        if env not in _FAKE_OK_ENVS:
+    force_fake = bool(settings.FORCE_FAKE_PROVIDERS)
+
+    if env not in _FAKE_OK_ENVS:
+        if force_fake:
+            # Flag set in a non-eligible env — refuse rather than silently
+            # using the real client OR the fake. Same policy as Paystack.
             raise FakePushInEligibleEnvError(
                 f"FORCE_FAKE_PROVIDERS=True is not allowed in env={env!r}. "
                 f"Unset it or move to one of {sorted(_FAKE_OK_ENVS)}."
             )
-        return _fake()
-    if env in _FAKE_OK_ENVS:
-        # No real creds required to decide — default to fake in dev/test.
-        return _fake()
-    # TODO(sprint-4): wire FCM HTTP v1 client here. For now, fail loudly
-    # so nobody ships a real deploy expecting push to work silently.
-    raise RuntimeError(
-        "No real push client is configured yet (FCM HTTP v1 is a Sprint 4 "
-        "follow-up). For now, set FORCE_FAKE_PROVIDERS=True in non-prod envs "
-        "or wait for the real client to land."
-    )
+        # TODO(sprint-4): wire FCM HTTP v1 client here. For now, fail
+        # loudly so nobody ships a real deploy expecting push to work
+        # silently.
+        raise RuntimeError(
+            "No real push client is configured yet (FCM HTTP v1 is a "
+            "Sprint 4 follow-up). For now, set FORCE_FAKE_PROVIDERS=True "
+            "in non-prod envs or wait for the real client to land."
+        )
+
+    # Eligible env — fake is allowed iff the flag is set.
+    if not force_fake:
+        raise RuntimeError(
+            "Push client is not configured: set FORCE_FAKE_PROVIDERS=True "
+            f"to use FakePushClient in env={env!r}, or wait for the real "
+            "FCM HTTP v1 client (Sprint 4 follow-up)."
+        )
+    return _fake()

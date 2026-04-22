@@ -73,16 +73,29 @@ class DataPlanNotFound(Exception):
 
 
 # Tx states that are already final — hitting any state-changing path
-# with the tx in one of these would raise InvalidStateTransition. Kept
-# here (not imported from webhooks.py) so BillService can row-lock +
-# skip before calling transition()/create_refund(). Kept in lock-step
-# with webhooks.vtpass_webhook and reconcile_tasks._reconcile_bills.
+# with the tx in one of these would raise InvalidStateTransition. Used
+# by BillService (sync purchase path), the vtpass webhook, and the
+# reconcile worker — they all import from here (S3C-M10).
 _TX_FINAL_STATES = {
     TransactionStatus.success,
     TransactionStatus.failed,
     TransactionStatus.refund_pending,
     TransactionStatus.refunded,
     TransactionStatus.refund_failed,
+}
+
+
+# Tx types where a failed upstream charge means the user was already
+# debited, so a refund + wallet credit is owed. Wallet funding is
+# intentionally OMITTED (S2C-1): a declined card never took money,
+# there's nothing to refund. Single source of truth — webhooks.py
+# and reconcile_tasks.py import from here (S3C-M10).
+REFUNDABLE_ON_FAILURE = {
+    TransactionType.airtime,
+    TransactionType.data,
+    TransactionType.electricity,
+    TransactionType.cable,
+    TransactionType.flight,
 }
 
 
@@ -326,6 +339,18 @@ class BillService:
                     "vtpass_transaction_id": result.transaction_id,
                 }
             else:
+                if result.delivered_amount_ngn > amount:
+                    # Over-delivery. VTPass shouldn't do this in practice,
+                    # but no schema bound prevents it, and no existing
+                    # sanity check was in place. Log at ERROR so ops
+                    # sees it — the user has been credited more airtime
+                    # than they paid for, and we want a concrete trail
+                    # to chase. S3C-M4. (We DO still honor it — failing
+                    # the tx here would be worse UX.)
+                    log.error(
+                        "over-delivery from provider tx=%s requested=%s delivered=%s",
+                        tx.reference, amount, result.delivered_amount_ngn,
+                    )
                 tx.meta = {
                     **(tx.meta or {}),
                     "vtpass_transaction_id": result.transaction_id,
@@ -390,7 +415,15 @@ def _notify_bill_success(
 
     user = db.query(User).filter(User.id == tx.user_id).first()
     if user is None:
-        log.warning("notify: tx %s has no user row — skipping", tx.reference)
+        # Data-integrity violation: the Transaction's user_id FK can't
+        # resolve. This should be unreachable (FK constraint); if we
+        # hit it, something is seriously wrong (tests seeding directly
+        # around ORM, race with user deletion, etc.). Promoting to
+        # ERROR so ops sees it in alerting. S3C-M2.
+        log.error(
+            "notify: tx %s has no user row — FK violation? Skipping dispatch.",
+            tx.reference,
+        )
         return
 
     partial = result.delivered_amount_ngn < amount
@@ -419,7 +452,10 @@ def _notify_bill_failure_refund(
 
     user = db.query(User).filter(User.id == tx.user_id).first()
     if user is None:
-        log.warning("notify: tx %s has no user row — skipping", tx.reference)
+        log.error(
+            "notify: tx %s has no user row — FK violation? Skipping dispatch.",
+            tx.reference,
+        )
         return
 
     meta = tx.meta or {}

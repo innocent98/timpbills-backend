@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BillDeliveryStatus(str, Enum):
@@ -46,12 +46,15 @@ class BillPurchaseResponse(BaseModel):
     code: str
 
     # What we asked to deliver.
-    requested_amount_ngn: Decimal
+    requested_amount_ngn: Decimal = Field(ge=0)
 
     # What actually reached the subscriber (airtime wallet or data allocation).
     # Equal to requested on a full success; less on a partial; zero on a
     # hard failure (VTPass returns the amount as 0.00 in that case).
-    delivered_amount_ngn: Decimal
+    # ge=0 bound prevents a malformed provider response from producing a
+    # negative shortfall (which would refund more than the original debit).
+    # S3C-M5.
+    delivered_amount_ngn: Decimal = Field(ge=0)
 
     # Human-readable description from VTPass, e.g. "TRANSACTION SUCCESSFUL".
     description: str = ""
