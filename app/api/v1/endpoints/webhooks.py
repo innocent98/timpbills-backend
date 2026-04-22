@@ -33,9 +33,14 @@ from app.integrations.vtpass.signature import (
     verify_vtpass_secret,
 )
 from app.services.bill_service import BillService
+from app.services.notification_service import (
+    NotificationEvent,
+    build_wallet_funded_context,
+)
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import KycCapExceeded, WalletService
 from app.utils.responses import success
+from app.workers.tasks.notification_tasks import dispatch_delay
 
 
 # Transaction types where a failed Paystack charge means we already debited the
@@ -164,6 +169,28 @@ async def paystack_webhook(
                 reason="paystack.webhook.charge.success",
                 context={"paystack_event_id": event_id},
             )
+            # Notify: only wallet-funding lands a balance change the
+            # user cares about here. Outbound-tx charges don't come
+            # through this endpoint with a success status.
+            if tx.type == TransactionType.wallet_funding:
+                # Re-fetch wallet balance so the email shows the right
+                # number; commit above made the credit visible.
+                from app.db.models.user import User
+                from app.db.models.wallet import Wallet
+                wallet = db.query(Wallet).filter(Wallet.user_id == tx.user_id).first()
+                user = db.query(User).filter(User.id == tx.user_id).first()
+                if user is not None:
+                    dispatch_delay(
+                        user_id=str(tx.user_id),
+                        user_email=user.email,
+                        event=NotificationEvent.wallet_funded,
+                        context=build_wallet_funded_context(
+                            amount=tx.amount,
+                            balance=wallet.balance if wallet else tx.amount,
+                            reference=tx.reference,
+                            channel=(v.authorization.channel if v.authorization else None),
+                        ),
+                    )
     elif event_type in ("charge.failed", "transfer.failed"):
         if _claim_payment(db, payment.id, PaymentStatus.failed):
             tx_svc.transition(

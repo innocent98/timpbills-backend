@@ -25,6 +25,18 @@ def _force_fake_providers():
     yield
     settings.FORCE_FAKE_PROVIDERS = original
 
+
+# Celery runs synchronously in tests so `.delay()` calls (e.g. the
+# notification dispatcher) fire their side effects before the HTTP
+# request returns, and we can assert on FakeEmailClient / FakePushClient
+# straight after the `client.post(...)`. The celery config is read from
+# `settings.FORCE_FAKE_PROVIDERS` at worker-module import time (default
+# False), so we flip both flags explicitly here regardless of when the
+# module was first imported.
+from app.workers.celery_app import celery_app as _celery_app
+_celery_app.conf.task_always_eager = True
+_celery_app.conf.task_eager_propagates = True
+
 # Test database (file-based, used for integration client tests)
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})

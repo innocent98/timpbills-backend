@@ -1,0 +1,14 @@
+Your {{ tx_type_label }} purchase didn't go through
+
+We tried to send ₦{{ amount }} of {{ tx_type_label }} to {{ destination }},
+but the telco rejected the request.
+
+Good news: your ₦{{ amount }} is back in your Timpbills wallet. You can
+try again whenever you're ready.
+
+Reference: {{ reference }}
+{% if reason %}Reason: {{ reason }}{% endif %}
+
+If this keeps happening, reply to this email and we'll take a look.
+
+— Timpbills

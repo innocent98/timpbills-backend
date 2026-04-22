@@ -1,0 +1,27 @@
+{% extends "_layout.html" %}
+{% block body %}
+  <h2 style="color: #0F172A; font-size: 24px; font-weight: 700; margin: 0 0 12px;">Your {{ tx_type_label }} purchase didn't go through</h2>
+  <p style="color: #475569; font-size: 15px; line-height: 1.6; margin: 0 0 24px;">
+    We tried to send <strong>₦{{ amount }}</strong> of {{ tx_type_label }} to <strong>{{ destination }}</strong>, but the telco rejected the request.
+  </p>
+  <div style="background: #ECFDF5; border-left: 4px solid #10B981; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
+    <p style="color: #065F46; font-size: 14px; line-height: 1.5; margin: 0;">
+      <strong>Good news:</strong> your ₦{{ amount }} is back in your Timpbills wallet. You can try again whenever you're ready.
+    </p>
+  </div>
+  <table role="presentation" cellpadding="0" cellspacing="0" style="width: 100%; background: #F0F1FB; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">Reference</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0; font-family: ui-monospace, SFMono-Regular, monospace;">{{ reference }}</td>
+    </tr>
+    {% if reason %}
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">Reason</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0;">{{ reason }}</td>
+    </tr>
+    {% endif %}
+  </table>
+  <p style="color: #64748B; font-size: 13px; line-height: 1.6; margin: 0;">
+    If this keeps happening, reply to this email and we'll take a look.
+  </p>
+{% endblock %}

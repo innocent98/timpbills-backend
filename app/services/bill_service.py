@@ -47,6 +47,10 @@ from app.integrations.vtpass.schemas import (
     BillPurchaseResponse,
     DataPlanList,
 )
+from app.services.notification_service import (
+    NotificationEvent,
+    build_bill_context,
+)
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import InsufficientBalance, WalletService
 
@@ -234,6 +238,9 @@ class BillService:
                 tx, amount=amount,
                 reason=f"provider_permanent_failure: {exc}",
             )
+            _notify_bill_failure_refund(
+                db=self._db, tx=tx, amount=amount, reason=str(exc),
+            )
             return BillResult(
                 tx=tx,
                 response=_placeholder_failed(tx.reference, amount, description=str(exc)),
@@ -276,6 +283,7 @@ class BillService:
                 reason="provider_delivered",
                 context={"code": result.code},
             )
+            _notify_bill_success(db=self._db, tx=tx, amount=amount, result=result)
             return BillResult(tx=tx, response=result)
 
         if result.status == BillDeliveryStatus.pending:
@@ -292,6 +300,9 @@ class BillService:
             tx, to_status=TransactionStatus.failed,
             reason=f"provider_failed_code_{result.code}",
             context={"description": result.description},
+        )
+        _notify_bill_failure_refund(
+            db=self._db, tx=tx, amount=amount, reason=result.description,
         )
         return BillResult(tx=tx, response=result)
 
@@ -321,6 +332,66 @@ class BillService:
 
 
 # ── Placeholder response builders for transient / permanent failure paths
+
+def _notify_bill_success(
+    *, db: Session, tx: Transaction, amount: Decimal, result: BillPurchaseResponse
+) -> None:
+    """Fire-and-forget email + push for a successful bill delivery.
+    Inside a helper so the BillService happy-path reads clean, and so
+    tests can patch this one symbol instead of the whole Celery task."""
+    from app.db.models.user import User
+    from app.workers.tasks.notification_tasks import dispatch_delay
+
+    user = db.query(User).filter(User.id == tx.user_id).first()
+    if user is None:
+        log.warning("notify: tx %s has no user row — skipping", tx.reference)
+        return
+
+    partial = result.delivered_amount_ngn < amount
+    meta = tx.meta or {}
+    ctx = build_bill_context(
+        tx_type=tx.type.value,
+        amount=amount,
+        destination=str(meta.get("phone") or meta.get("destination") or ""),
+        reference=tx.reference,
+        when=tx.created_at.isoformat() if tx.created_at else "",
+        partial=partial,
+        delivered_amount=result.delivered_amount_ngn if partial else None,
+        shortfall=(amount - result.delivered_amount_ngn) if partial else None,
+    )
+    dispatch_delay(
+        user_id=str(tx.user_id), user_email=user.email,
+        event=NotificationEvent.bill_success, context=ctx,
+    )
+
+
+def _notify_bill_failure_refund(
+    *, db: Session, tx: Transaction, amount: Decimal, reason: str = ""
+) -> None:
+    from app.db.models.user import User
+    from app.workers.tasks.notification_tasks import dispatch_delay
+
+    user = db.query(User).filter(User.id == tx.user_id).first()
+    if user is None:
+        log.warning("notify: tx %s has no user row — skipping", tx.reference)
+        return
+
+    meta = tx.meta or {}
+    ctx = build_bill_context(
+        tx_type=tx.type.value,
+        amount=amount,
+        destination=str(meta.get("phone") or meta.get("destination") or ""),
+        reference=tx.reference,
+        when=tx.created_at.isoformat() if tx.created_at else "",
+        partial=False,
+    )
+    # The failure template shows a reason line when present.
+    ctx["reason"] = reason
+    dispatch_delay(
+        user_id=str(tx.user_id), user_email=user.email,
+        event=NotificationEvent.bill_failure_refund, context=ctx,
+    )
+
 
 def _placeholder_pending(reference: str, amount: Decimal) -> BillPurchaseResponse:
     return BillPurchaseResponse(

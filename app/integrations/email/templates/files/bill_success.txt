@@ -1,0 +1,13 @@
+Your {{ tx_type_label }} is on its way
+
+We've sent ₦{{ amount }} of {{ tx_type_label }} to {{ destination }}.
+{% if partial %}
+Partial delivery: ₦{{ delivered_amount }} delivered. We've refunded the
+₦{{ shortfall }} shortfall to your wallet.
+{% endif %}
+Reference: {{ reference }}
+When: {{ when }}
+
+Need help? Reply to this email.
+
+— Timpbills

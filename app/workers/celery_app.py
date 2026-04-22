@@ -15,7 +15,10 @@ celery_app = Celery(
     "timpbills",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.workers.tasks.reconcile_tasks"],
+    include=[
+        "app.workers.tasks.reconcile_tasks",
+        "app.workers.tasks.notification_tasks",
+    ],
 )
 
 celery_app.conf.update(
@@ -25,6 +28,13 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
+    # When FORCE_FAKE_PROVIDERS is on (tests + some dev setups), run
+    # `.delay()` calls synchronously so integration tests can assert on
+    # notification side-effects without spinning up a real worker. This
+    # is the canonical Celery test-harness pattern; it doesn't affect
+    # prod where the flag is False.
+    task_always_eager=settings.FORCE_FAKE_PROVIDERS,
+    task_eager_propagates=settings.FORCE_FAKE_PROVIDERS,
 )
 
 celery_app.conf.beat_schedule = {

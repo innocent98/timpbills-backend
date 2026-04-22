@@ -1,0 +1,27 @@
+{% extends "_layout.html" %}
+{% block body %}
+  <h2 style="color: #0F172A; font-size: 24px; font-weight: 700; margin: 0 0 12px;">Your {{ tx_type_label }} is on its way</h2>
+  <p style="color: #475569; font-size: 15px; line-height: 1.6; margin: 0 0 24px;">
+    We've sent <strong>₦{{ amount }}</strong> of {{ tx_type_label }} to <strong>{{ destination }}</strong>.
+  </p>
+  {% if partial %}
+  <div style="background: #FFF7ED; border-left: 4px solid #F97316; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
+    <p style="color: #9A3412; font-size: 14px; line-height: 1.5; margin: 0;">
+      <strong>Partial delivery:</strong> ₦{{ delivered_amount }} delivered. We've refunded the ₦{{ shortfall }} shortfall to your wallet.
+    </p>
+  </div>
+  {% endif %}
+  <table role="presentation" cellpadding="0" cellspacing="0" style="width: 100%; background: #F0F1FB; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">Reference</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0; font-family: ui-monospace, SFMono-Regular, monospace;">{{ reference }}</td>
+    </tr>
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">When</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0;">{{ when }}</td>
+    </tr>
+  </table>
+  <p style="color: #64748B; font-size: 13px; line-height: 1.6; margin: 0;">
+    Need help? Reply to this email.
+  </p>
+{% endblock %}

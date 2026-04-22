@@ -1,0 +1,22 @@
+{% extends "_layout.html" %}
+{% block body %}
+  <h2 style="color: #0F172A; font-size: 24px; font-weight: 700; margin: 0 0 12px;">Your wallet has been funded</h2>
+  <p style="color: #475569; font-size: 15px; line-height: 1.6; margin: 0 0 24px;">
+    <strong>₦{{ amount }}</strong> has landed in your Timpbills wallet. Your new balance is <strong>₦{{ balance }}</strong>.
+  </p>
+  <table role="presentation" cellpadding="0" cellspacing="0" style="width: 100%; background: #F0F1FB; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">Reference</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0; font-family: ui-monospace, SFMono-Regular, monospace;">{{ reference }}</td>
+    </tr>
+    {% if channel %}
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">Paid via</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0;">{{ channel }}</td>
+    </tr>
+    {% endif %}
+  </table>
+  <p style="color: #64748B; font-size: 13px; line-height: 1.6; margin: 0;">
+    Keep stacking — pay a bill, buy data, or book a trip from here.
+  </p>
+{% endblock %}

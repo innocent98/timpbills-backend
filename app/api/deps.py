@@ -27,6 +27,11 @@ _fake_sms_singleton = FakeTermiiClient()
 # Singleton fake email client so tests can inspect .sent
 _fake_email_singleton = FakeEmailClient()
 
+# Singleton fake push client — tests inspect .sent; real FCM HTTP v1 is
+# a Sprint 4 follow-up (see app/integrations/push/factory.py).
+from app.integrations.push.factory import get_fake_singleton as _push_fake_singleton
+_fake_push_singleton = _push_fake_singleton()
+
 # Redis client singleton
 _redis_client: Redis | None = None
 
@@ -50,6 +55,12 @@ def reset_fake_sms() -> None:
 def reset_fake_email() -> None:
     """Clear the fake email singleton's sent messages (for test isolation)."""
     _fake_email_singleton.sent.clear()
+
+
+def reset_fake_push() -> None:
+    """Clear the fake push singleton's sent messages (for test isolation)."""
+    from app.integrations.push import factory as _push_factory
+    _push_factory.reset_fake_singleton()
 
 
 def get_db():

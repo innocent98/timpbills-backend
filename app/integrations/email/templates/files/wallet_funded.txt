@@ -1,0 +1,11 @@
+Your wallet has been funded
+
+₦{{ amount }} has landed in your Timpbills wallet.
+Your new balance is ₦{{ balance }}.
+
+Reference: {{ reference }}
+{% if channel %}Paid via: {{ channel }}{% endif %}
+
+Keep stacking — pay a bill, buy data, or book a trip from here.
+
+— Timpbills
