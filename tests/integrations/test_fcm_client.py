@@ -7,7 +7,7 @@ for the httpx stub, and patches
 `google.oauth2.service_account.Credentials.from_service_account_*`
 for the credentials stub.
 
-Six cases cover:
+Eight cases cover:
   1. Constructor from file path → Credentials.from_service_account_file.
   2. Constructor from inline JSON → Credentials.from_service_account_info
      (also verifies precedence: json wins when both set).
@@ -15,6 +15,10 @@ Six cases cover:
   4. send() dead-token on 404 UNREGISTERED → raises DeadFCMToken.
   5. send() 5xx → raises PushTemporaryFailure.
   6. Token cached across two send()s within expiry window.
+  7. send() dead-token on 400 INVALID_ARGUMENT → raises DeadFCMToken
+     (second dead-token branch in _DEAD_TOKEN_ERROR_CODES).
+  8. send() on httpx.ConnectError → raises PushTemporaryFailure
+     (network-error branch of the send() try/except).
 """
 import datetime
 import json
@@ -352,3 +356,86 @@ async def test_access_token_cached_across_two_sends_within_expiry():
     assert fake_creds.refresh.call_count == 1
     # Both POSTs fired.
     assert inner.post.await_count == 2
+
+
+# ── 7. Dead-token on 400 INVALID_ARGUMENT ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_raises_dead_fcm_token_on_400_invalid_argument():
+    """FCM returns 400 with `errorCode: INVALID_ARGUMENT` when the token
+    is malformed (e.g. wrong project, truncated). This is the second
+    dead-token branch in _DEAD_TOKEN_ERROR_CODES — distinct from 404
+    UNREGISTERED (test 4) — and must also raise DeadFCMToken so B17
+    deletes the row. The FCM error-code string must propagate in the
+    exception message so ops can distinguish the two causes."""
+    fake_creds = _make_fake_creds()
+    bad_request_body = {
+        "error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "message": "The registration token is not a valid FCM registration token",
+            "details": [{
+                "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
+                "errorCode": "INVALID_ARGUMENT",
+            }],
+        },
+    }
+    client = FCMPushClient(
+        credentials_path="/fake/sa-key.json",
+        project_id="test-project",
+    )
+
+    with patch(
+        "google.oauth2.service_account.Credentials.from_service_account_file",
+        return_value=fake_creds,
+    ):
+        patcher, _ = _patch_async_client(
+            post_return=_mock_httpx_response(
+                status_code=400, json_body=bad_request_body,
+            ),
+        )
+        with patcher:
+            with pytest.raises(DeadFCMToken) as excinfo:
+                await client.send(
+                    user_id="u1", fcm_token="malformed-token",
+                    title="x", body="y",
+                )
+
+    # The FCM error-code string is included so B17 can distinguish this
+    # from the UNREGISTERED case at log-scan time.
+    assert "INVALID_ARGUMENT" in str(excinfo.value)
+
+
+# ── 8. httpx network error → PushTemporaryFailure ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_raises_push_temporary_failure_on_connect_error():
+    """A connection-level failure (DNS, TCP reset, TLS handshake) must
+    surface as PushTemporaryFailure so the Celery caller can retry —
+    NOT RuntimeError or a raw httpx exception. This covers the
+    network-error branch of the try/except in send(); the 5xx branch
+    (test 5) is the *response*-level retryable path."""
+    fake_creds = _make_fake_creds()
+    client = FCMPushClient(
+        credentials_path="/fake/sa-key.json",
+        project_id="test-project",
+    )
+
+    with patch(
+        "google.oauth2.service_account.Credentials.from_service_account_file",
+        return_value=fake_creds,
+    ):
+        patcher, _ = _patch_async_client(
+            post_side_effect=httpx.ConnectError("dns failure"),
+        )
+        with patcher:
+            with pytest.raises(PushTemporaryFailure) as excinfo:
+                await client.send(
+                    user_id="u1", fcm_token="tok",
+                    title="x", body="y",
+                )
+
+    # Message is chained so ops can see the underlying httpx reason.
+    assert "dns failure" in str(excinfo.value)

@@ -42,8 +42,10 @@ load fast for tests that don't exercise FCM (mirrors the pattern in
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import json
+from datetime import timezone
 from typing import Any
 
 import httpx
@@ -130,6 +132,13 @@ class FCMPushClient:
         # first send()). `.refresh()` is what actually populates .token.
         self._creds: Any | None = None
 
+        # Lock serializing token refresh across concurrent send() calls.
+        # Initialized lazily on first _get_access_token() invocation — the
+        # class can be constructed outside any running event loop (e.g.
+        # at module import / factory wiring time), and asyncio.Lock()
+        # binds to the running loop at construction time.
+        self._refresh_lock: asyncio.Lock | None = None
+
     # ── Public API ──────────────────────────────────────────────────────
 
     async def send(
@@ -149,7 +158,7 @@ class FCMPushClient:
           RuntimeError — any other unexpected 4xx / bad response shape.
 
         Returns None on success (mirrors FakePushClient.send)."""
-        access_token = self._get_access_token()
+        access_token = await self._get_access_token()
         url = _FCM_SEND_URL.format(project_id=self._project_id)
         payload = _build_fcm_message(
             fcm_token=fcm_token, title=title, body=body, data=data,
@@ -168,36 +177,70 @@ class FCMPushClient:
 
     # ── Internals ───────────────────────────────────────────────────────
 
-    def _get_access_token(self) -> str:
+    async def _get_access_token(self) -> str:
         """Return a valid FCM access token, refreshing iff the cached
         one is absent / expired / within `_TOKEN_REFRESH_BUFFER_SECONDS`
         of expiring. Caches on `self._creds` so back-to-back sends don't
-        each re-exchange the JWT."""
-        # Lazy imports — keep module load cheap for non-FCM test runs.
-        from google.auth.transport.requests import Request  # noqa: PLC0415
-        from google.oauth2 import service_account  # noqa: PLC0415
+        each re-exchange the JWT.
 
-        if self._creds is None:
-            # credentials_json wins if both set (see class docstring).
-            if self._credentials_json:
-                info = json.loads(self._credentials_json)
-                self._creds = service_account.Credentials.from_service_account_info(
-                    info, scopes=[_FCM_SCOPE],
+        Concurrency: serialized by `self._refresh_lock` so two concurrent
+        `send()` callers (FastAPI handler + Celery task is the real
+        failure mode) don't both hit the token endpoint. The fast-path
+        (cached-and-valid) bypass avoids lock contention on the hot
+        path. `credentials.refresh()` is SYNCHRONOUS blocking I/O — it
+        must run in a worker thread so it doesn't stall the event loop
+        for the ~200-500ms JWT round-trip.
+        """
+        # Lazy-init the lock on first call — cannot construct in __init__
+        # because the class may be built outside any running event loop.
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
+
+        # Fast-path: cached creds still valid — skip the lock entirely.
+        # Concurrent callers all read cached state; no race because
+        # _creds/_creds.token are only *mutated* inside the locked block
+        # below, and a stale read here just sends us into the lock where
+        # the double-check protects the invariant.
+        if self._creds is not None and not self._needs_refresh(self._creds):
+            token = getattr(self._creds, "token", None)
+            if token:
+                return str(token)
+
+        async with self._refresh_lock:
+            # Double-check inside the lock — another coroutine may have
+            # refreshed while we were waiting for the lock.
+            if self._creds is not None and not self._needs_refresh(self._creds):
+                token = getattr(self._creds, "token", None)
+                if token:
+                    return str(token)
+
+            # Lazy imports — keep module load cheap for non-FCM test runs.
+            from google.auth.transport.requests import Request  # noqa: PLC0415
+            from google.oauth2 import service_account  # noqa: PLC0415
+
+            if self._creds is None:
+                # credentials_json wins if both set (see class docstring).
+                if self._credentials_json:
+                    info = json.loads(self._credentials_json)
+                    self._creds = service_account.Credentials.from_service_account_info(
+                        info, scopes=[_FCM_SCOPE],
+                    )
+                else:
+                    self._creds = service_account.Credentials.from_service_account_file(
+                        self._credentials_path, scopes=[_FCM_SCOPE],
+                    )
+
+            if self._needs_refresh(self._creds):
+                # refresh() is synchronous blocking I/O — run it on a
+                # worker thread so the event loop stays responsive.
+                await asyncio.to_thread(self._creds.refresh, Request())
+
+            token = getattr(self._creds, "token", None)
+            if not token:
+                raise RuntimeError(
+                    "FCMPushClient: credentials.refresh() did not yield a token"
                 )
-            else:
-                self._creds = service_account.Credentials.from_service_account_file(
-                    self._credentials_path, scopes=[_FCM_SCOPE],
-                )
-
-        if self._needs_refresh(self._creds):
-            self._creds.refresh(Request())
-
-        token = getattr(self._creds, "token", None)
-        if not token:
-            raise RuntimeError(
-                "FCMPushClient: credentials.refresh() did not yield a token"
-            )
-        return str(token)
+            return str(token)
 
     @staticmethod
     def _needs_refresh(creds: Any) -> bool:
@@ -209,10 +252,13 @@ class FCMPushClient:
         if expiry is None:
             # No expiry known — refresh to be safe (first call).
             return True
-        # google-auth stores expiry as a naive UTC datetime. Compare
-        # against naive utcnow() for parity with how `creds.expired`
-        # computes it internally.
-        now = _dt.datetime.utcnow()
+        # google-auth stores expiry as a naive UTC datetime. We build
+        # a tz-aware "now" (datetime.utcnow is deprecated in 3.12+ and
+        # becomes an error on newer Pythons) and strip the tzinfo for
+        # the comparison — tz-aware vs tz-naive would raise TypeError.
+        # If a future google-auth version makes `expiry` tz-aware, this
+        # .replace() should be dropped.
+        now = _dt.datetime.now(timezone.utc).replace(tzinfo=None)
         if expiry <= now + _dt.timedelta(seconds=_TOKEN_REFRESH_BUFFER_SECONDS):
             return True
         return False
