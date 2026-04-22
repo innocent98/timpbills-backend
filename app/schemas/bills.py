@@ -62,7 +62,9 @@ class DataPlanListResponse(BaseModel):
 
 class MeterValidationRequest(BaseModel):
     service_id: str                       # DisCo slug, e.g. "ikeja-electric"
-    meter_number: str
+    # Real NG meter numbers are 11–13 digits; bound keeps fuzz payloads
+    # out of the Redis cache key and the downstream VTPass call.
+    meter_number: str = Field(min_length=1, max_length=20)
     meter_type: Literal["prepaid", "postpaid"]
 
 
@@ -74,7 +76,7 @@ class MeterValidationResponse(BaseModel):
     meter_number: str
     customer_name: str
     address: str
-    meter_type: str
+    meter_type: Literal["prepaid", "postpaid"]
 
 
 # ── Networks catalog (for GET /bills/airtime/networks) ─────────────────

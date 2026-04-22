@@ -111,23 +111,29 @@ async def test_validate_meter_invalid_returns_400_invalid_meter(client):
 
     # Poison this (service_id, meter) pair — the fake will raise
     # ProviderPermanentFailure, which the endpoint maps to 400/INVALID_METER.
+    # The client fixture also calls reset_fake_vtpass() on teardown so we
+    # don't strictly need to unpoison here, but an explicit try/finally
+    # makes the test self-contained and robust to future co-located tests
+    # that share the singleton within one fixture scope.
     fake = _vtpass_factory.get_fake_singleton()
     fake.will_reject_meter("ikeja-electric", "0000000000000")
-
-    r = await client.post(
-        "/api/v1/bills/electricity/validate-meter",
-        json={
-            "service_id":   "ikeja-electric",
-            "meter_number": "0000000000000",
-            "meter_type":   "prepaid",
-        },
-        headers=headers,
-    )
-    assert r.status_code == 400, r.text
-    err = r.json()["error"]
-    assert err["code"] == "INVALID_METER"
-    # VTPass error description is surfaced to the client.
-    assert "0000000000000" in err["message"]
+    try:
+        r = await client.post(
+            "/api/v1/bills/electricity/validate-meter",
+            json={
+                "service_id":   "ikeja-electric",
+                "meter_number": "0000000000000",
+                "meter_type":   "prepaid",
+            },
+            headers=headers,
+        )
+        assert r.status_code == 400, r.text
+        err = r.json()["error"]
+        assert err["code"] == "INVALID_METER"
+        # VTPass error description is surfaced to the client.
+        assert "0000000000000" in err["message"]
+    finally:
+        fake._rejected_meters.discard(("ikeja-electric", "0000000000000"))
 
 
 # ── 3. Cache hit: second call doesn't touch the provider ───────────────

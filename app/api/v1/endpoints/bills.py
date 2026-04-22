@@ -1,5 +1,5 @@
-"""/bills/* endpoints — airtime + data (Sprint 3). Electricity + cable
-come in Sprint 4 and will be appended to this router."""
+"""/bills/* endpoints — airtime, data, and electricity. Cable endpoints
+are appended alongside electricity as Sprint 4 lands."""
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
