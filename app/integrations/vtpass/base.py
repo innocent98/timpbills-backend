@@ -72,7 +72,21 @@ class BillProvider(Protocol):
         meter_number: str,
         meter_type: str,
         amount_ngn: Decimal,
-    ) -> BillPurchaseResponse: ...
+        phone: str | None = None,
+    ) -> BillPurchaseResponse:
+        """Purchase electricity (prepaid token or postpaid payment).
+
+        `phone` is optional at the Protocol level but carries a real
+        upstream requirement: VTPass's `/api/pay` for electricity
+        REQUIRES a `phone` field (used to dispatch the token SMS from
+        their side; we suppress that notification channel in favour of
+        our own, but the field must still be present on the wire).
+        Callers (BillService) pass the authenticated user's phone when
+        available. The real client falls back to an empty string when
+        `None` — VTPass accepts empty and skips its SMS.
+        (B3 addition beyond the B1 preview signature.)
+        """
+        ...
 
     # ── Cable TV ────────────────────────────────────────────────────────
 

@@ -176,7 +176,13 @@ class FakeVTPassClient(BillProvider):
         meter_number: str,
         meter_type: str,
         amount_ngn: Decimal,
+        phone: str | None = None,
     ) -> BillPurchaseResponse:
+        # `phone` is a Protocol addition in B3 for the real VTPass client
+        # (VTPass requires it in /api/pay for electricity). The fake
+        # ignores it — we still record on the (request_id → amount) map
+        # and don't fabricate any SMS side-effect.
+        _ = phone
         self._requested_amounts[request_id] = amount_ngn
         self._transaction_ids[request_id] = f"vtp_{request_id[:12]}"
         response = self._build_response(request_id, amount_ngn)

@@ -32,8 +32,12 @@ from app.integrations.vtpass.base import (
 from app.integrations.vtpass.schemas import (
     BillDeliveryStatus,
     BillPurchaseResponse,
+    CablePlanList,
+    CablePlanVariation,
     DataPlanList,
     DataPlanVariation,
+    MeterValidation,
+    SmartcardValidation,
 )
 
 
@@ -165,6 +169,192 @@ class VTPassClient(BillProvider):
                 validity=v.get("validity") or None,
             ))
         return DataPlanList(service_id=service_id, variations=variations)
+
+    # ── Electricity ────────────────────────────────────────────────────
+
+    async def validate_meter(
+        self,
+        *,
+        request_id: str,
+        service_id: str,
+        meter_number: str,
+        meter_type: str,
+    ) -> MeterValidation:
+        """Look up a meter's registered customer name + address on the
+        DisCo before letting the user top up. VTPass `merchant-verify`
+        is an authenticated POST (secret-key header). A non-000 `code`
+        means the meter is invalid on this DisCo — that's deterministic
+        (the number either exists or doesn't), so we raise
+        `ProviderPermanentFailure` rather than a temporary failure."""
+        body = await self._post(
+            "/api/merchant-verify",
+            {
+                "billersCode": meter_number,
+                "serviceID":   service_id,
+                "type":        meter_type,  # "prepaid" or "postpaid"
+            },
+            use_secret_key=True,
+        )
+        code = str(body.get("code", ""))
+        if code != _SUCCESS_CODE:
+            desc = str(body.get("response_description", "")) or "invalid meter"
+            raise ProviderPermanentFailure(
+                f"vtpass validate_meter {service_id}/{meter_number}: "
+                f"code={code} {desc}"
+            )
+        content = body.get("content") or {}
+        # VTPass echoes back the meter number under `Meter_Number` — but
+        # we trust the user's input over the provider's echo so the
+        # response round-trips cleanly even if VTPass normalizes (strips
+        # leading zeros etc.).
+        return MeterValidation(
+            service_id=service_id,
+            meter_number=meter_number,
+            customer_name=str(content.get("Customer_Name", "")),
+            address=str(content.get("Address", "")),
+            meter_type=meter_type,
+        )
+
+    async def purchase_electricity(
+        self,
+        *,
+        request_id: str,
+        service_id: str,
+        meter_number: str,
+        meter_type: str,
+        amount_ngn: Decimal,
+        phone: str | None = None,
+    ) -> BillPurchaseResponse:
+        """Top up a prepaid meter or settle a postpaid bill.
+
+        VTPass uses `variation_code` on /api/pay to carry the
+        prepaid/postpaid classification for electricity (not a separate
+        endpoint). `phone` is a REQUIRED field on VTPass's side — it
+        drives their SMS notification which we disable but the field
+        must still be present. BillService (B5) passes the authenticated
+        user's phone; we fall back to an empty string here if it's None
+        so the wire payload is always well-formed.
+        """
+        body = await self._post_pay({
+            "request_id":     request_id,
+            "serviceID":      service_id,
+            "billersCode":    meter_number,
+            "variation_code": meter_type,  # "prepaid" | "postpaid"
+            "amount":         str(int(amount_ngn)),  # VTPass: whole NGN
+            "phone":          phone or "",
+        })
+        response = translate_response(
+            body, request_id=request_id, requested=amount_ngn
+        )
+        # Surface token + kWh units to the caller's `raw` on success.
+        # VTPass lands them under content.transactions.{token, units} on
+        # prepaid purchases; absent on postpaid. BillService persists the
+        # raw dict so the UI (and a later receipt regeneration) can pull
+        # them back out without us growing the typed schema.
+        if response.status == BillDeliveryStatus.delivered:
+            content = body.get("content") or {}
+            tx = content.get("transactions") or {}
+            token = tx.get("token")
+            units = tx.get("units")
+            if token is not None or units is not None:
+                merged_raw = dict(response.raw)
+                if token is not None:
+                    merged_raw["token"] = token
+                if units is not None:
+                    merged_raw["units"] = units
+                response = response.model_copy(update={"raw": merged_raw})
+        return response
+
+    # ── Cable TV ───────────────────────────────────────────────────────
+
+    async def validate_smartcard(
+        self,
+        *,
+        request_id: str,
+        service_id: str,
+        smartcard_number: str,
+    ) -> SmartcardValidation:
+        """Look up a cable smartcard's subscriber + current bouquet
+        before charging. Unlike meter validation there's no prepaid/
+        postpaid distinction for cable, so no `type` field on the wire.
+        Non-000 code → permanent failure (the smartcard number is
+        deterministically invalid on this provider)."""
+        body = await self._post(
+            "/api/merchant-verify",
+            {
+                "billersCode": smartcard_number,
+                "serviceID":   service_id,
+            },
+            use_secret_key=True,
+        )
+        code = str(body.get("code", ""))
+        if code != _SUCCESS_CODE:
+            desc = str(body.get("response_description", "")) or "invalid smartcard"
+            raise ProviderPermanentFailure(
+                f"vtpass validate_smartcard {service_id}/{smartcard_number}: "
+                f"code={code} {desc}"
+            )
+        content = body.get("content") or {}
+        # Status is surfaced as a string — "active" / "Inactive" /
+        # "suspended" etc. — we preserve it verbatim so BillService can
+        # expose the raw label to the UI without us having to maintain
+        # a normalization map. Lowercase for internal consumers.
+        return SmartcardValidation(
+            service_id=service_id,
+            smartcard_number=smartcard_number,
+            customer_name=str(content.get("Customer_Name", "")),
+            current_plan_name=str(content.get("Current_Bouquet", "")),
+            current_plan_code=str(content.get("Current_Bouquet_Code", "")),
+            status=str(content.get("Status", "")).lower() or "unknown",
+            renewal_amount_ngn=_safe_decimal(content.get("Renewal_Amount", "0")),
+        )
+
+    async def list_cable_plans(self, *, service_id: str) -> CablePlanList:
+        """Fetch the bouquet catalogue for a cable provider. VTPass
+        lists all variations under the base service_id — the `-change`
+        suffix is only used at purchase time (switch vs renew), never
+        at listing time."""
+        body = await self._get(
+            "/api/service-variations", {"serviceID": service_id}
+        )
+        content = body.get("content") or {}
+        raw_vars = content.get("variations") or []
+        variations: list[CablePlanVariation] = []
+        for v in raw_vars:
+            price = _safe_decimal(v.get("variation_amount", "0"))
+            variations.append(CablePlanVariation(
+                variation_code=str(v.get("variation_code", "")),
+                name=str(v.get("name", "")),
+                price_ngn=price,
+                validity=v.get("validity") or None,
+            ))
+        return CablePlanList(service_id=service_id, variations=variations)
+
+    async def purchase_cable(
+        self,
+        *,
+        request_id: str,
+        service_id: str,
+        smartcard_number: str,
+        variation_code: str,
+        amount_ngn: Decimal,
+    ) -> BillPurchaseResponse:
+        """Renew or switch a cable subscription. Caller controls the
+        renew-vs-switch mode by choosing `service_id`: pass the bare
+        provider slug (`dstv`) to renew the current bouquet, or the
+        `-change` variant (`dstv-change`) to switch to `variation_code`.
+        That decision lives in BillService (B8) — the client just
+        forwards whatever service_id it's given."""
+        body = await self._post_pay({
+            "request_id":     request_id,
+            "serviceID":      service_id,
+            "billersCode":    smartcard_number,
+            "variation_code": variation_code,
+            "amount":         str(int(amount_ngn)),
+        })
+        return translate_response(
+            body, request_id=request_id, requested=amount_ngn
+        )
 
     async def requery(self, *, request_id: str) -> BillPurchaseResponse:
         body = await self._post(
