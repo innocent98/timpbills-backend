@@ -252,3 +252,11 @@ def get_bill_service(
         db=db, tx_svc=tx_svc, wallet_svc=wallet_svc, provider=provider,
         redis=redis,
     )
+
+
+# --- Sprint 4 · B15+B16: PushTokensService ---
+from app.services.push_tokens_service import PushTokensService
+
+
+def get_push_tokens_service(db: Session = Depends(get_db)) -> PushTokensService:
+    return PushTokensService(db=db)

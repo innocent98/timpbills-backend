@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, bills, health, transactions, wallet, webhooks
+from app.api.v1.endpoints import auth, bills, health, push_tokens, transactions, wallet, webhooks
 
 api_router = APIRouter()
 
@@ -9,3 +9,4 @@ api_router.include_router(wallet.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(transactions.router)
 api_router.include_router(bills.router)
+api_router.include_router(push_tokens.router)
