@@ -143,6 +143,7 @@ async def purchase_airtime(
 
 
 @router.get("/data/plans", response_model=None)
+@limiter.limit("60/minute", key_func=per_user_or_ip)
 async def list_data_plans(
     request: Request,
     network: str,
