@@ -83,3 +83,63 @@ class DataPlanList(BaseModel):
 
     service_id: str                        # "mtn-data"
     variations: list[DataPlanVariation]
+
+
+# ── Sprint 4: electricity + cable ───────────────────────────────────────
+
+class MeterValidation(BaseModel):
+    """Result of a meter-number lookup against a DisCo (Ikeja, EKEDC, …).
+
+    The real VTPass `merchant-verify` endpoint returns the customer's
+    registered name + address so the UI can confirm "are you topping up
+    the right meter?" before we touch the wallet. `meter_type` round-trips
+    the prepaid/postpaid classification the user selected — we echo it
+    back rather than re-derive it, because VTPass's response doesn't
+    include it and BillService needs it to pick the right `service_id`
+    variation downstream."""
+    model_config = ConfigDict(frozen=True)
+
+    service_id: str       # DisCo slug, e.g. "ikeja-electric"
+    meter_number: str     # the meter/account number the user typed
+    customer_name: str    # registered customer name from the DisCo
+    address: str          # registered service address
+    meter_type: str       # "prepaid" or "postpaid"
+
+
+class SmartcardValidation(BaseModel):
+    """Result of a cable-smartcard lookup (DStv / GOtv / Startimes).
+
+    `current_plan_*` and `renewal_amount_ngn` are populated on active
+    smartcards so the UI can surface "your current bouquet is X, renewal
+    is ₦Y." Fresh/inactive cards return empty plan fields and a zero
+    renewal amount — the ge=0 bound on the amount enforces that invariant
+    per S3C-M5."""
+    model_config = ConfigDict(frozen=True)
+
+    service_id: str                 # cable slug, e.g. "dstv"
+    smartcard_number: str           # the IUC / smartcard number
+    customer_name: str              # registered subscriber name
+    current_plan_name: str          # may be empty on a fresh/inactive card
+    current_plan_code: str          # matching variation_code; may be empty
+    status: str                     # "active" / "inactive" / "suspended"
+    renewal_amount_ngn: Decimal = Field(ge=0)
+
+
+class CablePlanVariation(BaseModel):
+    """One row in the VTPass cable-bouquet catalog. Structurally mirrors
+    `DataPlanVariation` — price is authoritative so BillService can
+    reject client-supplied prices (spoof prevention)."""
+    model_config = ConfigDict(frozen=True)
+
+    variation_code: str      # "dstv-compact" etc. — opaque id VTPass expects back
+    name: str                # "DStv Compact"
+    price_ngn: Decimal = Field(ge=0)
+    validity: Optional[str] = None   # e.g. "1 month"
+
+
+class CablePlanList(BaseModel):
+    """Complete bouquet catalog for one cable service (e.g. dstv)."""
+    model_config = ConfigDict(frozen=True)
+
+    service_id: str                        # "dstv"
+    variations: list[CablePlanVariation]

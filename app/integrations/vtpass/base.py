@@ -8,7 +8,10 @@ from typing import Protocol, runtime_checkable
 
 from app.integrations.vtpass.schemas import (
     BillPurchaseResponse,
+    CablePlanList,
     DataPlanList,
+    MeterValidation,
+    SmartcardValidation,
 )
 
 
@@ -16,8 +19,10 @@ from app.integrations.vtpass.schemas import (
 class BillProvider(Protocol):
     """Abstract bill-provider surface. Sprint 3 covers airtime + data;
     Sprint 4 extends the same Protocol with `validate_meter`,
-    `purchase_electricity`, `purchase_cable` on the existing VTPass
-    implementation.
+    `purchase_electricity`, `validate_smartcard`, `list_cable_plans`, and
+    `purchase_cable` on the existing VTPass implementation. (The earlier
+    3-method preview has been split: smartcard validation and the cable
+    catalog are their own calls, matching VTPass's endpoint shape.)
 
     All methods are async. `request_id` is our internal transaction
     reference (`TMP-YYMMDD-…`) — VTPass uses it as its idempotency key,
@@ -46,6 +51,49 @@ class BillProvider(Protocol):
         service_id: str,
         phone: str,
         variation_code: str,
+    ) -> BillPurchaseResponse: ...
+
+    # ── Electricity ─────────────────────────────────────────────────────
+
+    async def validate_meter(
+        self,
+        *,
+        request_id: str,
+        service_id: str,
+        meter_number: str,
+        meter_type: str,
+    ) -> MeterValidation: ...
+
+    async def purchase_electricity(
+        self,
+        *,
+        request_id: str,
+        service_id: str,
+        meter_number: str,
+        meter_type: str,
+        amount_ngn: Decimal,
+    ) -> BillPurchaseResponse: ...
+
+    # ── Cable TV ────────────────────────────────────────────────────────
+
+    async def validate_smartcard(
+        self,
+        *,
+        request_id: str,
+        service_id: str,
+        smartcard_number: str,
+    ) -> SmartcardValidation: ...
+
+    async def list_cable_plans(self, *, service_id: str) -> CablePlanList: ...
+
+    async def purchase_cable(
+        self,
+        *,
+        request_id: str,
+        service_id: str,
+        smartcard_number: str,
+        variation_code: str,
+        amount_ngn: Decimal,
     ) -> BillPurchaseResponse: ...
 
     # ── Status requery (used by the reconcile worker) ───────────────────
