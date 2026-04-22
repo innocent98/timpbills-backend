@@ -11,7 +11,7 @@ Sprint 4 extension: electricity + cable. Same `_execute` pattern —
 `purchase_electricity` / `purchase_cable` both reuse `_build_response` so
 all four outcomes (success/partial/pending/failed) pick up consistently.
 `validate_meter` / `validate_smartcard` raise `ProviderPermanentFailure`
-when the matching `will_invalid_*` hook is set; no new exception type —
+when the matching `will_reject_*` hook is set; no new exception type —
 the validation vs purchase distinction is carried by the method return
 type, not the exception."""
 from dataclasses import dataclass, field
@@ -53,13 +53,13 @@ class FakeVTPassClient(BillProvider):
     _requested_amounts: dict[str, Decimal] = field(default_factory=dict)
 
     # Sprint 4 — (service_id, meter_number) tuples flagged for failure by
-    # `will_invalid_meter`. Kept as a set rather than a dict because the
+    # `will_reject_meter`. Kept as a set rather than a dict because the
     # hook is boolean: it's either poisoned or it isn't.
-    _invalid_meters: set[tuple[str, str]] = field(default_factory=set)
+    _rejected_meters: set[tuple[str, str]] = field(default_factory=set)
 
     # Sprint 4 — (service_id, smartcard_number) tuples flagged by
-    # `will_invalid_smartcard`. Same rationale as `_invalid_meters`.
-    _invalid_smartcards: set[tuple[str, str]] = field(default_factory=set)
+    # `will_reject_smartcard`. Same rationale as `_rejected_meters`.
+    _rejected_smartcards: set[tuple[str, str]] = field(default_factory=set)
 
     # ── Test hooks ──────────────────────────────────────────────────────
 
@@ -84,17 +84,17 @@ class FakeVTPassClient(BillProvider):
         if delivered_ngn is not None:
             self._partial_delivered[request_id] = delivered_ngn
 
-    def will_invalid_meter(self, service_id: str, meter_number: str) -> None:
+    def will_reject_meter(self, service_id: str, meter_number: str) -> None:
         """Force `validate_meter` to raise ProviderPermanentFailure for
         this (service_id, meter_number) pair. Sprint 4 — B2."""
-        self._invalid_meters.add((service_id, meter_number))
+        self._rejected_meters.add((service_id, meter_number))
 
-    def will_invalid_smartcard(
+    def will_reject_smartcard(
         self, service_id: str, smartcard_number: str
     ) -> None:
         """Force `validate_smartcard` to raise ProviderPermanentFailure
         for this (service_id, smartcard_number) pair. Sprint 4 — B2."""
-        self._invalid_smartcards.add((service_id, smartcard_number))
+        self._rejected_smartcards.add((service_id, smartcard_number))
 
     # ── Protocol methods: airtime + data ───────────────────────────────
 
@@ -149,7 +149,7 @@ class FakeVTPassClient(BillProvider):
         meter_number: str,
         meter_type: str,
     ) -> MeterValidation:
-        if (service_id, meter_number) in self._invalid_meters:
+        if (service_id, meter_number) in self._rejected_meters:
             # Per B2 plan: reuse ProviderPermanentFailure rather than
             # introduce an InvalidMeter class — the method return type
             # already distinguishes validation from purchase paths.
@@ -200,7 +200,7 @@ class FakeVTPassClient(BillProvider):
         service_id: str,
         smartcard_number: str,
     ) -> SmartcardValidation:
-        if (service_id, smartcard_number) in self._invalid_smartcards:
+        if (service_id, smartcard_number) in self._rejected_smartcards:
             raise ProviderPermanentFailure(
                 f"invalid smartcard {smartcard_number} on {service_id}"
             )
@@ -391,18 +391,6 @@ _DEFAULT_DISCOS: dict[str, str] = {
     "jos-electric":         "Jos Electric",
     "kano-electric":        "Kano Electric",
     "benin-electric":       "Benin Electric",
-}
-
-
-# Sprint 4 — cable providers. Used for look-ups by `list_cable_plans`
-# (which keys off `_DEFAULT_CABLE_PLANS`) and for simple existence checks
-# elsewhere. Kept as a separate mapping so the provider directory can
-# stay display-name only, mirroring `_DEFAULT_DISCOS`.
-_DEFAULT_CABLE_PROVIDERS: dict[str, str] = {
-    "dstv":      "DStv",
-    "gotv":      "GOtv",
-    "startimes": "Startimes",
-    "showmax":   "Showmax",
 }
 
 

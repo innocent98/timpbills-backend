@@ -55,9 +55,9 @@ async def test_validate_smartcard_returns_default_active_compact_plan():
 
 
 @pytest.mark.asyncio
-async def test_validate_smartcard_will_invalid_smartcard_raises():
+async def test_validate_smartcard_will_reject_smartcard_raises():
     fake = FakeVTPassClient()
-    fake.will_invalid_smartcard(service_id="dstv", smartcard_number="0000000000")
+    fake.will_reject_smartcard(service_id="dstv", smartcard_number="0000000000")
     with pytest.raises(ProviderPermanentFailure):
         await fake.validate_smartcard(
             request_id="TMP-CABLE-2",

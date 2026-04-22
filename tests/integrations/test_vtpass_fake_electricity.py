@@ -43,13 +43,13 @@ async def test_validate_meter_returns_deterministic_details():
 
 
 @pytest.mark.asyncio
-async def test_validate_meter_will_invalid_meter_raises():
+async def test_validate_meter_will_reject_meter_raises():
     """Test hook forces an InvalidMeter failure. Per the plan, we use
     ProviderPermanentFailure rather than a new exception class — the
     validation vs purchase distinction is already carried by the method
     signature."""
     fake = FakeVTPassClient()
-    fake.will_invalid_meter(service_id="ikeja-electric", meter_number="0000000000")
+    fake.will_reject_meter(service_id="ikeja-electric", meter_number="0000000000")
     with pytest.raises(ProviderPermanentFailure):
         await fake.validate_meter(
             request_id="TMP-ELEC-2",
@@ -96,6 +96,9 @@ async def test_purchase_electricity_will_fail_returns_failed_zero_delivered():
     )
     assert r.status == BillDeliveryStatus.failed
     assert r.delivered_amount_ngn == Decimal("0.00")
+    # Token injection only runs on delivered status — a failed purchase
+    # must not leak a fabricated token into raw.
+    assert "token" not in r.raw
 
 
 @pytest.mark.asyncio
