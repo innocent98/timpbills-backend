@@ -246,7 +246,9 @@ def get_bill_service(
     tx_svc: TransactionService = Depends(get_transaction_service),
     wallet_svc: WalletService = Depends(get_wallet_service),
     provider: BillProvider = Depends(get_vtpass_provider),
+    redis: Redis = Depends(get_redis),
 ) -> BillService:
     return BillService(
         db=db, tx_svc=tx_svc, wallet_svc=wallet_svc, provider=provider,
+        redis=redis,
     )

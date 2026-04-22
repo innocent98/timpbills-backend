@@ -215,8 +215,15 @@ async def _reconcile_bills() -> dict:
         provider = select_vtpass_client()
         tx_svc = TransactionService(db=db)
         wallet_svc = WalletService(db=db)
+        # Reconcile worker only calls `apply_provider_result` on bill_svc —
+        # the redis client is unused here, but BillService requires one
+        # since B4's validate_meter path shares the instance. Pull the
+        # same singleton the API layer uses so we don't fan out Redis
+        # connections unnecessarily.
+        from app.api.deps import get_redis
         bill_svc = BillService(
             db=db, tx_svc=tx_svc, wallet_svc=wallet_svc, provider=provider,
+            redis=get_redis(),
         )
 
         settled = 0

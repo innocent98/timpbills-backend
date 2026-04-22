@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Awaitable, Callable
 from uuid import UUID
 
+from redis.asyncio import Redis
 from sqlalchemy.orm import Session
 
 from app.core.logger import log
@@ -46,6 +47,7 @@ from app.integrations.vtpass.schemas import (
     BillDeliveryStatus,
     BillPurchaseResponse,
     DataPlanList,
+    MeterValidation,
 )
 from app.services.notification_service import (
     NotificationEvent,
@@ -53,6 +55,7 @@ from app.services.notification_service import (
 )
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import InsufficientBalance, WalletService
+from app.utils.references import new_transaction_reference
 
 
 # ── Result payload returned to the endpoint layer ────────────────────────
@@ -110,11 +113,13 @@ class BillService:
         tx_svc: TransactionService,
         wallet_svc: WalletService,
         provider: BillProvider,
+        redis: Redis,
     ) -> None:
         self._db = db
         self._tx = tx_svc
         self._wallet = wallet_svc
         self._provider = provider
+        self._redis = redis
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -190,6 +195,63 @@ class BillService:
         return await self._provider.list_data_plans(
             service_id=f"{network.lower()}-data"
         )
+
+    # ── Electricity: meter validation (no tx row, no wallet debit) ──────
+
+    async def validate_meter(
+        self,
+        *,
+        user_id: UUID,
+        service_id: str,
+        meter_number: str,
+        meter_type: str,
+    ) -> MeterValidation:
+        """Validate a DisCo meter number via the provider, with a 5-minute
+        per-user Redis cache.
+
+        Validation is NOT a transaction — no `Transaction` row is created,
+        no wallet debit is issued. VTPass's merchant-verify endpoint still
+        wants a `request_id`, so we mint a throwaway reference with a
+        ``TMP-MV`` prefix so ops can tell validation refs from real tx
+        refs in logs.
+
+        Cache key includes the user_id so we never surface one user's
+        lookup to another (defence-in-depth — the DisCo response has the
+        customer's name + address, and while two different users could
+        legitimately query the same meter, we'd rather hit VTPass twice
+        than leak a cached identity across user contexts).
+
+        Failure modes are re-raised unwrapped so the endpoint layer can
+        map them to 400 (permanent) / 503 (temporary). Neither failure
+        populates the cache — caching a transient failure would prolong
+        the outage, and caching a permanent failure makes legitimate
+        retries after the user fixes a typo pointlessly slow.
+        """
+        key = f"bill_validate:meter:{user_id}:{service_id}:{meter_number}"
+
+        # 1. Cache lookup — fast-path the common "user submits then edits
+        #    one character" pattern.
+        cached = await self._redis.get(key)
+        if cached is not None:
+            return MeterValidation.model_validate_json(cached)
+
+        # 2. Cache miss — mint a validation-only reference and hit VTPass.
+        request_id = new_transaction_reference(
+            user_id=str(user_id), prefix="TMP-MV",
+        )
+        # Any ProviderPermanentFailure / ProviderTemporaryFailure bubbles
+        # up untouched; we intentionally do NOT catch-and-cache.
+        validation = await self._provider.validate_meter(
+            request_id=request_id,
+            service_id=service_id,
+            meter_number=meter_number,
+            meter_type=meter_type,
+        )
+
+        # 3. Success → cache for 5 minutes. pydantic's JSON round-trip
+        #    handles Decimal + enum serialization for us.
+        await self._redis.set(key, validation.model_dump_json(), ex=300)
+        return validation
 
     # ── Orchestration internals ─────────────────────────────────────────
 

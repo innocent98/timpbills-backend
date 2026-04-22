@@ -11,6 +11,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
+from fakeredis.aioredis import FakeRedis
 
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
@@ -57,6 +58,7 @@ def _bill_service(db, *, fake: FakeVTPassClient) -> BillService:
         tx_svc=TransactionService(db=db),
         wallet_svc=WalletService(db=db),
         provider=fake,
+        redis=FakeRedis(decode_responses=True),
     )
 
 
