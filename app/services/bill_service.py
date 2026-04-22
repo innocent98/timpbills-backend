@@ -47,6 +47,7 @@ from app.integrations.vtpass.base import (
 from app.integrations.vtpass.schemas import (
     BillDeliveryStatus,
     BillPurchaseResponse,
+    CablePlanList,
     DataPlanList,
     MeterValidation,
     SmartcardValidation,
@@ -408,6 +409,40 @@ class BillService:
                 exc,
             )
         return validation
+
+    # ── Cable TV: bouquet catalog (no tx row, no wallet debit) ──────────
+
+    async def list_cable_plans(
+        self,
+        *,
+        service_id: str,       # provider slug, e.g. "dstv"
+        mode: str,             # "renew" | "change"
+    ) -> CablePlanList:
+        """Return the cable bouquet catalog for a provider.
+
+        ``mode`` is a BillService-layer concept (not a provider concept):
+
+          * ``"change"`` — the user wants to switch bouquets; they need
+            the FULL catalog so they can pick any plan.
+          * ``"renew"`` — the user wants to renew the bouquet they're
+            already on. Ideally the UI would show only the matching plan
+            from the catalog. **We deliberately don't filter that here**:
+            the "currently-active plan" comes from the smartcard
+            validation response (``SmartcardValidation.current_plan_code``),
+            not from the catalog, and doing the join at this service layer
+            would mean threading ``smartcard_number`` through this method
+            and mixing concerns. The endpoint / mobile layer already has
+            the cached validate_smartcard response; it owns the filter.
+            So for both modes we return the full catalog, and the caller
+            filters by ``current_plan_code`` in the renew flow.
+
+        No Redis caching — matches ``list_data_plans`` (Sprint 3). Prices
+        change; live fetch per request. Rate limiting at the endpoint
+        layer bounds VTPass-side load.
+        """
+        if mode not in ("renew", "change"):
+            raise ValueError("mode must be 'renew' or 'change'")
+        return await self._provider.list_cable_plans(service_id=service_id)
 
     # ── Orchestration internals ─────────────────────────────────────────
 

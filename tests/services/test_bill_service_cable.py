@@ -29,7 +29,7 @@ from redis.exceptions import RedisError
 
 from app.integrations.vtpass.base import ProviderPermanentFailure
 from app.integrations.vtpass.fake import FakeVTPassClient
-from app.integrations.vtpass.schemas import SmartcardValidation
+from app.integrations.vtpass.schemas import CablePlanList, SmartcardValidation
 from app.services.bill_service import BillService
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import WalletService
@@ -262,3 +262,91 @@ async def test_validate_smartcard_degrades_gracefully_when_redis_is_down(
         smartcard_number="1111111111",
     )
     assert provider.validate_calls == 2
+
+
+# ── 6-9. BillService.list_cable_plans (B7) ───────────────────────────────
+#
+# Thin, uncached passthrough onto the provider. "mode" is a BillService-
+# layer concept (renew vs change) that the provider's list_cable_plans
+# knows nothing about. Current decision: both modes return the full
+# catalog — filtering to the currently-active plan for renew flows is
+# an endpoint / mobile concern driven by the separately-cached
+# validate_smartcard response (see B7 docstring).
+
+
+@pytest.mark.asyncio
+async def test_list_cable_plans_change_returns_full_catalog(db_session):
+    """mode="change" → provider's full bouquet catalog unfiltered.
+    The fake seeds 4 dstv plans (compact, compact-plus, premium, access)."""
+    redis = FakeRedis(decode_responses=True)
+    provider = FakeVTPassClient()
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    result = await svc.list_cable_plans(service_id="dstv", mode="change")
+
+    assert isinstance(result, CablePlanList)
+    assert result.service_id == "dstv"
+    assert len(result.variations) == 4
+    codes = {v.variation_code for v in result.variations}
+    assert codes == {
+        "dstv-compact",
+        "dstv-compact-plus",
+        "dstv-premium",
+        "dstv-access",
+    }
+
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_cable_plans_renew_returns_full_catalog(db_session):
+    """mode="renew" → ALSO returns the full catalog. Per the B7 design
+    decision, filtering by the subscriber's current_plan_code is the
+    endpoint / mobile layer's job (it has the validate_smartcard cache
+    available); doing it here would require threading smartcard_number
+    through this method and mixing concerns."""
+    redis = FakeRedis(decode_responses=True)
+    provider = FakeVTPassClient()
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    result = await svc.list_cable_plans(service_id="dstv", mode="renew")
+
+    assert isinstance(result, CablePlanList)
+    assert result.service_id == "dstv"
+    # Same 4 dstv plans as the change-mode call — no filtering at this layer.
+    assert len(result.variations) == 4
+
+
+@pytest.mark.asyncio
+async def test_list_cable_plans_unknown_service_returns_empty(db_session):
+    """Unknown service_id → empty variations, no exception. Matches the
+    fake's behavior (_DEFAULT_CABLE_PLANS.get(service_id, [])) and the
+    real client's 'no variations' response. The endpoint layer can decide
+    whether to 404 or return an empty list."""
+    redis = FakeRedis(decode_responses=True)
+    provider = FakeVTPassClient()
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    result = await svc.list_cable_plans(
+        service_id="unknown-service", mode="change",
+    )
+
+    assert isinstance(result, CablePlanList)
+    assert result.service_id == "unknown-service"
+    assert result.variations == []
+
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_cable_plans_invalid_mode_raises_value_error(db_session):
+    """Anything other than 'renew' | 'change' is a programmer error —
+    ValueError with a helpful message rather than a silent default."""
+    redis = FakeRedis(decode_responses=True)
+    provider = FakeVTPassClient()
+    svc = _make_svc(db_session, provider=provider, redis=redis)
+
+    with pytest.raises(ValueError, match="mode must be 'renew' or 'change'"):
+        await svc.list_cable_plans(service_id="dstv", mode="invalid")
+
+    await redis.aclose()
