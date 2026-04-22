@@ -1,8 +1,7 @@
 """Push tokens service — CRUD for user FCM device tokens.
 
-Called by:
-- /users/me/push-tokens endpoints (B16) for registration + deletion.
-- FCMClient on DeadFCMToken (B17) to evict stale tokens.
+Called by the /users/me/push-tokens endpoints for registration + deletion,
+and by the FCM client when it reports a DeadFCMToken to evict stale rows.
 
 One FCM token is globally unique (enforced at DB level). If a device is
 re-used across users (logout + new login), the token row is reassigned to
