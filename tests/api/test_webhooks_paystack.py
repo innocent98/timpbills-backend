@@ -298,3 +298,79 @@ async def test_charge_failed_on_outbound_tx_issues_refund(db_session, client):
 
     w = await client.get("/api/v1/wallet", headers=headers)
     assert w.json()["data"]["balance"] == "1000.00"
+
+
+@pytest.mark.asyncio
+async def test_charge_failed_refund_over_kyc_cap_returns_422(db_session, client):
+    """S3C-P4a regression — if the user's tier was LOWERED between the
+    original wallet debit and the charge.failed refund attempt, the
+    refund credit would overshoot the new cap. The webhook must catch
+    KycCapExceeded, roll back, and return 422 so Paystack keeps retrying
+    on its cadence. If we let the exception bubble as 500, Paystack's
+    WebhookEvent dedupe swallows the retry and the refund row stays
+    orphaned — user silently without their money.
+    """
+    from decimal import Decimal
+    from uuid import uuid4 as _uuid
+    from app.db.models.transaction import Transaction
+    from app.db.models._enums import TransactionStatus, TransactionType
+    from app.db.models.payment import Payment, PaymentStatus
+    from app.db.models.user import User
+    from app.db.models.wallet import Wallet
+
+    _tokens, headers = await _seed_logged_in_user(client)
+    user_row = db_session.query(User).filter(User.email == "e@e.co").one()
+    user_id = user_row.id
+
+    # Seed a wallet near its cap (simulating an ops-initiated tier downgrade
+    # AFTER the original debit — balance is already elevated relative to
+    # the new cap).
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == user_id).first()
+    if wallet is None:
+        wallet = Wallet(
+            user_id=user_id,
+            balance=Decimal("48000.00"),
+            balance_cap=Decimal("50000.00"),
+        )
+        db_session.add(wallet)
+    else:
+        wallet.balance = Decimal("48000.00")
+        wallet.balance_cap = Decimal("50000.00")
+    db_session.commit()
+
+    # Original outbound tx: ₦5000 airtime that was debited from the wallet
+    # (balance was ₦53000 pre-debit under the old ₦200000 cap).
+    ref = f"TMP-airtime-{_uuid().hex[:8]}"
+    tx = Transaction(
+        user_id=user_id, reference=ref,
+        type=TransactionType.airtime, status=TransactionStatus.pending,
+        amount=Decimal("5000.00"), fee=Decimal("0.00"), currency="NGN",
+        meta={"network": "MTN", "phone": "08012345678"},
+    )
+    db_session.add(tx)
+    db_session.flush()
+    db_session.add(Payment(
+        transaction_id=tx.id, provider="paystack",
+        provider_reference=ref, status=PaymentStatus.pending,
+    ))
+    db_session.commit()
+
+    # Refund of ₦5000 would put balance at ₦53000 > ₦50000 cap → KycCapExceeded.
+    body = {"event": "charge.failed", "data": {"id": "evt_kyc_refund", "reference": ref}}
+    r = await client.post(
+        "/api/v1/webhooks/paystack",
+        content=json.dumps(body).encode(),
+        headers={"x-paystack-signature": "FAKE_SIG"},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "KYC_LIMIT_EXCEEDED"
+
+    # Balance unchanged (no partial credit), no refund row committed.
+    db_session.expire_all()
+    w = db_session.query(Wallet).filter(Wallet.user_id == user_id).one()
+    assert w.balance == Decimal("48000.00")
+
+    list_r = await client.get("/api/v1/transactions", headers=headers)
+    items = list_r.json()["data"]["items"]
+    refunds = [i for i in items if i["type"] == "refund"]
+    assert refunds == []

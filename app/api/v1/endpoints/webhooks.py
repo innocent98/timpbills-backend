@@ -212,7 +212,35 @@ async def paystack_webhook(
                 # tx, was_created is False and we must NOT credit again.
                 # See S3C-P1.
                 if was_created:
-                    wallet_svc.credit(user_id=tx.user_id, amount=refund.amount)
+                    try:
+                        wallet_svc.credit(
+                            user_id=tx.user_id, amount=refund.amount,
+                        )
+                    except KycCapExceeded as exc:
+                        # The user's tier may have been lowered between
+                        # the original debit and this refund attempt. If
+                        # we let the exception bubble as 500, Paystack
+                        # retries, the WebhookEvent dedupe swallows the
+                        # retry, and the refund row stays orphaned
+                        # (rolled back together with the credit) — user
+                        # silently left without their money.
+                        # Instead: roll back, return 422 so Paystack
+                        # keeps retrying on its cadence until ops
+                        # raises the user's cap. See S3C-P4a.
+                        db.rollback()
+                        log.warning(
+                            "paystack webhook: refund credit would exceed "
+                            "KYC cap — user=%s ref=%s event=%s err=%s",
+                            tx.user_id, reference, event_id, exc,
+                        )
+                        raise HTTPException(status_code=422, detail={
+                            "code": "KYC_LIMIT_EXCEEDED",
+                            "message": (
+                                "Refund would exceed the user's KYC balance "
+                                "cap. Ops must raise the tier before the "
+                                "refund can land; Paystack will retry."
+                            ),
+                        })
 
     we.processed = True
     db.commit()
