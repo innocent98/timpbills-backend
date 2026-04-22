@@ -15,6 +15,10 @@ from app.api.deps import (
 )
 from app.core.limiter import limiter, per_user_or_ip
 from app.db.models.user import User
+from app.integrations.vtpass.base import (
+    ProviderPermanentFailure,
+    ProviderTemporaryFailure,
+)
 from app.schemas.bills import (
     AirtimePurchaseRequest,
     AirtimePurchaseResponse,
@@ -22,6 +26,8 @@ from app.schemas.bills import (
     DataPlanView,
     DataPurchaseRequest,
     DataPurchaseResponse,
+    MeterValidationRequest,
+    MeterValidationResponse,
     NetworkListResponse,
     NetworkView,
 )
@@ -137,6 +143,51 @@ async def purchase_airtime(
         response_status=200, response_body=body_out,
     )
     return body_out
+
+
+# ── Electricity ──────────────────────────────────────────────────────────
+
+
+@router.post("/electricity/validate-meter", response_model=None, status_code=200)
+@limiter.limit("30/minute", key_func=per_user_or_ip)
+async def validate_meter(
+    request: Request,
+    body: MeterValidationRequest,
+    user: User = Depends(get_current_user),
+    bill_svc: BillService = Depends(get_bill_service),
+):
+    """Meter-number lookup against a DisCo. Not money-moving — no
+    pin_token, no Idempotency-Key. Caching (5 min per-user) lives in
+    BillService so repeated keystroke-edits don't burn VTPass credits."""
+    try:
+        validation = await bill_svc.validate_meter(
+            user_id=UUID(str(user.id)),
+            service_id=body.service_id,
+            meter_number=body.meter_number,
+            meter_type=body.meter_type,
+        )
+    except ProviderPermanentFailure as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_METER", "message": str(exc)},
+        )
+    except ProviderTemporaryFailure as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "VTPASS_UNAVAILABLE", "message": str(exc)},
+        )
+
+    body_out = MeterValidationResponse(
+        service_id=validation.service_id,
+        meter_number=validation.meter_number,
+        customer_name=validation.customer_name,
+        address=validation.address,
+        meter_type=validation.meter_type,
+    )
+    return success(
+        body_out.model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
 
 
 # ── Data ─────────────────────────────────────────────────────────────────

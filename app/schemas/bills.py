@@ -57,6 +57,26 @@ class DataPlanListResponse(BaseModel):
     plans: list[DataPlanView]
 
 
+# ── Electricity ─────────────────────────────────────────────────────────
+
+
+class MeterValidationRequest(BaseModel):
+    service_id: str                       # DisCo slug, e.g. "ikeja-electric"
+    meter_number: str
+    meter_type: Literal["prepaid", "postpaid"]
+
+
+class MeterValidationResponse(BaseModel):
+    """Mirrors ``app.integrations.vtpass.schemas.MeterValidation`` — the
+    API surface stays decoupled from the integration schema so an
+    upstream shape change doesn't leak into the client contract."""
+    service_id: str
+    meter_number: str
+    customer_name: str
+    address: str
+    meter_type: str
+
+
 # ── Networks catalog (for GET /bills/airtime/networks) ─────────────────
 
 
