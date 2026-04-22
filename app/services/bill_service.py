@@ -49,6 +49,7 @@ from app.integrations.vtpass.schemas import (
     BillPurchaseResponse,
     DataPlanList,
     MeterValidation,
+    SmartcardValidation,
 )
 from app.services.notification_service import (
     NotificationEvent,
@@ -333,6 +334,77 @@ class BillService:
         except RedisError as exc:
             log.warning(
                 "validate_meter: cache write failed, continuing without caching: %s",
+                exc,
+            )
+        return validation
+
+    # ── Cable TV: smartcard validation (no tx row, no wallet debit) ─────
+
+    async def validate_smartcard(
+        self,
+        *,
+        user_id: UUID,
+        service_id: str,
+        smartcard_number: str,
+    ) -> SmartcardValidation:
+        """Validate a cable smartcard / IUC number via the provider, with a
+        5-minute per-user Redis cache.
+
+        Structurally mirrors ``validate_meter`` — no ``Transaction`` row,
+        no wallet debit, just a caching passthrough onto the provider.
+        Differences from meter validation:
+          * cache key uses a ``:smartcard:`` segment so we never collide
+            with a meter cache entry under the same user + service;
+          * no ``meter_type`` axis — cable smartcards have only one
+            identity (the IUC number);
+          * request-id prefix is ``TMP-SCV`` so ops can distinguish
+            smartcard validation refs from meter validation refs in logs.
+
+        Inactive smartcards (active=False at the client layer) are
+        *successful* validations — B3 already returns a SmartcardValidation
+        with ``status="inactive"`` rather than raising. We cache that
+        outcome exactly like an active card; the UI decides how to render.
+        Only non-000 responses raise ProviderPermanentFailure and bypass
+        the cache — same rationale as validate_meter: don't force the user
+        to wait out a TTL after fixing a typo.
+        """
+        key = f"bill_validate:smartcard:{user_id}:{service_id}:{smartcard_number}"
+
+        # 1. Cache lookup. Redis outages must NOT block validation; degrade
+        #    to "call VTPass every time" on RedisError.
+        try:
+            cached = await self._redis.get(key)
+        except RedisError as exc:
+            log.warning(
+                "validate_smartcard: cache read failed, falling through to provider: %s",
+                exc,
+            )
+            cached = None
+
+        if cached is not None:
+            return SmartcardValidation.model_validate_json(cached)
+
+        # 2. Cache miss — mint a validation-only reference (TMP-SCV prefix
+        #    distinguishes smartcard refs from meter refs in logs) and
+        #    hit VTPass. Permanent / temporary failures bubble up unwrapped;
+        #    we intentionally do NOT catch-and-cache on the error path.
+        request_id = new_transaction_reference(
+            user_id=str(user_id), prefix="TMP-SCV",
+        )
+        validation = await self._provider.validate_smartcard(
+            request_id=request_id,
+            service_id=service_id,
+            smartcard_number=smartcard_number,
+        )
+
+        # 3. Success (including status="inactive") → cache for 5 minutes.
+        #    Cache write failure is non-fatal — we've already produced the
+        #    result, so just log and return.
+        try:
+            await self._redis.set(key, validation.model_dump_json(), ex=300)
+        except RedisError as exc:
+            log.warning(
+                "validate_smartcard: cache write failed, continuing without caching: %s",
                 exc,
             )
         return validation
