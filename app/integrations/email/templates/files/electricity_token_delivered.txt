@@ -1,0 +1,16 @@
+Your electricity token is ready
+
+We've purchased ₦{{ amount }} of electricity on meter {{ meter_number }} with {{ disco_label }}.
+Enter this token at your meter to load it.
+
+TOKEN: {{ token }}
+{% if units %}Units: {{ units }} kWh{% endif %}
+
+DisCo: {{ disco_label }}
+Meter: {{ meter_number }}
+Reference: {{ reference }}
+When: {{ when }}
+
+Keep this token safe — you can re-enter it at the meter if input is interrupted.
+
+— Timpbills

@@ -353,3 +353,60 @@ async def test_paystack_webhook_charge_success_dispatches_wallet_funded(
 
     new_emails = notif_email.sent[emails_before:]
     assert any("funded" in e.subject.lower() for e in new_emails)
+
+
+# ── Sprint 4 · B18: electricity_token_delivered branch ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_electricity_purchase_delivered_dispatches_electricity_token_delivered(
+    client, db_session,
+):
+    """Electricity wins its own notification event: the email carries
+    the token + units + DisCo + meter. Asserts that bill_success is NOT
+    dispatched for electricity (branch exclusivity)."""
+    _, headers = await _seed_logged_in_user(client)
+    _fund_wallet_directly(db_session, amount=Decimal("5000.00"))
+    pin = await _pin_token(client, headers)
+
+    push = _fake_push_singleton
+    notif_email = _fake_email_singleton
+    emails_before = len(notif_email.sent)
+    pushes_before = len(push.sent)
+
+    r = await client.post(
+        "/api/v1/bills/electricity",
+        json={
+            "service_id":   "ikeja-electric",
+            "meter_number": "1234567890123",
+            "meter_type":   "prepaid",
+            "phone":        "08012345678",
+            "amount":       "2000.00",
+        },
+        headers={**headers, "X-Pin-Token": pin, "Idempotency-Key": str(uuid4())},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["status"] == "success"
+
+    new_pushes = push.sent[pushes_before:]
+    electricity_pushes = [
+        p for p in new_pushes
+        if p.data.get("event") == "electricity_token_delivered"
+    ]
+    assert len(electricity_pushes) == 1
+    # bill_success should NOT fire for electricity — the branch is exclusive.
+    bill_success_pushes = [
+        p for p in new_pushes if p.data.get("event") == "bill_success"
+    ]
+    assert bill_success_pushes == []
+
+    new_emails = notif_email.sent[emails_before:]
+    electricity_emails = [
+        e for e in new_emails if "electricity token" in e.subject.lower()
+    ]
+    assert len(electricity_emails) == 1
+    # The plaintext body (FakeEmailClient stores text-or-html in
+    # code_or_body) surfaces the meter + token.
+    body = electricity_emails[0].code_or_body
+    assert "1234567890123" in body
+    assert "TOKEN" in body.upper()

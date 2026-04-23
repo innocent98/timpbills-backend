@@ -1,0 +1,36 @@
+{% extends "_layout.html" %}
+{% block body %}
+  <h2 style="color: #0F172A; font-size: 24px; font-weight: 700; margin: 0 0 12px;">Your electricity token is ready</h2>
+  <p style="color: #475569; font-size: 15px; line-height: 1.6; margin: 0 0 24px;">
+    We've purchased <strong>₦{{ amount }}</strong> of electricity on meter <strong>{{ meter_number }}</strong> with <strong>{{ disco_label }}</strong>.
+    Enter this token at your meter to load it.
+  </p>
+  <div style="background: #ECFDF5; border: 1px solid #10B981; padding: 20px; border-radius: 12px; margin-bottom: 24px;">
+    <p style="color: #065F46; font-size: 13px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.05em;">Token</p>
+    <p style="color: #0F172A; font-size: 22px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, monospace; margin: 0; letter-spacing: 0.08em;">{{ token }}</p>
+    {% if units %}
+    <p style="color: #065F46; font-size: 13px; margin: 12px 0 0;">Units: <strong>{{ units }} kWh</strong></p>
+    {% endif %}
+  </div>
+  <table role="presentation" cellpadding="0" cellspacing="0" style="width: 100%; background: #F0F1FB; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">DisCo</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0;">{{ disco_label }}</td>
+    </tr>
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">Meter</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0; font-family: ui-monospace, SFMono-Regular, monospace;">{{ meter_number }}</td>
+    </tr>
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">Reference</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0; font-family: ui-monospace, SFMono-Regular, monospace;">{{ reference }}</td>
+    </tr>
+    <tr>
+      <td style="color: #64748B; font-size: 13px; padding: 4px 0;">When</td>
+      <td style="color: #0F172A; font-size: 13px; text-align: right; padding: 4px 0;">{{ when }}</td>
+    </tr>
+  </table>
+  <p style="color: #64748B; font-size: 13px; line-height: 1.6; margin: 0;">
+    Keep this token safe — you can re-enter it at the meter if input is interrupted.
+  </p>
+{% endblock %}

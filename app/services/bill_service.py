@@ -771,7 +771,15 @@ def _notify_bill_success(
 ) -> None:
     """Fire-and-forget email + push for a successful bill delivery.
     Inside a helper so the BillService happy-path reads clean, and so
-    tests can patch this one symbol instead of the whole Celery task."""
+    tests can patch this one symbol instead of the whole Celery task.
+
+    Branches on ``tx.type``:
+      * ``electricity`` dispatches the electricity_token_delivered event
+        with token + units pulled from ``result.raw`` (the provider
+        response is authoritative — ``tx.meta["token"]`` is persisted
+        AFTER this dispatch in ``BillService.purchase_electricity``).
+      * everything else dispatches the generic bill_success event.
+    """
     from app.db.models.user import User
     from app.workers.tasks.notification_tasks import dispatch_delay
 
@@ -788,14 +796,49 @@ def _notify_bill_success(
         )
         return
 
-    partial = result.delivered_amount_ngn < amount
     meta = tx.meta or {}
+    when = tx.created_at.isoformat() if tx.created_at else ""
+
+    if tx.type is TransactionType.electricity:
+        from app.services.notification_service import (
+            build_electricity_token_context,
+        )
+        raw = result.raw or {}
+        token = str(raw.get("token") or "")
+        units = str(raw.get("units") or "") or None
+        # Skip electricity-specific dispatch when the provider came back
+        # delivered but without a token (malformed upstream response).
+        # Falling through to bill_success is better than a broken email.
+        if token:
+            ctx = build_electricity_token_context(
+                token=token,
+                units=units,
+                service_id=str(meta.get("service_id", "")),
+                meter_number=str(meta.get("meter_number", "")),
+                amount=amount,
+                reference=tx.reference,
+                when=when,
+                disco_label=str(meta.get("service_id", "")).replace("-", " ").title(),
+            )
+            dispatch_delay(
+                user_id=str(tx.user_id), user_email=user.email,
+                event=NotificationEvent.electricity_token_delivered,
+                context=ctx,
+            )
+            return
+        log.warning(
+            "notify: electricity tx %s delivered without token — "
+            "falling back to generic bill_success",
+            tx.reference,
+        )
+
+    partial = result.delivered_amount_ngn < amount
     ctx = build_bill_context(
         tx_type=tx.type.value,
         amount=amount,
         destination=str(meta.get("phone") or meta.get("destination") or ""),
         reference=tx.reference,
-        when=tx.created_at.isoformat() if tx.created_at else "",
+        when=when,
         partial=partial,
         delivered_amount=result.delivered_amount_ngn if partial else None,
         shortfall=(amount - result.delivered_amount_ngn) if partial else None,

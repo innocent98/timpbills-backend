@@ -46,21 +46,26 @@ class NotificationEvent(str, Enum):
     short, snake_case, and stable — these strings land in logs and
     (eventually) in a notifications table."""
 
-    bill_success         = "bill_success"
-    bill_failure_refund  = "bill_failure_refund"
-    wallet_funded        = "wallet_funded"
+    bill_success                    = "bill_success"
+    bill_failure_refund             = "bill_failure_refund"
+    wallet_funded                   = "wallet_funded"
+    # Electricity-specific success event: the generic "bill_success"
+    # email says "X is on its way" and has nowhere to put the token.
+    # This event renders token + units + DisCo + meter.
+    electricity_token_delivered     = "electricity_token_delivered"
     # Reserved for a future flow (e.g. ops-initiated refunds, reconcile
     # worker refunds where we want a distinct user-visible message).
-    refund_complete      = "refund_complete"
+    refund_complete                 = "refund_complete"
 
 
 # Maps event → (email_template_name, push_title_template, push_body_key)
 # None means "no email for this event" / "no push for this event".
 _EMAIL_TEMPLATES: dict[NotificationEvent, str | None] = {
-    NotificationEvent.bill_success:        "bill_success",
-    NotificationEvent.bill_failure_refund: "bill_failure_refund",
-    NotificationEvent.wallet_funded:       "wallet_funded",
-    NotificationEvent.refund_complete:     None,
+    NotificationEvent.bill_success:                "bill_success",
+    NotificationEvent.bill_failure_refund:         "bill_failure_refund",
+    NotificationEvent.wallet_funded:               "wallet_funded",
+    NotificationEvent.electricity_token_delivered: "electricity_token_delivered",
+    NotificationEvent.refund_complete:             None,
 }
 
 
@@ -94,6 +99,17 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
         return _PushCopy(
             title="Wallet funded",
             body=f"₦{ctx['amount']} in. New balance: ₦{ctx['balance']}.",
+        )
+    if event is NotificationEvent.electricity_token_delivered:
+        # Last four of the meter for context without leaking the full
+        # identifier on a lock screen; body carries the token + kWh
+        # since that's the whole reason the user opened the app.
+        meter = str(ctx.get("meter_number", ""))
+        meter_tail = meter[-4:] if len(meter) >= 4 else meter
+        units_phrase = f" · {ctx['units']} kWh" if ctx.get("units") else ""
+        return _PushCopy(
+            title=f"Electricity purchased · Meter {meter_tail}",
+            body=f"Token: {ctx.get('token', '')}{units_phrase}",
         )
     return None
 
@@ -234,6 +250,8 @@ def _email_subject(event: NotificationEvent, ctx: dict[str, Any]) -> str:
         return f"Refund: ₦{ctx.get('amount')} back in your wallet"
     if event is NotificationEvent.wallet_funded:
         return f"Wallet funded — ₦{ctx.get('amount')}"
+    if event is NotificationEvent.electricity_token_delivered:
+        return f"Electricity token — ₦{ctx.get('amount')} on meter {ctx.get('meter_number')}"
     return "Timpbills notification"
 
 
@@ -275,6 +293,33 @@ def build_wallet_funded_context(
         "balance":   str(balance),
         "reference": reference,
         "channel":   channel,
+    }
+
+
+def build_electricity_token_context(
+    *,
+    token: str,
+    units: str | None,
+    service_id: str,
+    meter_number: str,
+    amount: Decimal,
+    reference: str,
+    when: str,
+    disco_label: str | None = None,
+) -> dict[str, Any]:
+    """Shape the context dict the electricity_token_delivered template
+    expects. `disco_label` is a display label (e.g. "Ikeja Electric")
+    resolved by the caller — we fall back to service_id if None so the
+    email still renders a sensible value if the caller forgets."""
+    return {
+        "token":        token,
+        "units":        units or "",
+        "service_id":   service_id,
+        "disco_label":  disco_label or service_id,
+        "meter_number": meter_number,
+        "amount":       str(amount),
+        "reference":    reference,
+        "when":         when,
     }
 
 
