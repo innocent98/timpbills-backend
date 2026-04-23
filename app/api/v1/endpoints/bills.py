@@ -316,6 +316,23 @@ async def purchase_electricity(
                     "message": "Wallet balance is not enough for this purchase"},
         )
 
+    # ── Sprint 4 B31 (B-I4 follow-up): unverified-phone visibility ────────
+    # B26 auto-injects user.phone from the authenticated profile, which
+    # saves the user a redundant input. But if `is_phone_verified` is
+    # False — unusual but possible for users who landed at the bills
+    # surface before completing KYC-1, or for DB rows seeded outside
+    # the normal signup flow — VTPass's SMS-resend fallback on lost
+    # tokens silently misroutes. The purchase itself still succeeds
+    # (DisCo delivers the token and our email+push carry it to the
+    # user), so this is NOT a block, just a signal: log a WARNING so
+    # ops can investigate if the pattern becomes prevalent.
+    if not user.is_phone_verified:
+        log.warning(
+            "electricity purchase for user %s with is_phone_verified=False; "
+            "VTPass SMS-resend fallback may not reach the user",
+            user.id,
+        )
+
     # ── Idempotency gate ────────────────────────────────────────────────
     req_hash = idem.hash_body(
         user_id=str(user.id),

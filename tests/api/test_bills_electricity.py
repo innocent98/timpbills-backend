@@ -459,6 +459,99 @@ async def test_electricity_missing_idempotency_key_returns_400(client, db_sessio
     assert r.status_code == 400
 
 
+# ── B31 / B-I4 follow-up: unverified-phone warning ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_electricity_purchase_logs_warning_when_phone_unverified(
+    client, db_session, monkeypatch,
+):
+    """B26 auto-injects user.phone from the profile. When the user's
+    is_phone_verified flag is False, VTPass's SMS-resend fallback
+    cannot reach them — the tx still succeeds (token delivered via
+    email + push) but the SMS path is silently misrouted. Endpoint
+    logs a WARNING so ops can investigate the pattern.
+
+    _seed_logged_in_user creates users with is_phone_verified=False
+    (phone OTP step not run), which is exactly the target scenario.
+
+    App uses loguru, not stdlib logging, so we monkeypatch `log.warning`
+    directly to capture calls rather than using pytest's caplog.
+    """
+    _, headers = await _seed_logged_in_user(client)
+    _fund_wallet_directly(db_session, amount=Decimal("5000.00"))
+    pin = await _pin_token(client, headers)
+
+    captured: list[tuple[str, tuple]] = []
+    from app.api.v1.endpoints import bills as bills_mod
+    original_warning = bills_mod.log.warning
+
+    def _capture(msg, *args, **kwargs):
+        captured.append((msg, args))
+        return original_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(bills_mod.log, "warning", _capture)
+
+    r = await client.post(
+        "/api/v1/bills/electricity",
+        json=_elec_payload(amount="1000.00"),
+        headers={**headers, "X-Pin-Token": pin, "Idempotency-Key": str(uuid4())},
+    )
+    assert r.status_code == 200
+
+    matching = [
+        (msg, args) for (msg, args) in captured
+        if "is_phone_verified=False" in msg
+    ]
+    assert len(matching) == 1, (
+        f"expected exactly one unverified-phone warning; captured: {captured}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_electricity_purchase_does_not_warn_when_phone_verified(
+    client, db_session, monkeypatch,
+):
+    """Complement: after the user has verified their phone, the
+    unverified-phone warning must NOT fire. Flip the flag directly
+    via the DB since there isn't a lightweight verify-phone fixture
+    in this test file."""
+    _, headers = await _seed_logged_in_user(client)
+    _fund_wallet_directly(db_session, amount=Decimal("5000.00"))
+
+    # Mark the user's phone as verified.
+    user_row = db_session.query(User).filter(User.email == "e@e.co").one()
+    user_row.is_phone_verified = True
+    db_session.commit()
+
+    pin = await _pin_token(client, headers)
+
+    captured: list[tuple[str, tuple]] = []
+    from app.api.v1.endpoints import bills as bills_mod
+    original_warning = bills_mod.log.warning
+
+    def _capture(msg, *args, **kwargs):
+        captured.append((msg, args))
+        return original_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(bills_mod.log, "warning", _capture)
+
+    r = await client.post(
+        "/api/v1/bills/electricity",
+        json=_elec_payload(amount="1000.00"),
+        headers={**headers, "X-Pin-Token": pin, "Idempotency-Key": str(uuid4())},
+    )
+    assert r.status_code == 200
+
+    matching = [
+        (msg, args) for (msg, args) in captured
+        if "is_phone_verified=False" in msg
+    ]
+    assert matching == [], (
+        f"unverified-phone warning fired for a verified user: {matching}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_electricity_validate_cache_then_purchase_same_meter(client, db_session):
     """Validate-meter populates a 5-minute per-user Redis cache. A
