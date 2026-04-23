@@ -442,20 +442,17 @@ async def test_send_raises_push_temporary_failure_on_connect_error():
     assert "dns failure" in str(excinfo.value)
 
 
-# ── 9. Concurrent sends serialize on a single refresh lock (B20) ────────
+# ── 9. Concurrent sends serialize on a single refresh lock (B27) ────────
 
 
 @pytest.mark.asyncio
 async def test_concurrent_sends_share_single_refresh_lock():
-    """Two coroutines entering send() simultaneously must BOTH observe
-    the same `_refresh_lock` instance, and the credentials refresh must
-    fire exactly once. Before B20, the lazy `if is None: assign` pattern
-    was not thread-safe — under a multi-threaded caller (Celery worker
-    pool), two threads could each create their own asyncio.Lock and the
-    second assignment would orphan the first, breaking serialization.
-    The fix wraps the lazy init in a `threading.Lock`; this test pins
-    that (a) the lock identity is stable across sends, and (b)
-    `_creds.refresh()` is called once even across concurrent sends.
+    """Two coroutines entering send() simultaneously on the same event
+    loop must both return the same cached token, and the credentials
+    refresh must fire exactly once across both sends. Pins the
+    double-check invariant: the cold-path-first caller refreshes, the
+    cold-path-second caller sees the fresh cache inside the lock and
+    returns without a second refresh.
     """
     fake_creds = _make_fake_creds(
         token="concurrent-token", expires_in_seconds=3600,
@@ -464,7 +461,6 @@ async def test_concurrent_sends_share_single_refresh_lock():
         credentials_path="/fake/sa-key.json",
         project_id="test-project",
     )
-    assert client._refresh_lock is None
 
     with patch(
         "google.oauth2.service_account.Credentials.from_service_account_file",
@@ -476,91 +472,101 @@ async def test_concurrent_sends_share_single_refresh_lock():
             ),
         )
         with patcher:
-            # asyncio.gather runs both coroutines on the same event loop;
-            # the race target is the lazy `_refresh_lock` assignment on
-            # cold state.
             await asyncio.gather(
                 client.send(user_id="u1", fcm_token="t1", title="a", body="b"),
                 client.send(user_id="u2", fcm_token="t2", title="c", body="d"),
             )
 
-    # Lock was created exactly once and persists on the instance.
-    assert client._refresh_lock is not None
-    lock_identity = id(client._refresh_lock)
-
-    # A subsequent send must reuse the SAME lock object — no re-init.
-    fake_creds.token = "concurrent-token"  # keep cached
-    with patch(
-        "google.oauth2.service_account.Credentials.from_service_account_file",
-        return_value=fake_creds,
-    ):
-        patcher, _ = _patch_async_client(
-            post_return=_mock_httpx_response(
-                status_code=200, json_body={"name": "projects/x/messages/z"},
-            ),
-        )
-        with patcher:
-            await client.send(
-                user_id="u3", fcm_token="t3", title="e", body="f",
-            )
-    assert id(client._refresh_lock) == lock_identity
-
-    # Credentials.refresh fired exactly once across all three sends —
-    # the lock serialized the cold-path refresh, and the cached-token
-    # fast-path handled the rest.
+    # Credentials.refresh fired exactly once across the two cold-path
+    # sends — the threading.Lock serialized them and the double-check
+    # prevented a second refresh.
     assert fake_creds.refresh.call_count == 1
     assert inner.post.await_count == 2
 
 
-@pytest.mark.asyncio
-async def test_refresh_lock_survives_multi_thread_lazy_init():
-    """Thread-safety regression for the lazy `_refresh_lock` assignment.
-    Pre-B20, two threads racing through `_get_access_token()` on a fresh
-    client could each create their own `asyncio.Lock` — one would be
-    stored, the other orphaned, and any caller holding a reference to
-    the orphan would not serialize against callers using the stored
-    one. `threading.Lock` around the init eliminates the race.
+# ── 10. B-C1 regression: cross-event-loop lock acquisition ──────────────
 
-    We simulate the race by spinning N threads that each drive a tiny
-    event loop on the SAME client instance, then assert only one lock
-    object was ever stored. Also asserts the threading lock exists
-    (structural invariant) so a future refactor that drops it fails
-    loudly here.
+
+def test_send_works_across_event_loops_on_shared_instance():
+    """Sprint 4 B27 (B-C1 follow-up) regression. An asyncio.Lock binds
+    to the event loop that creates it — so if two worker threads each
+    driving their own event loop hit `send()` on the same FCMPushClient
+    instance, the second thread's `async with self._refresh_lock:`
+    would raise `RuntimeError: Task got Future attached to a different
+    loop`. This is the real multi-worker Celery failure mode that the
+    original B20 fix did NOT solve (the B20 test used `asyncio.run()`
+    per thread but never exercised the cross-loop acquire).
+
+    B27 replaces the asyncio.Lock with a threading.Lock held inside
+    a synchronous refresh function dispatched via `asyncio.to_thread`.
+    The lock is loop-agnostic (thread-level primitive), so this test
+    passes cleanly with B27 and would fail with the B20-only fix.
+
+    Test drives two threads, each with its own event loop, each
+    calling `client.send(...)` on the same instance. Both should
+    complete without RuntimeError, and credentials.refresh() must
+    fire exactly once (the first thread's cold-path refresh; the
+    second thread observes the cached creds).
     """
-    import threading as _threading  # noqa: PLC0415 — local to test
+    import threading as _threading  # noqa: PLC0415
 
+    fake_creds = _make_fake_creds(
+        token="cross-loop-token", expires_in_seconds=3600,
+    )
     client = FCMPushClient(
         credentials_path="/fake/sa-key.json",
         project_id="test-project",
     )
 
-    # Structural: `_lock_creation_lock` must exist and be a threading lock.
-    assert isinstance(client._lock_creation_lock, type(_threading.Lock()))
+    # Structural invariant: the refresh lock is a threading.Lock, not
+    # an asyncio.Lock. Future refactor that replaces it with
+    # asyncio.Lock fails this assertion loudly.
+    assert isinstance(client._refresh_lock, type(_threading.Lock()))
 
-    observed_locks: list[int] = []
-    barrier = _threading.Barrier(8)
+    barrier = _threading.Barrier(2)
+    errors: list[BaseException] = []
 
-    def _hammer() -> None:
-        barrier.wait()  # Release all threads simultaneously.
-        # Run a tiny async coroutine that just triggers lazy init.
-        async def _touch() -> None:
-            # Drive the lazy init without needing httpx/creds — we only
-            # care about the lock assignment path, not the full refresh.
-            if client._refresh_lock is None:
-                with client._lock_creation_lock:
-                    if client._refresh_lock is None:
-                        client._refresh_lock = asyncio.Lock()
-            observed_locks.append(id(client._refresh_lock))
+    def _drive_send(tag: str) -> None:
+        try:
+            # Each thread creates its own event loop — this is the
+            # scenario that broke the asyncio.Lock binding.
+            async def _go() -> None:
+                barrier.wait()  # Release both threads simultaneously.
+                with patch(
+                    "google.oauth2.service_account.Credentials."
+                    "from_service_account_file",
+                    return_value=fake_creds,
+                ):
+                    patcher, _ = _patch_async_client(
+                        post_return=_mock_httpx_response(
+                            status_code=200,
+                            json_body={"name": f"projects/x/messages/{tag}"},
+                        ),
+                    )
+                    with patcher:
+                        await client.send(
+                            user_id=f"u-{tag}",
+                            fcm_token=f"t-{tag}",
+                            title="x",
+                            body="y",
+                        )
 
-        asyncio.run(_touch())
+            asyncio.run(_go())
+        except BaseException as e:
+            errors.append(e)
 
-    threads = [_threading.Thread(target=_hammer) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    t1 = _threading.Thread(target=_drive_send, args=("A",))
+    t2 = _threading.Thread(target=_drive_send, args=("B",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
-    # Exactly one lock identity observed across all 8 threads.
-    assert len(set(observed_locks)) == 1, (
-        f"multiple lock identities observed across threads: {set(observed_locks)}"
-    )
+    # Neither thread raised — in particular, NO "Task got Future
+    # attached to a different loop" RuntimeError.
+    assert errors == [], f"cross-loop send failed: {errors}"
+
+    # Refresh was called exactly once across both threads — the
+    # threading.Lock serialized them and the double-check prevented a
+    # redundant second refresh.
+    assert fake_creds.refresh.call_count == 1

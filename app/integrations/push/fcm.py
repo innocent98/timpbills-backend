@@ -133,23 +133,20 @@ class FCMPushClient:
         # first send()). `.refresh()` is what actually populates .token.
         self._creds: Any | None = None
 
-        # Lock serializing token refresh across concurrent send() calls.
-        # Initialized lazily on first _get_access_token() invocation — the
-        # class can be constructed outside any running event loop (e.g.
-        # at module import / factory wiring time), and asyncio.Lock()
-        # binds to the running loop at construction time.
-        #
-        # `_lock_creation_lock` guards the lazy creation itself — a pure
-        # `if None: assign` idiom is not safe across threads (Celery
-        # worker pool + FastAPI handler could both init the same client
-        # simultaneously, and bytecode-level interleaving can let both
-        # threads observe None and each create their own asyncio.Lock —
-        # one would become orphaned and callers would no longer serialize
-        # on the same primitive). `threading.Lock` serializes the
-        # one-shot construction; the hot path then just reads the
-        # resulting `asyncio.Lock` object without reacquiring.
-        self._refresh_lock: asyncio.Lock | None = None
-        self._lock_creation_lock = threading.Lock()
+        # Sprint 4 B27 (B-C1 follow-up): refresh serialization is a
+        # `threading.Lock`, NOT an `asyncio.Lock`. The earlier B20 fix
+        # double-checked an `asyncio.Lock`, which binds to the event
+        # loop that constructs it — so a lock created in Celery worker
+        # thread A's loop cannot be acquired from worker thread B's
+        # loop, raising `RuntimeError: Task got Future attached to a
+        # different loop`. Since `credentials.refresh()` is synchronous
+        # blocking I/O that already runs on a worker thread via
+        # `asyncio.to_thread(...)`, the entire refresh section can live
+        # inside that thread — a `threading.Lock` is the correct
+        # primitive (loop-agnostic, thread-safe, and naturally paired
+        # with the sync refresh call). The lock can be created in
+        # `__init__` with no event-loop concerns.
+        self._refresh_lock = threading.Lock()
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -195,36 +192,44 @@ class FCMPushClient:
         of expiring. Caches on `self._creds` so back-to-back sends don't
         each re-exchange the JWT.
 
-        Concurrency: serialized by `self._refresh_lock` so two concurrent
-        `send()` callers (FastAPI handler + Celery task is the real
-        failure mode) don't both hit the token endpoint. The fast-path
-        (cached-and-valid) bypass avoids lock contention on the hot
-        path. `credentials.refresh()` is SYNCHRONOUS blocking I/O — it
-        must run in a worker thread so it doesn't stall the event loop
-        for the ~200-500ms JWT round-trip.
+        Concurrency: the fast path (cached-and-valid) is lock-free so
+        concurrent sends don't serialize in the common case. The cold
+        path runs the whole refresh on a worker thread via
+        `asyncio.to_thread`, and that thread takes a `threading.Lock`
+        to serialize concurrent first-time initializations. Using a
+        threading lock (vs an asyncio lock) is deliberate — the B20
+        fix used an asyncio.Lock that binds to the creating event loop
+        and breaks when the FCMPushClient instance is shared across
+        FastAPI and Celery workers (each has its own loop). Since
+        `credentials.refresh()` is synchronous blocking I/O anyway,
+        routing the serialization through a thread is natural.
         """
-        # Lazy-init the lock on first call — cannot construct in __init__
-        # because the class may be built outside any running event loop.
-        # Double-check locking: read once, acquire threading lock only on
-        # the cold path, then re-check under the lock before assigning.
-        if self._refresh_lock is None:
-            with self._lock_creation_lock:
-                if self._refresh_lock is None:
-                    self._refresh_lock = asyncio.Lock()
-
-        # Fast-path: cached creds still valid — skip the lock entirely.
-        # Concurrent callers all read cached state; no race because
-        # _creds/_creds.token are only *mutated* inside the locked block
-        # below, and a stale read here just sends us into the lock where
-        # the double-check protects the invariant.
+        # Fast-path: cached creds still valid — skip the thread handoff
+        # AND the lock entirely. Concurrent callers all read cached
+        # state; no race because _creds is only mutated inside the
+        # locked section on the worker thread, and a stale read here
+        # just sends us into the cold path where the double-check
+        # protects the invariant.
         if self._creds is not None and not self._needs_refresh(self._creds):
             token = getattr(self._creds, "token", None)
             if token:
                 return str(token)
 
-        async with self._refresh_lock:
-            # Double-check inside the lock — another coroutine may have
-            # refreshed while we were waiting for the lock.
+        # Cold path: dispatch the full refresh to a worker thread, where
+        # the threading.Lock serializes concurrent initializers.
+        return await asyncio.to_thread(self._sync_refresh_and_get_token)
+
+    def _sync_refresh_and_get_token(self) -> str:
+        """Synchronous refresh + credential-init path, called from a
+        worker thread via `asyncio.to_thread`. Serialized by
+        `self._refresh_lock` (a `threading.Lock`) so two concurrent
+        callers across different event loops don't duplicate the JWT
+        exchange. Separated into its own method so the thread boundary
+        is explicit and the locking scope is easy to audit.
+        """
+        with self._refresh_lock:
+            # Double-check inside the lock — another thread may have
+            # refreshed while we were waiting.
             if self._creds is not None and not self._needs_refresh(self._creds):
                 token = getattr(self._creds, "token", None)
                 if token:
@@ -247,9 +252,9 @@ class FCMPushClient:
                     )
 
             if self._needs_refresh(self._creds):
-                # refresh() is synchronous blocking I/O — run it on a
-                # worker thread so the event loop stays responsive.
-                await asyncio.to_thread(self._creds.refresh, Request())
+                # Now synchronous — no need for asyncio.to_thread here;
+                # the caller already moved us off the event loop.
+                self._creds.refresh(Request())
 
             token = getattr(self._creds, "token", None)
             if not token:
