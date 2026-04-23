@@ -179,7 +179,13 @@ async def test_validate_smartcard_invalid_returns_400(client):
         assert r.status_code == 400, r.text
         err = r.json()["error"]
         assert err["code"] == "INVALID_SMARTCARD"
-        assert "0000000000" in err["message"]
+        # Sprint 4 B21: raw exception detail (service_id, smartcard,
+        # upstream VTPass desc) MUST NOT leak to API consumers. Verify
+        # the smartcard is NOT echoed back and the generic copy is used.
+        assert "0000000000" not in err["message"]
+        assert "dstv" not in err["message"].lower()
+        assert "vtpass" not in err["message"].lower()
+        assert "smartcard number could not be validated" in err["message"].lower()
     finally:
         fake._rejected_smartcards.discard(("dstv", "0000000000"))
 

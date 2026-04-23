@@ -164,8 +164,14 @@ async def test_validate_meter_invalid_returns_400_invalid_meter(client):
         assert r.status_code == 400, r.text
         err = r.json()["error"]
         assert err["code"] == "INVALID_METER"
-        # VTPass error description is surfaced to the client.
-        assert "0000000000000" in err["message"]
+        # Sprint 4 B21: raw exception detail (service_id, meter number,
+        # upstream VTPass error desc) MUST NOT leak into the API
+        # response. Verify the meter number itself is NOT echoed back
+        # and the generic, user-friendly copy is returned instead.
+        assert "0000000000000" not in err["message"]
+        assert "ikeja" not in err["message"].lower()
+        assert "vtpass" not in err["message"].lower()
+        assert "meter number could not be validated" in err["message"].lower()
     finally:
         fake._rejected_meters.discard(("ikeja-electric", "0000000000000"))
 

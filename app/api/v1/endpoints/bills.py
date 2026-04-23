@@ -17,6 +17,7 @@ from app.api.deps import (
 )
 from app.core.config import settings
 from app.core.limiter import limiter, per_user_or_ip
+from app.core.logger import log
 from app.db.models.user import User
 from app.integrations.vtpass.base import (
     ProviderPermanentFailure,
@@ -208,14 +209,27 @@ async def validate_meter(
             meter_type=body.meter_type,
         )
     except ProviderPermanentFailure as exc:
+        # Sprint 4 B21 review: don't surface raw exc — the message
+        # carries `vtpass validate_meter {service_id}/{meter_number}:
+        # code=... desc=...` which leaks upstream routing + meter
+        # number into the API response. Log full context for ops,
+        # return a generic client-facing message.
+        log.warning("validate_meter permanent failure: %s", exc)
         raise HTTPException(
             status_code=400,
-            detail={"code": "INVALID_METER", "message": str(exc)},
+            detail={
+                "code": "INVALID_METER",
+                "message": "Meter number could not be validated. Check the number and try again.",
+            },
         )
     except ProviderTemporaryFailure as exc:
+        log.warning("validate_meter transient failure: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail={"code": "VTPASS_UNAVAILABLE", "message": str(exc)},
+            detail={
+                "code": "VTPASS_UNAVAILABLE",
+                "message": "Meter validation is temporarily unavailable. Please try again shortly.",
+            },
         )
 
     body_out = MeterValidationResponse(
@@ -361,14 +375,27 @@ async def validate_smartcard(
             smartcard_number=body.smartcard_number,
         )
     except ProviderPermanentFailure as exc:
+        # Sprint 4 B21 review: same redaction as validate_meter — the
+        # raw exception message leaks `vtpass validate_smartcard
+        # {service_id}/{smartcard_number}` and upstream VTPass error
+        # descriptions into the API response. Log for ops, return a
+        # generic user-facing message.
+        log.warning("validate_smartcard permanent failure: %s", exc)
         raise HTTPException(
             status_code=400,
-            detail={"code": "INVALID_SMARTCARD", "message": str(exc)},
+            detail={
+                "code": "INVALID_SMARTCARD",
+                "message": "Smartcard number could not be validated. Check the number and try again.",
+            },
         )
     except ProviderTemporaryFailure as exc:
+        log.warning("validate_smartcard transient failure: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail={"code": "VTPASS_UNAVAILABLE", "message": str(exc)},
+            detail={
+                "code": "VTPASS_UNAVAILABLE",
+                "message": "Smartcard validation is temporarily unavailable. Please try again shortly.",
+            },
         )
 
     body_out = SmartcardValidationResponse(
