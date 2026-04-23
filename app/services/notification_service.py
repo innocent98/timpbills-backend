@@ -24,12 +24,16 @@ the notification — the tx is already committed, money already moved.
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from app.core.logger import log
 from app.integrations.email.base import EmailProvider
 from app.integrations.email.renderer import render_email
 from app.integrations.push.base import BasePushClient
+
+if TYPE_CHECKING:
+    from app.services.push_tokens_service import PushTokensService
 
 
 # S3C-M11: uses the shared loguru-backed logger from app.core.logger
@@ -100,9 +104,18 @@ class NotificationService:
         *,
         email_client: EmailProvider,
         push_client: BasePushClient,
+        push_tokens_service: "PushTokensService | None" = None,
     ) -> None:
+        """If ``push_tokens_service`` is wired, ``_maybe_push`` runs in
+        token-aware mode: look up all registered FCM tokens for the
+        user, send one push per device, evict dead tokens reported by
+        the FCM client. If omitted (Sprint 3 default + tests that
+        predate push-tokens storage), falls back to a single
+        ``push_client.send(user_id=..., fcm_token=None)`` call — the
+        FakePushClient is happy with that."""
         self._email = email_client
         self._push = push_client
+        self._push_tokens = push_tokens_service
 
     async def dispatch(
         self,
@@ -154,18 +167,62 @@ class NotificationService:
         copy = _push_copy(event, context)
         if copy is None:
             return
+        data = {
+            "event":     event.value,
+            "reference": str(context.get("reference", "")),
+        }
+
+        if self._push_tokens is None:
+            # Legacy mode (Sprint 3 default + tests that predate
+            # push-tokens storage) — one call per user, no fcm_token.
+            try:
+                await self._push.send(
+                    user_id=user_id, title=copy.title, body=copy.body, data=data,
+                )
+            except Exception as exc:
+                log.warning(
+                    "notify: push send failed event=%s user=%s err=%s",
+                    event.value, user_id, exc,
+                )
+            return
+
+        # Token-aware mode — real FCM. Fan out one send per registered
+        # device and evict registrations that FCM reports as dead.
         try:
-            await self._push.send(
-                user_id=user_id,
-                title=copy.title,
-                body=copy.body,
-                data={"event": event.value, "reference": str(context.get("reference", ""))},
-            )
+            tokens = self._push_tokens.list_for_user(user_id=UUID(user_id))
         except Exception as exc:
             log.warning(
-                "notify: push send failed event=%s user=%s err=%s",
+                "notify: push device lookup failed event=%s user=%s err=%s",
                 event.value, user_id, exc,
             )
+            return
+        if not tokens:
+            return
+
+        # Imported lazily so the legacy Sprint 3 tests (which never
+        # exercise FCM) don't pay the google-auth import cost.
+        from app.integrations.push.fcm import DeadFCMToken  # noqa: PLC0415
+
+        for row in tokens:
+            try:
+                await self._push.send(
+                    user_id=user_id,
+                    fcm_token=row.fcm_token,
+                    title=copy.title, body=copy.body, data=data,
+                )
+            except DeadFCMToken:
+                try:
+                    self._push_tokens.delete_by_fcm_token(fcm_token=row.fcm_token)
+                except Exception as exc:
+                    log.warning(
+                        "notify: dead-device eviction failed user=%s err=%s",
+                        user_id, exc,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "notify: push send failed event=%s user=%s err=%s",
+                    event.value, user_id, exc,
+                )
 
 
 def _email_subject(event: NotificationEvent, ctx: dict[str, Any]) -> str:

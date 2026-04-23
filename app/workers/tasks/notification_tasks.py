@@ -49,13 +49,33 @@ def dispatch(
         return
 
     email_client, push_client = _resolve_clients()
-    svc = NotificationService(
-        email_client=email_client, push_client=push_client,
-    )
-    _run_async(svc.dispatch(
-        user_id=user_id, user_email=user_email,
-        event=evt, context=context,
-    ))
+
+    # Token-aware push requires a DB-backed PushTokensService so we can
+    # iterate per-device and evict dead registrations. Only opened when
+    # push is going out via the real FCM client; FakePushClient runs in
+    # legacy single-call mode so Sprint 3 tests stay green.
+    from app.db.session import SessionLocal  # noqa: PLC0415
+    from app.integrations.push.fake import FakePushClient  # noqa: PLC0415
+    from app.services.push_tokens_service import PushTokensService  # noqa: PLC0415
+
+    db = None
+    pt_svc = None
+    if not isinstance(push_client, FakePushClient):
+        db = SessionLocal()
+        pt_svc = PushTokensService(db=db)
+
+    try:
+        svc = NotificationService(
+            email_client=email_client, push_client=push_client,
+            push_tokens_service=pt_svc,
+        )
+        _run_async(svc.dispatch(
+            user_id=user_id, user_email=user_email,
+            event=evt, context=context,
+        ))
+    finally:
+        if db is not None:
+            db.close()
 
 
 def dispatch_delay(

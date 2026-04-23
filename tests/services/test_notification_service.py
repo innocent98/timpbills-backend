@@ -293,3 +293,131 @@ def test_dispatch_is_sequential_not_gather_or_create_task():
         "background tasks to be swallowed when _run_async closes the "
         "loop — see S3C-L3 LANDMINE comment in notification_tasks.py."
     )
+
+
+# ─── B17: token-aware push mode ─────────────────────────────────────────
+
+
+from dataclasses import dataclass as _dc
+from uuid import UUID as _UUID, uuid4 as _uuid4
+
+from app.integrations.push.fcm import DeadFCMToken
+
+
+@_dc
+class _FakeTokenRow:
+    fcm_token: str
+
+
+class _StubPushTokens:
+    """In-memory stand-in for PushTokensService. list_for_user returns
+    a pre-seeded list; delete_by_fcm_token drops matching entries."""
+
+    def __init__(self, user_id, tokens):
+        self._user_id = user_id
+        self._rows = [_FakeTokenRow(fcm_token=t) for t in tokens]
+        self.deleted: list[str] = []
+
+    def list_for_user(self, *, user_id):
+        assert user_id == self._user_id
+        return list(self._rows)
+
+    def delete_by_fcm_token(self, *, fcm_token):
+        self.deleted.append(fcm_token)
+        self._rows = [r for r in self._rows if r.fcm_token != fcm_token]
+
+
+def test_dispatch_token_aware_fans_out_one_send_per_registered_device():
+    user_id = _uuid4()
+    push = FakePushClient()
+    tokens = _StubPushTokens(user_id, ["DEV_A", "DEV_B", "DEV_C"])
+    svc = NotificationService(
+        email_client=FakeEmailClient(), push_client=push,
+        push_tokens_service=tokens,
+    )
+    asyncio.run(svc.dispatch(
+        user_id=str(user_id), user_email="multi@t.co",
+        event=NotificationEvent.bill_success,
+        context=build_bill_context(
+            tx_type="airtime", amount=Decimal("100"),
+            destination="080", reference="R",
+            when="now", partial=False,
+        ),
+    ))
+    # Three devices → three sends. Each send carries the device's
+    # fcm_token (legacy mode would have set fcm_token=None).
+    assert len(push.sent) == 3
+    assert [s.fcm_token for s in push.sent] == ["DEV_A", "DEV_B", "DEV_C"]
+    assert all(s.user_id == str(user_id) for s in push.sent)
+    assert tokens.deleted == []
+
+
+def test_dispatch_token_aware_evicts_dead_tokens():
+    user_id = _uuid4()
+
+    class _DeadTokenPush:
+        async def send(self, *, user_id, fcm_token=None, **_):
+            if fcm_token == "DEAD_TOKEN":
+                raise DeadFCMToken("fcm reports token unregistered")
+
+    tokens = _StubPushTokens(user_id, ["GOOD", "DEAD_TOKEN", "GOOD_2"])
+    svc = NotificationService(
+        email_client=FakeEmailClient(), push_client=_DeadTokenPush(),
+        push_tokens_service=tokens,
+    )
+    asyncio.run(svc.dispatch(
+        user_id=str(user_id), user_email="dead@t.co",
+        event=NotificationEvent.bill_success,
+        context=build_bill_context(
+            tx_type="data", amount=Decimal("200"),
+            destination="080", reference="R",
+            when="now", partial=False,
+        ),
+    ))
+    # Only the dead token was evicted; the two good ones stay.
+    assert tokens.deleted == ["DEAD_TOKEN"]
+
+
+def test_dispatch_token_aware_is_noop_when_user_has_no_devices():
+    user_id = _uuid4()
+    push = FakePushClient()
+    tokens = _StubPushTokens(user_id, [])  # no registrations
+    svc = NotificationService(
+        email_client=FakeEmailClient(), push_client=push,
+        push_tokens_service=tokens,
+    )
+    asyncio.run(svc.dispatch(
+        user_id=str(user_id), user_email="empty@t.co",
+        event=NotificationEvent.wallet_funded,
+        context=build_wallet_funded_context(
+            amount=Decimal("1000"), balance=Decimal("1000"),
+            reference="F", channel="card",
+        ),
+    ))
+    assert push.sent == []
+
+
+def test_dispatch_token_aware_transient_failure_does_not_evict():
+    """Non-DeadFCMToken exceptions are transient — we log and move on,
+    but the push_tokens row must stay so the next dispatch retries."""
+    user_id = _uuid4()
+
+    class _TransientFailPush:
+        async def send(self, **_):
+            raise RuntimeError("5xx from fcm")
+
+    tokens = _StubPushTokens(user_id, ["MAYBE_OK"])
+    svc = NotificationService(
+        email_client=FakeEmailClient(), push_client=_TransientFailPush(),
+        push_tokens_service=tokens,
+    )
+    asyncio.run(svc.dispatch(
+        user_id=str(user_id), user_email="trans@t.co",
+        event=NotificationEvent.bill_success,
+        context=build_bill_context(
+            tx_type="airtime", amount=Decimal("100"),
+            destination="080", reference="R",
+            when="now", partial=False,
+        ),
+    ))
+    assert tokens.deleted == []   # transient failure must not evict
