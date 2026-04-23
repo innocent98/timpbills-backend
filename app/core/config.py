@@ -108,6 +108,49 @@ class Settings(BaseSettings):
     FCM_CREDENTIALS_JSON: Optional[str] = None
     FCM_PROJECT_ID: str = "timpbills"
 
+    @field_validator("FCM_CREDENTIALS_JSON", mode="before")
+    @classmethod
+    def validate_fcm_credentials_json(cls, v: Any) -> Optional[str]:
+        """Sprint 4 B25: fail fast on malformed FCM_CREDENTIALS_JSON.
+
+        The FCM client lazy-loads `json.loads(self._credentials_json)`
+        inside `_get_access_token()`, so a malformed value would
+        surface only at first push send — caught by the outer try/except
+        in NotificationService._maybe_push and silently swallowed, with
+        every push failing indefinitely and no startup signal to ops.
+
+        Parse + validate at settings-load time instead: empty/None
+        stays untouched (fake-push fallback path), non-empty must be
+        valid JSON and must at minimum carry a `client_email` and
+        `private_key` — the two fields google-auth actually needs.
+        We don't validate private-key shape (Google's library owns
+        that), just the structural envelope.
+        """
+        if v is None or v == "":
+            return None
+        if not isinstance(v, str):
+            raise ValueError(
+                f"FCM_CREDENTIALS_JSON must be a string, got {type(v).__name__}"
+            )
+        try:
+            parsed = json.loads(v)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"FCM_CREDENTIALS_JSON must be valid JSON: {e}"
+            )
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                "FCM_CREDENTIALS_JSON must decode to a JSON object "
+                "(service-account key), not an array or scalar"
+            )
+        missing = [k for k in ("client_email", "private_key") if not parsed.get(k)]
+        if missing:
+            raise ValueError(
+                f"FCM_CREDENTIALS_JSON missing required service-account "
+                f"fields: {missing}"
+            )
+        return v
+
     # ── Electricity purchase caps (Sprint 4) ─────────────────────────────
     # Max single-transaction amount (naira) for electricity purchases.
     # Applied per-DisCo via ELECTRICITY_DISCO_CAPS overrides; falls back to
