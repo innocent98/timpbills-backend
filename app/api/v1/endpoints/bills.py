@@ -1,5 +1,6 @@
 """/bills/* endpoints — airtime, data, and electricity. Cable endpoints
 are appended alongside electricity as Sprint 4 lands."""
+import re
 from decimal import Decimal
 from uuid import UUID
 
@@ -57,6 +58,37 @@ from app.utils.responses import success
 
 
 router = APIRouter(prefix="/bills", tags=["bills"])
+
+
+# Sprint 4 B28 (B-I1 follow-up): VTPass's ProviderPermanentFailure /
+# ProviderTemporaryFailure messages are constructed as:
+#   "vtpass {op} {service_id}/{identifier}: code=... desc=..."
+# Logging the raw exception at WARNING routes the meter / smartcard
+# numbers into Sentry + Datadog — the earlier B21 fix moved them out
+# of the API response but left them in the log stream. Scrub before
+# logging so ops retains service_id + error code/desc without the PII.
+_VTPASS_EXC_ID_RE = re.compile(
+    r"^(vtpass \S+ )([^/:]+)/(\S+)(:.*)$", re.DOTALL,
+)
+
+
+def _scrub_vtpass_error(exc: Exception) -> str:
+    """Return the exception message with the user-supplied identifier
+    (meter number / smartcard number) masked. Keeps service_id and the
+    trailing code/desc so ops can still triage. Non-matching messages
+    pass through untouched — the exception still flows up unchanged,
+    only the string representation used for logging is modified."""
+    raw = str(exc)
+    m = _VTPASS_EXC_ID_RE.match(raw)
+    if not m:
+        return raw
+    prefix, service_id, identifier, tail = m.groups()
+    # Keep only the last 4 digits of the identifier so logs remain
+    # correlatable across retries without leaking the full number.
+    masked = (
+        f"•••• {identifier[-4:]}" if len(identifier) >= 4 else "••••"
+    )
+    return f"{prefix}{service_id}/{masked}{tail}"
 
 
 # Static catalog — VTPass serviceIDs are stable. Prefix table drives the
@@ -209,12 +241,10 @@ async def validate_meter(
             meter_type=body.meter_type,
         )
     except ProviderPermanentFailure as exc:
-        # Sprint 4 B21 review: don't surface raw exc — the message
-        # carries `vtpass validate_meter {service_id}/{meter_number}:
-        # code=... desc=...` which leaks upstream routing + meter
-        # number into the API response. Log full context for ops,
-        # return a generic client-facing message.
-        log.warning("validate_meter permanent failure: %s", exc)
+        # B21 redacted the user-facing response; B28 redacts the log
+        # stream too — _scrub_vtpass_error masks the meter number
+        # before it hits Sentry/Datadog aggregation.
+        log.warning("validate_meter permanent failure: %s", _scrub_vtpass_error(exc))
         raise HTTPException(
             status_code=400,
             detail={
@@ -223,7 +253,7 @@ async def validate_meter(
             },
         )
     except ProviderTemporaryFailure as exc:
-        log.warning("validate_meter transient failure: %s", exc)
+        log.warning("validate_meter transient failure: %s", _scrub_vtpass_error(exc))
         raise HTTPException(
             status_code=503,
             detail={
@@ -378,12 +408,9 @@ async def validate_smartcard(
             smartcard_number=body.smartcard_number,
         )
     except ProviderPermanentFailure as exc:
-        # Sprint 4 B21 review: same redaction as validate_meter — the
-        # raw exception message leaks `vtpass validate_smartcard
-        # {service_id}/{smartcard_number}` and upstream VTPass error
-        # descriptions into the API response. Log for ops, return a
-        # generic user-facing message.
-        log.warning("validate_smartcard permanent failure: %s", exc)
+        log.warning(
+            "validate_smartcard permanent failure: %s", _scrub_vtpass_error(exc),
+        )
         raise HTTPException(
             status_code=400,
             detail={
@@ -392,7 +419,9 @@ async def validate_smartcard(
             },
         )
     except ProviderTemporaryFailure as exc:
-        log.warning("validate_smartcard transient failure: %s", exc)
+        log.warning(
+            "validate_smartcard transient failure: %s", _scrub_vtpass_error(exc),
+        )
         raise HTTPException(
             status_code=503,
             detail={

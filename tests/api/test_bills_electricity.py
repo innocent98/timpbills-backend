@@ -32,6 +32,65 @@ from app.integrations.email.fake import FakeEmailClient
 from app.integrations.vtpass import factory as _vtpass_factory
 from app.main import app
 from app.services.token_store import RedisTokenStore
+from app.api.v1.endpoints.bills import _scrub_vtpass_error
+from app.integrations.vtpass.base import ProviderPermanentFailure, ProviderTemporaryFailure
+
+
+# ── B28 / B-I1 unit tests: _scrub_vtpass_error PII guard ────────────────
+
+
+def test_scrub_vtpass_error_masks_meter_number_in_message():
+    """The VTPass client constructs ProviderPermanentFailure as:
+      "vtpass validate_meter ikeja-electric/1234567890123: code=035 desc=..."
+    Raw logging would route the meter number to Sentry/Datadog. The
+    scrubber must mask everything after the service_id's `/`, keeping
+    only the last 4 digits for correlation."""
+    exc = ProviderPermanentFailure(
+        "vtpass validate_meter ikeja-electric/1234567890123: code=035 desc=invalid account",
+    )
+    scrubbed = _scrub_vtpass_error(exc)
+    assert "1234567890123" not in scrubbed
+    # Service ID preserved for ops triage.
+    assert "ikeja-electric" in scrubbed
+    # Error code + desc preserved.
+    assert "code=035" in scrubbed
+    assert "invalid account" in scrubbed
+    # Last 4 digits kept for retry-correlation.
+    assert "•••• 0123" in scrubbed
+
+
+def test_scrub_vtpass_error_masks_smartcard_number_in_message():
+    """Same scrub contract for smartcard validation failures."""
+    exc = ProviderPermanentFailure(
+        "vtpass validate_smartcard dstv/9876543210: code=401 desc=card blocked",
+    )
+    scrubbed = _scrub_vtpass_error(exc)
+    assert "9876543210" not in scrubbed
+    assert "dstv" in scrubbed
+    assert "code=401" in scrubbed
+    assert "card blocked" in scrubbed
+    assert "•••• 3210" in scrubbed
+
+
+def test_scrub_vtpass_error_handles_short_identifier_gracefully():
+    """Identifier shorter than 4 chars cannot be partially masked —
+    return a full bullet mask instead of leaking the whole thing."""
+    exc = ProviderPermanentFailure(
+        "vtpass validate_meter ikeja-electric/123: code=X desc=y",
+    )
+    scrubbed = _scrub_vtpass_error(exc)
+    assert "123" not in scrubbed.replace("code", "").replace("desc", "")
+    assert "••••" in scrubbed
+
+
+def test_scrub_vtpass_error_passes_through_non_matching_messages():
+    """Transient network errors like 'vtpass network error: connection
+    refused' don't carry PII — the scrubber must not mangle them."""
+    exc = ProviderTemporaryFailure("vtpass network error: connection refused")
+    scrubbed = _scrub_vtpass_error(exc)
+    # Non-matching → returned verbatim.
+    assert scrubbed == "vtpass network error: connection refused"
+
 
 import tests.e2e.test_auth_full_flows as _e2e_mod
 from tests.e2e.test_auth_full_flows import _seed_logged_in_user
