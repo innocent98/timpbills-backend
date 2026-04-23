@@ -92,11 +92,14 @@ async def test_validate_smartcard_happy_path_caches_result(db_session):
     assert isinstance(result, SmartcardValidation)
     assert result.service_id == "dstv"
     assert result.smartcard_number == "1234567890"
-    # Fake seeds an active subscriber with the default "Fake Compact Plan".
+    # Fake pins the "current plan" to the first seeded dstv variation
+    # (Compact at ₦15500/month) so a subsequent renew-purchase's catalog
+    # lookup against BillService.purchase_cable resolves cleanly.
     assert result.customer_name == "FAKE SUBSCRIBER 7890"
-    assert result.current_plan_name == "Fake Compact Plan"
+    assert result.current_plan_name == "Compact"
+    assert result.current_plan_code == "dstv-compact"
     assert result.status == "active"
-    assert result.renewal_amount_ngn == Decimal("5000.00")
+    assert result.renewal_amount_ngn == Decimal("15500.00")
     assert provider.validate_calls == 1
 
     # Request-id prefix is TMP-SCV so log greps distinguish smartcard

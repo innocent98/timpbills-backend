@@ -25,8 +25,12 @@ from app.integrations.vtpass.base import (
 from app.schemas.bills import (
     AirtimePurchaseRequest,
     AirtimePurchaseResponse,
+    CablePlanListResponse,
+    CablePlanView,
     CableProviderListResponse,
     CableProviderView,
+    CablePurchaseRequest,
+    CablePurchaseResponse,
     DataPlanListResponse,
     DataPlanView,
     DataPurchaseRequest,
@@ -40,7 +44,12 @@ from app.schemas.bills import (
     SmartcardValidationRequest,
     SmartcardValidationResponse,
 )
-from app.services.bill_service import BillService, DataPlanNotFound
+from app.services.bill_service import (
+    BillService,
+    CablePlanNotFound,
+    CableRenewalUnavailable,
+    DataPlanNotFound,
+)
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
 from app.services.wallet_service import InsufficientBalance, WalletService
 from app.utils.responses import success
@@ -375,6 +384,141 @@ async def validate_smartcard(
         body_out.model_dump(mode="json"),
         request_id=getattr(request.state, "request_id", None),
     )
+
+
+@router.get("/cable/plans", response_model=None)
+@limiter.limit("60/minute", key_func=per_user_or_ip)
+async def list_cable_plans(
+    request: Request,
+    provider: str,
+    mode: str,
+    user: User = Depends(get_current_user),
+    bill_svc: BillService = Depends(get_bill_service),
+):
+    """Return the cable bouquet catalog. `mode` is renew|change; both
+    return the full catalog — the renew/change distinction drives the
+    mobile UI (renew filters to current_plan_code; change shows all)
+    and the VTPass wire service_id at purchase time."""
+    try:
+        plans = await bill_svc.list_cable_plans(service_id=provider, mode=mode)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_CABLE_MODE", "message": str(exc)},
+        )
+    body_out = CablePlanListResponse(
+        service_id=plans.service_id,
+        plans=[
+            CablePlanView(
+                variation_code=v.variation_code,
+                name=v.name,
+                price=v.price_ngn,
+                validity=v.validity,
+            )
+            for v in plans.variations
+        ],
+    )
+    return success(
+        body_out.model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+
+@router.post("/cable", response_model=None, status_code=200)
+@limiter.limit("30/minute", key_func=per_user_or_ip)
+async def purchase_cable(
+    request: Request,
+    body: CablePurchaseRequest,
+    idem_key: str = Depends(require_idempotency_key),
+    user: User = Depends(get_current_user),
+    _pin_token: str = Depends(require_pin_token),
+    bill_svc: BillService = Depends(get_bill_service),
+    idem: IdempotencyService = Depends(get_idempotency_service),
+):
+    """Cable bouquet purchase. Two modes:
+
+      * ``renew``  — BillService reads the cached SmartcardValidation
+        (populated by validate-smartcard) and uses its current plan +
+        renewal amount. No client-supplied price. Cache miss → 409
+        CABLE_RENEWAL_UNAVAILABLE so the mobile layer can re-trigger
+        validation.
+      * ``change`` — client supplies ``variation_code``; BillService
+        server-resolves the price from the catalog (never the client).
+    """
+    # Schema + mode sanity — we hard-require variation_code on change;
+    # surfacing this before the idempotency gate keeps the error
+    # identifiable on the client.
+    if body.mode == "change" and not body.variation_code:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VARIATION_CODE_REQUIRED",
+                    "message": "variation_code is required for mode=change"},
+        )
+
+    req_hash = idem.hash_body(
+        user_id=str(user.id),
+        endpoint="/bills/cable",
+        body=body.model_dump(mode="json"),
+    )
+    try:
+        cached = await idem.lookup(
+            user_id=str(user.id), key=idem_key, request_hash=req_hash,
+        )
+    except IdempotencyConflict:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "IDEMPOTENCY_CONFLICT",
+                    "message": "Idempotency key reused with different request"},
+        )
+    if cached is not None:
+        return cached[1]
+
+    try:
+        result = await bill_svc.purchase_cable(
+            user_id=UUID(str(user.id)),
+            service_id=body.service_id,
+            smartcard_number=body.smartcard_number,
+            mode=body.mode,
+            variation_code=body.variation_code,
+        )
+    except CableRenewalUnavailable as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "CABLE_RENEWAL_UNAVAILABLE", "message": str(exc)},
+        )
+    except CablePlanNotFound as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "UNKNOWN_CABLE_PLAN", "message": str(exc)},
+        )
+    except InsufficientBalance:
+        raise HTTPException(
+            status_code=402,
+            detail={"code": "INSUFFICIENT_BALANCE",
+                    "message": "Wallet balance is not enough for this purchase"},
+        )
+
+    tx = result.tx
+    meta = tx.meta or {}
+    body_out = success(
+        CablePurchaseResponse(
+            reference=tx.reference,
+            status=tx.status.value,
+            service_id=body.service_id,
+            smartcard_number=body.smartcard_number,
+            mode=body.mode,
+            plan_code=meta.get("plan_code", ""),
+            plan_name=meta.get("plan_name", ""),
+            amount=tx.amount,
+        ).model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+    await idem.store(
+        user_id=str(user.id), key=idem_key, request_hash=req_hash,
+        response_status=200, response_body=body_out,
+    )
+    return body_out
 
 
 # ── Data ─────────────────────────────────────────────────────────────────

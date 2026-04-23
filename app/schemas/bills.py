@@ -131,6 +131,38 @@ class SmartcardValidationResponse(BaseModel):
     renewal_amount: Decimal                  # 0 on inactive cards
 
 
+class CablePlanView(BaseModel):
+    variation_code: str
+    name: str
+    price: Decimal
+    validity: str | None = None
+
+
+class CablePlanListResponse(BaseModel):
+    service_id: str
+    plans: list[CablePlanView]
+
+
+class CablePurchaseRequest(BaseModel):
+    service_id: str = Field(min_length=1)              # "dstv" etc. — base slug (no -change suffix)
+    smartcard_number: str = Field(min_length=1, max_length=20)
+    mode: Literal["renew", "change"]
+    # Required only for mode=change; BillService enforces. Optional at
+    # the schema layer so a renew request can omit it cleanly.
+    variation_code: str | None = None
+
+
+class CablePurchaseResponse(BaseModel):
+    reference: str
+    status: str
+    service_id: str
+    smartcard_number: str
+    mode: str                                          # "renew" | "change"
+    plan_code: str
+    plan_name: str
+    amount: Decimal
+
+
 # ── Networks catalog (for GET /bills/airtime/networks) ─────────────────
 
 

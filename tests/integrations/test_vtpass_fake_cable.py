@@ -49,8 +49,13 @@ async def test_validate_smartcard_returns_default_active_compact_plan():
     assert result.service_id == "dstv"
     assert result.smartcard_number == "1234567890"
     assert result.status == "active"
-    assert result.current_plan_name == "Fake Compact Plan"
-    assert result.renewal_amount_ngn == Decimal("5000.00")
+    # The fake pins the current plan to the first seeded dstv variation
+    # so a subsequent renew-purchase's catalog lookup resolves; catalog
+    # order may drift but the first entry is "Compact" at the time of
+    # writing.
+    assert result.current_plan_name == "Compact"
+    assert result.current_plan_code == "dstv-compact"
+    assert result.renewal_amount_ngn == Decimal("15500.00")
     assert result.customer_name != ""
 
 

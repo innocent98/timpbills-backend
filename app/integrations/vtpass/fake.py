@@ -210,14 +210,29 @@ class FakeVTPassClient(BillProvider):
             raise ProviderPermanentFailure(
                 f"invalid smartcard {smartcard_number} on {service_id}"
             )
+        # Pin the "current" plan to the first seeded variation for this
+        # provider so a subsequent renew-purchase's catalog lookup
+        # actually resolves. For providers without a seeded catalog we
+        # fall back to a synthetic plan — tests that exercise renew must
+        # stick to seeded providers (dstv / gotv / startimes / showmax).
+        catalog = _DEFAULT_CABLE_PLANS.get(service_id, [])
+        if catalog:
+            current = catalog[0]
+            plan_name = current.name
+            plan_code = current.variation_code
+            renewal = current.price_ngn
+        else:
+            plan_name = "Fake Compact Plan"
+            plan_code = "fake-compact"
+            renewal = Decimal("5000.00")
         return SmartcardValidation(
             service_id=service_id,
             smartcard_number=smartcard_number,
             customer_name=f"FAKE SUBSCRIBER {smartcard_number[-4:]}",
-            current_plan_name="Fake Compact Plan",
-            current_plan_code="fake-compact",
+            current_plan_name=plan_name,
+            current_plan_code=plan_code,
             status="active",
-            renewal_amount_ngn=Decimal("5000.00"),
+            renewal_amount_ngn=renewal,
         )
 
     async def list_cable_plans(self, *, service_id: str) -> CablePlanList:
@@ -237,7 +252,12 @@ class FakeVTPassClient(BillProvider):
     ) -> BillPurchaseResponse:
         # Same safety pattern as purchase_data: look up the variation in
         # the seeded catalog so a client-spoofed code can't succeed.
-        plans = await self.list_cable_plans(service_id=service_id)
+        # BillService sends ``{slug}-change`` on plan-change purchases;
+        # strip the suffix because our catalog is seeded under the base
+        # slugs. Mirrors VTPass's own routing where "dstv-change" and
+        # "dstv" share the same bouquet list.
+        lookup_id = service_id[:-7] if service_id.endswith("-change") else service_id
+        plans = await self.list_cable_plans(service_id=lookup_id)
         match = next(
             (v for v in plans.variations if v.variation_code == variation_code),
             None,
