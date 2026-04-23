@@ -53,6 +53,10 @@ class NotificationEvent(str, Enum):
     # email says "X is on its way" and has nowhere to put the token.
     # This event renders token + units + DisCo + meter.
     electricity_token_delivered     = "electricity_token_delivered"
+    # Cable-specific success event: the email shows the activated
+    # bouquet (renew or change) and when it runs through. The generic
+    # bill_success template has no slot for a plan name / validity.
+    cable_activated                 = "cable_activated"
     # Reserved for a future flow (e.g. ops-initiated refunds, reconcile
     # worker refunds where we want a distinct user-visible message).
     refund_complete                 = "refund_complete"
@@ -65,6 +69,7 @@ _EMAIL_TEMPLATES: dict[NotificationEvent, str | None] = {
     NotificationEvent.bill_failure_refund:         "bill_failure_refund",
     NotificationEvent.wallet_funded:               "wallet_funded",
     NotificationEvent.electricity_token_delivered: "electricity_token_delivered",
+    NotificationEvent.cable_activated:             "cable_activated",
     NotificationEvent.refund_complete:             None,
 }
 
@@ -110,6 +115,12 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
         return _PushCopy(
             title=f"Electricity purchased · Meter {meter_tail}",
             body=f"Token: {ctx.get('token', '')}{units_phrase}",
+        )
+    if event is NotificationEvent.cable_activated:
+        mode_label = "renewed" if ctx.get("mode") == "renew" else "activated"
+        return _PushCopy(
+            title=f"{ctx.get('provider_label', 'Cable')} {mode_label}",
+            body=f"{ctx.get('plan_name', '')} on your smartcard. ₦{ctx.get('amount', '')} paid.",
         )
     return None
 
@@ -252,6 +263,9 @@ def _email_subject(event: NotificationEvent, ctx: dict[str, Any]) -> str:
         return f"Wallet funded — ₦{ctx.get('amount')}"
     if event is NotificationEvent.electricity_token_delivered:
         return f"Electricity token — ₦{ctx.get('amount')} on meter {ctx.get('meter_number')}"
+    if event is NotificationEvent.cable_activated:
+        verb = "renewed" if ctx.get("mode") == "renew" else "activated"
+        return f"{ctx.get('provider_label', 'Cable')} {verb} — {ctx.get('plan_name', '')}"
     return "Timpbills notification"
 
 
@@ -320,6 +334,34 @@ def build_electricity_token_context(
         "amount":       str(amount),
         "reference":    reference,
         "when":         when,
+    }
+
+
+def build_cable_activated_context(
+    *,
+    service_id: str,
+    smartcard_number: str,
+    mode: str,                   # "renew" | "change"
+    plan_code: str,
+    plan_name: str,
+    amount: Decimal,
+    reference: str,
+    when: str,
+    provider_label: str | None = None,
+) -> dict[str, Any]:
+    """Shape the context dict for cable_activated. `provider_label` is
+    the display form (e.g. "DStv"); falls back to service_id if None.
+    `mode` drives whether the copy reads "renewed" or "activated"."""
+    return {
+        "service_id":       service_id,
+        "provider_label":   provider_label or service_id.upper(),
+        "smartcard_number": smartcard_number,
+        "mode":             mode,
+        "plan_code":        plan_code,
+        "plan_name":        plan_name,
+        "amount":           str(amount),
+        "reference":        reference,
+        "when":             when,
     }
 
 

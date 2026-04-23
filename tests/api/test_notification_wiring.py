@@ -410,3 +410,57 @@ async def test_electricity_purchase_delivered_dispatches_electricity_token_deliv
     body = electricity_emails[0].code_or_body
     assert "1234567890123" in body
     assert "TOKEN" in body.upper()
+
+
+# ── Sprint 4 · B19: cable_activated branch ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cable_change_mode_dispatches_cable_activated(
+    client, db_session,
+):
+    """Cable purchases fire cable_activated (and NOT bill_success).
+    Asserts both change-mode dispatch and the email body surfacing
+    the plan + provider display label."""
+    _, headers = await _seed_logged_in_user(client)
+    _fund_wallet_directly(db_session, amount=Decimal("50000.00"))
+    pin = await _pin_token(client, headers)
+
+    push = _fake_push_singleton
+    notif_email = _fake_email_singleton
+    emails_before = len(notif_email.sent)
+    pushes_before = len(push.sent)
+
+    r = await client.post(
+        "/api/v1/bills/cable",
+        json={
+            "service_id":       "dstv",
+            "smartcard_number": "1234567890",
+            "mode":             "change",
+            "variation_code":   "dstv-premium",
+        },
+        headers={**headers, "X-Pin-Token": pin, "Idempotency-Key": str(uuid4())},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["status"] == "success"
+
+    new_pushes = push.sent[pushes_before:]
+    activated = [
+        p for p in new_pushes
+        if p.data.get("event") == "cable_activated"
+    ]
+    assert len(activated) == 1
+    # Branch exclusivity — the generic bill_success must NOT also fire.
+    bill_success_pushes = [
+        p for p in new_pushes if p.data.get("event") == "bill_success"
+    ]
+    assert bill_success_pushes == []
+    # The push title uses the provider display label, not the wire slug.
+    assert "DStv" in activated[0].title
+
+    new_emails = notif_email.sent[emails_before:]
+    cable_emails = [e for e in new_emails if "DStv" in e.subject]
+    assert len(cable_emails) == 1
+    body = cable_emails[0].code_or_body
+    assert "Premium" in body
+    assert "1234567890" in body

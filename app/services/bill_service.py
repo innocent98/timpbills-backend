@@ -115,6 +115,19 @@ REFUNDABLE_ON_FAILURE = {
 }
 
 
+# Display labels for cable providers — used only by the
+# cable_activated notification template. Slug → display mapping is
+# not authoritative elsewhere (the /bills/cable/providers endpoint
+# carries its own view objects); keep this list in sync when a new
+# provider lands.
+_CABLE_PROVIDER_LABELS = {
+    "dstv":      "DStv",
+    "gotv":      "GOtv",
+    "startimes": "StarTimes",
+    "showmax":   "Showmax",
+}
+
+
 # ── Service ──────────────────────────────────────────────────────────────
 
 
@@ -831,6 +844,30 @@ def _notify_bill_success(
             "falling back to generic bill_success",
             tx.reference,
         )
+
+    if tx.type is TransactionType.cable:
+        from app.services.notification_service import (
+            build_cable_activated_context,
+        )
+        ctx = build_cable_activated_context(
+            service_id=str(meta.get("service_id", "")),
+            smartcard_number=str(meta.get("smartcard_number", "")),
+            mode=str(meta.get("mode", "")),
+            plan_code=str(meta.get("plan_code", "")),
+            plan_name=str(meta.get("plan_name", "")),
+            amount=amount,
+            reference=tx.reference,
+            when=when,
+            provider_label=_CABLE_PROVIDER_LABELS.get(
+                str(meta.get("service_id", "")),
+                str(meta.get("service_id", "")).upper(),
+            ),
+        )
+        dispatch_delay(
+            user_id=str(tx.user_id), user_email=user.email,
+            event=NotificationEvent.cable_activated, context=ctx,
+        )
+        return
 
     partial = result.delivered_amount_ngn < amount
     ctx = build_bill_context(

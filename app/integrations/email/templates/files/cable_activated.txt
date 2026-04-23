@@ -1,0 +1,15 @@
+{% if mode == "renew" %}Your {{ provider_label }} bouquet has been renewed{% else %}Your {{ provider_label }} bouquet is live{% endif %}
+
+{{ plan_name }} is {% if mode == "renew" %}renewed{% else %}active{% endif %} on smartcard {{ smartcard_number }}.
+
+Provider: {{ provider_label }}
+Plan: {{ plan_name }}
+Smartcard: {{ smartcard_number }}
+Amount: ₦{{ amount }}
+Reference: {{ reference }}
+When: {{ when }}
+
+Activation usually appears on your decoder within a few minutes.
+Need help? Reply to this email.
+
+— Timpbills
