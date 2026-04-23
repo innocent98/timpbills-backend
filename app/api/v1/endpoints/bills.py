@@ -311,7 +311,10 @@ async def purchase_electricity(
             service_id=body.service_id,
             meter_number=body.meter_number,
             meter_type=body.meter_type,
-            phone=body.phone,
+            # Sprint 4 B26: phone is pulled from the authenticated user
+            # profile, not the request body. VTPass still receives it;
+            # BillService.purchase_electricity signature is unchanged.
+            phone=user.phone,
             amount_ngn=body.amount,
         )
     except InsufficientBalance:

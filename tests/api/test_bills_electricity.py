@@ -223,11 +223,14 @@ async def test_validate_meter_cache_hits_on_repeat_request(client):
 
 
 def _elec_payload(**overrides):
+    # Sprint 4 B26: phone was removed from the request body — the
+    # endpoint injects user.phone from the authenticated profile. The
+    # _seed_logged_in_user fixture already sets a valid NG phone on
+    # the user row, so VTPass receives a usable number server-side.
     base = {
         "service_id":   "ikeja-electric",
         "meter_number": "1234567890123",
         "meter_type":   "prepaid",
-        "phone":        "08012345678",
         "amount":       "2000.00",
     }
     base.update(overrides)

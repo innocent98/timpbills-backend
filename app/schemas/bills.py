@@ -83,10 +83,15 @@ class ElectricityPurchaseRequest(BaseModel):
     service_id: str = Field(min_length=1)             # DisCo slug, e.g. "ikeja-electric"
     meter_number: str = Field(min_length=1, max_length=20)
     meter_type: Literal["prepaid", "postpaid"]
-    # VTPass wire requirement — the DisCo wants a contact number on file
-    # so the token can be SMS-resent on loss. We pass through whatever the
-    # client sends; BillService does not persist it beyond tx.meta.
-    phone: str = Field(min_length=11, max_length=14)
+    # Sprint 4 B26: `phone` was removed from the request body — the
+    # VTPass wire still needs a contact number (DisCos use it for SMS-
+    # resend of lost tokens), but that concern belongs to the backend
+    # adapter, not the client. The endpoint now auto-injects `user.phone`
+    # from the authenticated profile when calling BillService, so the
+    # mobile UI doesn't ask the user to type the same number they
+    # already verified at KYC-1. If VTPass ever requires a distinct
+    # recipient phone for electricity (they don't today), that would
+    # be a deliberate re-addition here.
     amount: Decimal = Field(gt=Decimal("0"))
 
 

@@ -380,8 +380,8 @@ async def test_electricity_purchase_delivered_dispatches_electricity_token_deliv
             "service_id":   "ikeja-electric",
             "meter_number": "1234567890123",
             "meter_type":   "prepaid",
-            "phone":        "08012345678",
             "amount":       "2000.00",
+            # B26: phone injected from user.phone server-side, not body.
         },
         headers={**headers, "X-Pin-Token": pin, "Idempotency-Key": str(uuid4())},
     )
@@ -519,8 +519,8 @@ async def test_electricity_delivered_without_token_falls_back_to_bill_success(
             "service_id":   "ikeja-electric",
             "meter_number": "1234567890123",
             "meter_type":   "prepaid",
-            "phone":        "08012345678",
             "amount":       "2000.00",
+            # B26: phone injected from user.phone server-side, not body.
         },
         headers={**headers, "X-Pin-Token": pin, "Idempotency-Key": str(uuid4())},
     )
