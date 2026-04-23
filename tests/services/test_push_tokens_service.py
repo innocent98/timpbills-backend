@@ -234,3 +234,114 @@ def test_upsert_survives_concurrent_insert_race(db_session, monkeypatch):
     # Still exactly one row — no orphaned duplicate from the failed
     # INSERT attempt.
     assert db_session.query(PushToken).count() == 1
+
+
+# ── B30 regression: concurrent DeadFCMToken delete during race retry ────
+
+
+def test_upsert_retries_when_row_vanishes_between_insert_race_and_update(
+    db_session, monkeypatch,
+):
+    """Sprint 4 B30 (B-I3 follow-up). The B24 race path catches
+    IntegrityError from a losing INSERT and falls through to an UPDATE
+    on the winner row. But the window between the failed INSERT and
+    the subsequent SELECT is real — a concurrent DeadFCMToken handler
+    could run `delete_by_fcm_token` in that window, removing the row
+    we expected to UPDATE. Previously `.one()` threw NoResultFound,
+    surfacing as a 500 on what is conceptually a successful registration.
+
+    B30 bounded-retries: on SELECT returning None (row vanished), loop
+    back and attempt the full upsert from scratch. The second iteration's
+    INSERT should succeed because the delete freed the unique constraint.
+
+    Simulate the scenario by pre-seeding a row, monkeypatching the
+    service's first-call chain to look like the INSERT lost, and making
+    the concurrent-DELETE happen between the failed INSERT and the
+    fallback SELECT. We assert the final outcome is a clean INSERT for
+    our user, not a 500.
+    """
+    user_id = uuid4()
+
+    svc = PushTokensService(db=db_session)
+
+    # Pre-seed a winner row owned by another user (simulating the
+    # "lost the INSERT race" state).
+    other_user = uuid4()
+    seed = PushToken(
+        user_id=other_user,
+        fcm_token="race-and-vanish-token",
+        platform="android",
+        last_seen_at=datetime.now(timezone.utc),
+    )
+    db_session.add(seed)
+    db_session.commit()
+    seed_id = seed.id
+
+    # Stage 1: force initial SELECT to return None (race condition — we
+    # THINK no row exists), so INSERT is attempted.
+    # Stage 2: INSERT fails with IntegrityError (the winner row does
+    # exist on the DB even though our ORM view said None).
+    # Stage 3: DeadFCMToken deletion removes the winner row.
+    # Stage 4: Fallback SELECT returns None (row vanished) — retry.
+    # Stage 5: Second iteration's initial SELECT returns None (row
+    # really is gone), INSERT succeeds cleanly.
+
+    call_log: list[str] = []
+    original_query = db_session.query
+    original_one_or_none = None  # captured below
+
+    def _patched_query(*args, **kwargs):
+        q = original_query(*args, **kwargs)
+        # Patch only PushToken queries — other models untouched.
+        if args and args[0].__name__ == "PushToken":
+            original_filter = q.filter
+
+            def _filtered(*fargs, **fkwargs):
+                filtered_q = original_filter(*fargs, **fkwargs)
+                real_one_or_none = filtered_q.one_or_none
+
+                def _spoofed_one_or_none():
+                    call_log.append("one_or_none")
+                    call_count = call_log.count("one_or_none")
+                    # 1st call: initial SELECT in upsert_for_user — return
+                    #   None (fast path will think no row exists, go to INSERT).
+                    # 2nd call: fallback SELECT after IntegrityError — the
+                    #   DeadFCMToken has already removed the row by now.
+                    if call_count == 1:
+                        return None
+                    if call_count == 2:
+                        # Simulate concurrent deletion right before this call.
+                        # The winner row (seed) is deleted on a scratch
+                        # session so the main session's SELECT sees nothing.
+                        db_session.query(PushToken).filter(
+                            PushToken.id == seed_id,
+                        ).delete()
+                        db_session.commit()
+                        return None
+                    # 3rd+ calls: real behaviour (the retry iteration's
+                    # initial SELECT should see no row, and its INSERT
+                    # should succeed cleanly).
+                    return real_one_or_none()
+
+                filtered_q.one_or_none = _spoofed_one_or_none
+                return filtered_q
+
+            q.filter = _filtered
+        return q
+
+    monkeypatch.setattr(db_session, "query", _patched_query)
+
+    # Drive the upsert. Expected: the race-and-vanish scenario is
+    # handled by the retry; we end with a fresh row for our user.
+    result = svc.upsert_for_user(
+        user_id=user_id,
+        fcm_token="race-and-vanish-token",
+        platform="ios",
+    )
+
+    assert result.user_id == user_id
+    assert result.fcm_token == "race-and-vanish-token"
+    assert result.platform == "ios"
+
+    # Exactly one row in DB — no ghost rows from the retry.
+    assert db_session.query(PushToken).count() == 1
