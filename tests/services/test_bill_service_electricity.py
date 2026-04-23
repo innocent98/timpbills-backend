@@ -570,3 +570,87 @@ async def test_purchase_electricity_insufficient_balance_skips_provider(
     )
     assert len(failed) == 1
     assert failed[0].status == TransactionStatus.failed
+
+
+# ── B22 regression: post-processor merge is atomic vs concurrent writer ─
+
+
+@pytest.mark.asyncio
+async def test_purchase_electricity_post_processor_does_not_clobber_concurrent_meta_write(
+    db_session,
+):
+    """Sprint 4 B22 review: the post-dispatch token/units persistence used
+    to read ``result.tx.meta`` (stale in-memory copy), merge in-process,
+    and commit — clobbering any concurrent writer (e.g. a VTPass
+    delivery-webhook callback adding ``vtpass_transaction_id``) that
+    touched the same column between ``_execute_bill``'s final commit and
+    the post-processor's commit.
+
+    The fix re-fetches the row under ``SELECT ... FOR UPDATE`` and merges
+    on top of the *current* DB state, so any concurrent write that
+    landed first is preserved. This test simulates that race by having
+    the fake provider write ``webhook_id`` directly into ``tx.meta`` via
+    a parallel UPDATE (bypasses the session identity map, emulating a
+    foreign connection / Celery worker). After ``purchase_electricity``
+    returns, all three keys — the original request-shape meta keys,
+    the concurrent ``webhook_id``, AND the post-processor's
+    ``token``/``units`` — must co-exist.
+    """
+    from sqlalchemy import text
+
+    user = _seed_user(db_session)
+
+    # SQLite (test-env) doesn't honor SELECT ... FOR UPDATE as a real
+    # lock, but the invariant under test — re-read before merge — works
+    # on both dialects. We use the session's own connection for the
+    # external UPDATE so commit sequencing aligns.
+    class ConcurrentWebhookFake(FakeVTPassClient):
+        async def purchase_electricity(self, **kw):  # type: ignore[override]
+            # Let _execute_bill create/commit the processing tx row
+            # first, then simulate a webhook arriving on a different
+            # connection and writing `webhook_id` into the row's meta.
+            # We do this via raw SQL so we bypass the session's identity
+            # map — same as a Celery worker using its own Session would.
+            req_id = kw["request_id"]
+            db_session.execute(
+                text(
+                    "UPDATE transactions "
+                    "SET meta = json_patch(meta, :patch) "
+                    "WHERE reference = :ref"
+                ).bindparams(
+                    patch='{"webhook_id": "wh_concurrent_abc"}',
+                    ref=req_id,
+                ),
+            )
+            db_session.commit()
+            return await super().purchase_electricity(**kw)
+
+    svc = _bill_service(db_session, fake=ConcurrentWebhookFake())
+
+    result = await svc.purchase_electricity(
+        user_id=user.id,
+        service_id="ikeja-electric",
+        meter_number="1234567890123",
+        meter_type="prepaid",
+        phone="08012345678",
+        amount_ngn=Decimal("2000.00"),
+    )
+
+    # Refresh from DB so we read the merged state, not any stale copy.
+    db_session.refresh(result.tx)
+    meta = result.tx.meta
+
+    # The webhook's concurrent write must survive the post-processor's
+    # merge — this is the regression the B22 fix addresses.
+    assert meta.get("webhook_id") == "wh_concurrent_abc", (
+        "post-processor clobbered concurrent webhook write — B22 regression"
+    )
+
+    # The post-processor's token + units also landed.
+    assert "token" in meta
+    assert "units" in meta
+    assert len(meta["token"]) == 20
+
+    # Original request-shape meta keys preserved.
+    assert meta["service_id"] == "ikeja-electric"
+    assert meta["meter_number"] == "1234567890123"

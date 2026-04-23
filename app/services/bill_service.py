@@ -33,7 +33,9 @@ from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.logger import log
 from app.db.models._enums import TransactionStatus, TransactionType
@@ -272,20 +274,37 @@ class BillService:
         )
 
         # Post-processor: if the provider delivered (full or partial) and
-        # returned a token or units, persist them on tx.meta. Separate
-        # commit — _execute_bill's internal commits have already closed
-        # the state-transition unit of work.
+        # returned a token or units, persist them on tx.meta. Sprint 4
+        # B22 review: the previous pattern read `result.tx.meta`, merged
+        # in-memory, and committed — a second unlocked commit that could
+        # clobber any concurrent writer (e.g. a webhook callback adding
+        # `vtpass_transaction_id` while _execute_bill was in-flight).
+        # Fix: re-fetch the row under `SELECT ... FOR UPDATE`, merge on
+        # top of the CURRENT DB state, and commit atomically. This is
+        # the same pattern `apply_provider_result` uses for webhook
+        # updates, so both writers now serialize on the same row lock.
         if result.response.status == BillDeliveryStatus.delivered:
             raw = result.response.raw or {}
             token = raw.get("token")
             units = raw.get("units")
-            if token or units:
-                result.tx.meta = {
-                    **(result.tx.meta or {}),
-                    **({"token": str(token)} if token else {}),
-                    **({"units": str(units)} if units else {}),
-                }
+            patch: dict[str, str] = {}
+            if token:
+                patch["token"] = str(token)
+            if units:
+                patch["units"] = str(units)
+            if patch:
+                locked_tx = self._db.execute(
+                    select(Transaction)
+                    .where(Transaction.id == result.tx.id)
+                    .with_for_update()
+                ).scalar_one()
+                locked_tx.meta = {**(locked_tx.meta or {}), **patch}
+                flag_modified(locked_tx, "meta")
                 self._db.commit()
+                # Refresh the in-memory tx on the BillResult so the
+                # endpoint (and _notify_bill_success downstream) sees
+                # the merged meta, not the stale pre-patch copy.
+                self._db.refresh(result.tx)
         return result
 
     # ── Electricity: meter validation (no tx row, no wallet debit) ──────
