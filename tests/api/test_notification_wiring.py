@@ -464,3 +464,110 @@ async def test_cable_change_mode_dispatches_cable_activated(
     body = cable_emails[0].code_or_body
     assert "Premium" in body
     assert "1234567890" in body
+
+
+# ── Sprint 4 · B23: electricity delivered without token — fallback ──────
+
+
+@pytest.mark.asyncio
+async def test_electricity_delivered_without_token_falls_back_to_bill_success(
+    client, db_session, monkeypatch,
+):
+    """Sprint 4 B23 regression: a delivered electricity tx whose
+    ``result.raw`` lacks a ``token`` (malformed VTPass response) must
+    fall through to the generic ``bill_success`` event rather than
+    dispatching the electricity-specific event with an empty token.
+
+    The B18 path has an explicit `if token:` guard in
+    ``_notify_bill_success`` — without this test, a regression that
+    accidentally dispatches ``electricity_token_delivered`` with a blank
+    token (producing a broken email body reading "Your token is .") would
+    slip through. We also assert branch exclusivity: exactly one event
+    fires, never two.
+
+    We simulate the malformed upstream by monkeypatching the fake
+    VTPass client's ``purchase_electricity`` to strip ``token`` and
+    ``units`` from the raw payload while keeping delivered status.
+    """
+    _, headers = await _seed_logged_in_user(client)
+    _fund_wallet_directly(db_session, amount=Decimal("5000.00"))
+    pin = await _pin_token(client, headers)
+
+    fake = _vtpass_factory.get_fake_singleton()
+    original_purchase = fake.purchase_electricity
+
+    async def _strip_token(**kw):
+        response = await original_purchase(**kw)
+        # Drop token + units from raw to simulate a malformed delivered
+        # response — status remains delivered, only the token is absent.
+        stripped_raw = {
+            k: v for k, v in (response.raw or {}).items()
+            if k not in ("token", "units")
+        }
+        return response.model_copy(update={"raw": stripped_raw})
+
+    monkeypatch.setattr(fake, "purchase_electricity", _strip_token)
+
+    push = _fake_push_singleton
+    notif_email = _fake_email_singleton
+    emails_before = len(notif_email.sent)
+    pushes_before = len(push.sent)
+
+    r = await client.post(
+        "/api/v1/bills/electricity",
+        json={
+            "service_id":   "ikeja-electric",
+            "meter_number": "1234567890123",
+            "meter_type":   "prepaid",
+            "phone":        "08012345678",
+            "amount":       "2000.00",
+        },
+        headers={**headers, "X-Pin-Token": pin, "Idempotency-Key": str(uuid4())},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["status"] == "success"
+
+    new_pushes = push.sent[pushes_before:]
+    # The electricity-specific event MUST NOT fire — the token guard
+    # in _notify_bill_success should have dropped through to the
+    # generic path.
+    electricity_pushes = [
+        p for p in new_pushes
+        if p.data.get("event") == "electricity_token_delivered"
+    ]
+    assert electricity_pushes == [], (
+        "electricity_token_delivered dispatched despite missing token — "
+        "B23 regression"
+    )
+
+    # Exactly one generic bill_success push — no double-dispatch.
+    bill_success_pushes = [
+        p for p in new_pushes if p.data.get("event") == "bill_success"
+    ]
+    assert len(bill_success_pushes) == 1, (
+        f"expected exactly one bill_success push, got {len(bill_success_pushes)}: "
+        f"{[p.data.get('event') for p in new_pushes]}"
+    )
+
+    # Email path follows the same fallback — no electricity-token-
+    # specific email (subject starts with "Electricity token —" from
+    # _email_subject), but the generic bill_success email (subject
+    # pattern: "Your ₦X electricity token is on its way") is allowed.
+    # Distinguish by prefix, not the substring "electricity token".
+    new_emails = notif_email.sent[emails_before:]
+    electricity_specific_emails = [
+        e for e in new_emails if e.subject.startswith("Electricity token")
+    ]
+    assert electricity_specific_emails == [], (
+        "electricity_token_delivered email dispatched despite missing token"
+    )
+    # Exactly one generic bill-success email did fire — the fallback
+    # path landed on the generic template.
+    generic_bill_emails = [
+        e for e in new_emails
+        if e.subject.startswith("Your ₦") and "on its way" in e.subject
+    ]
+    assert len(generic_bill_emails) == 1, (
+        f"expected exactly one generic bill_success email, got "
+        f"{[e.subject for e in new_emails]}"
+    )
