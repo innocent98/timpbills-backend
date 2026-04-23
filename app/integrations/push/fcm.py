@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import json
+import threading
 from datetime import timezone
 from typing import Any
 
@@ -137,7 +138,18 @@ class FCMPushClient:
         # class can be constructed outside any running event loop (e.g.
         # at module import / factory wiring time), and asyncio.Lock()
         # binds to the running loop at construction time.
+        #
+        # `_lock_creation_lock` guards the lazy creation itself — a pure
+        # `if None: assign` idiom is not safe across threads (Celery
+        # worker pool + FastAPI handler could both init the same client
+        # simultaneously, and bytecode-level interleaving can let both
+        # threads observe None and each create their own asyncio.Lock —
+        # one would become orphaned and callers would no longer serialize
+        # on the same primitive). `threading.Lock` serializes the
+        # one-shot construction; the hot path then just reads the
+        # resulting `asyncio.Lock` object without reacquiring.
         self._refresh_lock: asyncio.Lock | None = None
+        self._lock_creation_lock = threading.Lock()
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -193,8 +205,12 @@ class FCMPushClient:
         """
         # Lazy-init the lock on first call — cannot construct in __init__
         # because the class may be built outside any running event loop.
+        # Double-check locking: read once, acquire threading lock only on
+        # the cold path, then re-check under the lock before assigning.
         if self._refresh_lock is None:
-            self._refresh_lock = asyncio.Lock()
+            with self._lock_creation_lock:
+                if self._refresh_lock is None:
+                    self._refresh_lock = asyncio.Lock()
 
         # Fast-path: cached creds still valid — skip the lock entirely.
         # Concurrent callers all read cached state; no race because

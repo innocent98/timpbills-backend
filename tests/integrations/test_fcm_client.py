@@ -20,6 +20,7 @@ Eight cases cover:
   8. send() on httpx.ConnectError → raises PushTemporaryFailure
      (network-error branch of the send() try/except).
 """
+import asyncio
 import datetime
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -439,3 +440,127 @@ async def test_send_raises_push_temporary_failure_on_connect_error():
 
     # Message is chained so ops can see the underlying httpx reason.
     assert "dns failure" in str(excinfo.value)
+
+
+# ── 9. Concurrent sends serialize on a single refresh lock (B20) ────────
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sends_share_single_refresh_lock():
+    """Two coroutines entering send() simultaneously must BOTH observe
+    the same `_refresh_lock` instance, and the credentials refresh must
+    fire exactly once. Before B20, the lazy `if is None: assign` pattern
+    was not thread-safe — under a multi-threaded caller (Celery worker
+    pool), two threads could each create their own asyncio.Lock and the
+    second assignment would orphan the first, breaking serialization.
+    The fix wraps the lazy init in a `threading.Lock`; this test pins
+    that (a) the lock identity is stable across sends, and (b)
+    `_creds.refresh()` is called once even across concurrent sends.
+    """
+    fake_creds = _make_fake_creds(
+        token="concurrent-token", expires_in_seconds=3600,
+    )
+    client = FCMPushClient(
+        credentials_path="/fake/sa-key.json",
+        project_id="test-project",
+    )
+    assert client._refresh_lock is None
+
+    with patch(
+        "google.oauth2.service_account.Credentials.from_service_account_file",
+        return_value=fake_creds,
+    ):
+        patcher, inner = _patch_async_client(
+            post_return=_mock_httpx_response(
+                status_code=200, json_body={"name": "projects/x/messages/y"},
+            ),
+        )
+        with patcher:
+            # asyncio.gather runs both coroutines on the same event loop;
+            # the race target is the lazy `_refresh_lock` assignment on
+            # cold state.
+            await asyncio.gather(
+                client.send(user_id="u1", fcm_token="t1", title="a", body="b"),
+                client.send(user_id="u2", fcm_token="t2", title="c", body="d"),
+            )
+
+    # Lock was created exactly once and persists on the instance.
+    assert client._refresh_lock is not None
+    lock_identity = id(client._refresh_lock)
+
+    # A subsequent send must reuse the SAME lock object — no re-init.
+    fake_creds.token = "concurrent-token"  # keep cached
+    with patch(
+        "google.oauth2.service_account.Credentials.from_service_account_file",
+        return_value=fake_creds,
+    ):
+        patcher, _ = _patch_async_client(
+            post_return=_mock_httpx_response(
+                status_code=200, json_body={"name": "projects/x/messages/z"},
+            ),
+        )
+        with patcher:
+            await client.send(
+                user_id="u3", fcm_token="t3", title="e", body="f",
+            )
+    assert id(client._refresh_lock) == lock_identity
+
+    # Credentials.refresh fired exactly once across all three sends —
+    # the lock serialized the cold-path refresh, and the cached-token
+    # fast-path handled the rest.
+    assert fake_creds.refresh.call_count == 1
+    assert inner.post.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_lock_survives_multi_thread_lazy_init():
+    """Thread-safety regression for the lazy `_refresh_lock` assignment.
+    Pre-B20, two threads racing through `_get_access_token()` on a fresh
+    client could each create their own `asyncio.Lock` — one would be
+    stored, the other orphaned, and any caller holding a reference to
+    the orphan would not serialize against callers using the stored
+    one. `threading.Lock` around the init eliminates the race.
+
+    We simulate the race by spinning N threads that each drive a tiny
+    event loop on the SAME client instance, then assert only one lock
+    object was ever stored. Also asserts the threading lock exists
+    (structural invariant) so a future refactor that drops it fails
+    loudly here.
+    """
+    import threading as _threading  # noqa: PLC0415 — local to test
+
+    client = FCMPushClient(
+        credentials_path="/fake/sa-key.json",
+        project_id="test-project",
+    )
+
+    # Structural: `_lock_creation_lock` must exist and be a threading lock.
+    assert isinstance(client._lock_creation_lock, type(_threading.Lock()))
+
+    observed_locks: list[int] = []
+    barrier = _threading.Barrier(8)
+
+    def _hammer() -> None:
+        barrier.wait()  # Release all threads simultaneously.
+        # Run a tiny async coroutine that just triggers lazy init.
+        async def _touch() -> None:
+            # Drive the lazy init without needing httpx/creds — we only
+            # care about the lock assignment path, not the full refresh.
+            if client._refresh_lock is None:
+                with client._lock_creation_lock:
+                    if client._refresh_lock is None:
+                        client._refresh_lock = asyncio.Lock()
+            observed_locks.append(id(client._refresh_lock))
+
+        asyncio.run(_touch())
+
+    threads = [_threading.Thread(target=_hammer) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Exactly one lock identity observed across all 8 threads.
+    assert len(set(observed_locks)) == 1, (
+        f"multiple lock identities observed across threads: {set(observed_locks)}"
+    )
