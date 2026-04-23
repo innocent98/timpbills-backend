@@ -293,10 +293,34 @@ class BillService:
             if units:
                 patch["units"] = str(units)
             if patch:
+                # Sprint 4 B29 (B-I2 follow-up): `SELECT ... FOR UPDATE`
+                # locks the DB row, but SQLAlchemy's identity map will
+                # return the cached instance with STALE attributes if
+                # the tx is already tracked in the session (always is —
+                # _execute_bill just created it). A concurrent writer's
+                # commit would be silently clobbered by our merge of
+                # cached_meta + patch.
+                #
+                # Fix: `Session.expire(result.tx)` marks all attributes
+                # as stale so the next access (or explicit refresh)
+                # re-reads from the DB. Combined with
+                # `populate_existing=True` on the SELECT, the row lock
+                # acquires AND returns the fresh DB state — any
+                # concurrent webhook write that committed before we
+                # acquired the lock is visible to our merge.
+                #
+                # This bug was latent in the original B22 fix; the B29-
+                # strengthened regression test (separate Session
+                # simulating a real Celery / webhook handler) revealed
+                # it. A Postgres deploy with SERIALIZABLE would not
+                # have saved us — the issue is ORM-level cache, not DB
+                # isolation.
+                self._db.expire(result.tx)
                 locked_tx = self._db.execute(
                     select(Transaction)
                     .where(Transaction.id == result.tx.id)
                     .with_for_update()
+                    .execution_options(populate_existing=True)
                 ).scalar_one()
                 locked_tx.meta = {**(locked_tx.meta or {}), **patch}
                 flag_modified(locked_tx, "meta")
@@ -662,12 +686,24 @@ class BillService:
         #    with them and either double-refund or raise InvalidStateTransition.
         #    Guard: if the tx is already terminal, the concurrent finalizer
         #    owns the outcome; we return their state. This is S3C-P2.
-        locked_tx = (
-            self._db.query(Transaction)
-            .filter(Transaction.id == tx.id)
+        #
+        #    Sprint 4 B29 (B-I2 follow-up): `expire` + `populate_existing`
+        #    force SQLAlchemy to read fresh DB state into the identity map
+        #    rather than returning the cached instance. Without this, a
+        #    webhook handler running on a separate Session can commit
+        #    meta updates (e.g. `vtpass_transaction_id`) between
+        #    _execute_bill's initial insert and this re-fetch, and
+        #    `apply_provider_result`'s subsequent `tx.meta = {...}`
+        #    merge would clobber them using the cached tx.meta. The row
+        #    lock alone isn't enough — the ORM cache bypasses the lock
+        #    at the attribute level.
+        self._db.expire(tx)
+        locked_tx = self._db.execute(
+            select(Transaction)
+            .where(Transaction.id == tx.id)
             .with_for_update()
-            .one()
-        )
+            .execution_options(populate_existing=True)
+        ).scalar_one()
         if locked_tx.status in _TX_FINAL_STATES:
             log.info(
                 "bill sync: tx %s finalized concurrently (status=%s); "

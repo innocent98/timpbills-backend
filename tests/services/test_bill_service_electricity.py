@@ -588,41 +588,57 @@ async def test_purchase_electricity_post_processor_does_not_clobber_concurrent_m
 
     The fix re-fetches the row under ``SELECT ... FOR UPDATE`` and merges
     on top of the *current* DB state, so any concurrent write that
-    landed first is preserved. This test simulates that race by having
-    the fake provider write ``webhook_id`` directly into ``tx.meta`` via
-    a parallel UPDATE (bypasses the session identity map, emulating a
-    foreign connection / Celery worker). After ``purchase_electricity``
-    returns, all three keys — the original request-shape meta keys,
-    the concurrent ``webhook_id``, AND the post-processor's
-    ``token``/``units`` — must co-exist.
+    landed first is preserved.
+
+    Sprint 4 B29 (B-I2 follow-up) strengthens the test: the simulated
+    concurrent writer now opens a FRESH Session bound to the same engine
+    (separate ORM identity map, distinct unit of work) rather than
+    piggy-backing on db_session. This more faithfully emulates the real
+    race — a Celery worker, webhook handler, or background task using
+    its own SessionLocal would see its INSERT/UPDATE on a different
+    identity map, and the BillService's re-fetch must observe the
+    committed result through the engine, not through its own session
+    cache. SQLite StaticPool makes all sessions share one physical
+    connection, so commits from the webhook session are visible to the
+    service session after the commit — the right shape for the test.
     """
     from sqlalchemy import text
+    from sqlalchemy.orm import sessionmaker
 
     user = _seed_user(db_session)
 
-    # SQLite (test-env) doesn't honor SELECT ... FOR UPDATE as a real
-    # lock, but the invariant under test — re-read before merge — works
-    # on both dialects. We use the session's own connection for the
-    # external UPDATE so commit sequencing aligns.
+    # Build a sessionmaker bound to the SAME engine as db_session so the
+    # webhook writer shares the SQLite in-memory DB but has its own ORM
+    # identity map — the key distinction this B29 strengthening adds
+    # over the original B22 test.
+    WebhookSessionLocal = sessionmaker(
+        bind=db_session.bind, autoflush=False, autocommit=False, future=True,
+    )
+
     class ConcurrentWebhookFake(FakeVTPassClient):
         async def purchase_electricity(self, **kw):  # type: ignore[override]
-            # Let _execute_bill create/commit the processing tx row
-            # first, then simulate a webhook arriving on a different
-            # connection and writing `webhook_id` into the row's meta.
-            # We do this via raw SQL so we bypass the session's identity
-            # map — same as a Celery worker using its own Session would.
+            # Open a fresh session for the webhook write. This is
+            # structurally what a real Celery worker / async webhook
+            # handler would do — it doesn't share the request's ORM
+            # context. Commit + close, then let the main BillService
+            # continue; its `SELECT ... FOR UPDATE` re-fetch must pick
+            # up our committed webhook_id.
             req_id = kw["request_id"]
-            db_session.execute(
-                text(
-                    "UPDATE transactions "
-                    "SET meta = json_patch(meta, :patch) "
-                    "WHERE reference = :ref"
-                ).bindparams(
-                    patch='{"webhook_id": "wh_concurrent_abc"}',
-                    ref=req_id,
-                ),
-            )
-            db_session.commit()
+            webhook_session = WebhookSessionLocal()
+            try:
+                webhook_session.execute(
+                    text(
+                        "UPDATE transactions "
+                        "SET meta = json_patch(meta, :patch) "
+                        "WHERE reference = :ref"
+                    ).bindparams(
+                        patch='{"webhook_id": "wh_concurrent_abc"}',
+                        ref=req_id,
+                    ),
+                )
+                webhook_session.commit()
+            finally:
+                webhook_session.close()
             return await super().purchase_electricity(**kw)
 
     svc = _bill_service(db_session, fake=ConcurrentWebhookFake())
