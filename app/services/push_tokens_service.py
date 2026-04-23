@@ -11,6 +11,7 @@ stale owner.
 from datetime import datetime, timezone
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models.push_token import PushToken
@@ -37,8 +38,19 @@ class PushTokensService:
           (One device = one active user. Logout + new login transfers
           ownership.)
         - No row: insert a new one.
+
+        Sprint 4 B24: the previous SELECT-then-INSERT sequence had a
+        TOCTOU race — two concurrent registrations of the same
+        ``fcm_token`` (rare but possible: same device, rapid login
+        toggles) could both observe no row and both attempt INSERT; the
+        second would hit the ``fcm_token`` unique constraint and surface
+        as a 500. Fix: on IntegrityError, rollback and fall through to
+        the UPDATE path. Portable across Postgres (prod) and SQLite
+        (tests) without depending on dialect-specific ``ON CONFLICT``.
         """
         now = datetime.now(timezone.utc)
+
+        # Fast path: row already exists — reassign / touch last_seen_at.
         existing = (
             self._db.query(PushToken)
             .filter(PushToken.fcm_token == fcm_token)
@@ -52,6 +64,10 @@ class PushTokensService:
             self._db.refresh(existing)
             return existing
 
+        # Cold path: attempt INSERT. A concurrent registration of the
+        # same token would have won the unique-constraint race — catch
+        # IntegrityError, rollback, and transition to the UPDATE path
+        # on the now-existing row.
         row = PushToken(
             user_id=user_id,
             fcm_token=fcm_token,
@@ -59,9 +75,27 @@ class PushTokensService:
             last_seen_at=now,
         )
         self._db.add(row)
+        try:
+            self._db.commit()
+            self._db.refresh(row)
+            return row
+        except IntegrityError:
+            self._db.rollback()
+
+        # UPDATE path after losing the INSERT race. The row MUST exist
+        # now (we just lost a unique-constraint on its fcm_token); if
+        # it doesn't, something is deeply wrong — let .one() raise.
+        winner = (
+            self._db.query(PushToken)
+            .filter(PushToken.fcm_token == fcm_token)
+            .one()
+        )
+        winner.user_id = user_id
+        winner.platform = platform
+        winner.last_seen_at = now
         self._db.commit()
-        self._db.refresh(row)
-        return row
+        self._db.refresh(winner)
+        return winner
 
     def delete_for_user(self, *, user_id: UUID, token_id: UUID) -> bool:
         """Delete a token the user owns. False if missing or not theirs."""

@@ -149,3 +149,88 @@ def test_delete_by_fcm_token_removes_regardless_of_user(db_session):
 
     # Missing token: False, no crash.
     assert svc.delete_by_fcm_token(fcm_token="fcm-never-existed") is False
+
+
+# ── B24 regression: concurrent-INSERT race falls through to UPDATE ──────
+
+
+def test_upsert_survives_concurrent_insert_race(db_session, monkeypatch):
+    """Sprint 4 B24 review: the original SELECT-then-INSERT sequence
+    could surface ``IntegrityError`` to the caller when two concurrent
+    upserts for the same ``fcm_token`` both observed no row during
+    their SELECT windows — one INSERT would win, the other would hit
+    the ``fcm_token`` unique constraint and bubble up as a 500.
+
+    We simulate the race by having an existing row in the DB (the
+    "winner" of the race), then monkeypatching the first SELECT to
+    return ``None`` (the "loser" never saw the winner). The service
+    must:
+      - Attempt INSERT (since SELECT returned None).
+      - Catch IntegrityError on commit, rollback.
+      - Re-query (this second SELECT is NOT patched — returns the
+        real row), transition to UPDATE path, reassign to our user.
+      - Return the reassigned row without raising.
+    """
+    # Pre-insert a row owned by user_a — this is the "race winner"
+    # that exists in the DB but our SELECT will pretend not to see.
+    user_a = uuid4()
+    user_b = uuid4()
+    winner = PushToken(
+        user_id=user_a,
+        fcm_token="race-token",
+        platform="android",
+        last_seen_at=datetime.now(timezone.utc),
+    )
+    db_session.add(winner)
+    db_session.commit()
+    winner_id = winner.id
+
+    svc = PushTokensService(db=db_session)
+
+    # Monkeypatch the FIRST `one_or_none()` on the query chain to
+    # return None — simulating the TOCTOU race window. Subsequent
+    # queries (the post-rollback refetch) run normally.
+    original_query = db_session.query
+    call_count = {"n": 0}
+
+    def _race_query(*args, **kwargs):
+        q = original_query(*args, **kwargs)
+        if call_count["n"] == 0:
+            call_count["n"] += 1
+            original_filter = q.filter
+
+            def _filter_one_or_none_first(*fargs, **fkwargs):
+                filtered = original_filter(*fargs, **fkwargs)
+                # Only the very first SELECT returns a spoofed None.
+                original_one = filtered.one_or_none
+
+                def _spoof_none():
+                    # Restore real behavior for subsequent calls.
+                    filtered.one_or_none = original_one
+                    return None
+
+                filtered.one_or_none = _spoof_none
+                return filtered
+
+            q.filter = _filter_one_or_none_first
+        return q
+
+    monkeypatch.setattr(db_session, "query", _race_query)
+
+    # Drive the upsert. INSERT will fail (unique constraint), the
+    # service must recover via the UPDATE path and return the winner's
+    # row reassigned to user_b.
+    result = svc.upsert_for_user(
+        user_id=user_b,
+        fcm_token="race-token",
+        platform="ios",
+    )
+
+    # Reassigned to our user; same row as the pre-existing winner.
+    assert result.id == winner_id
+    assert result.user_id == user_b
+    assert result.platform == "ios"
+
+    # Still exactly one row — no orphaned duplicate from the failed
+    # INSERT attempt.
+    assert db_session.query(PushToken).count() == 1
