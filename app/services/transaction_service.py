@@ -138,8 +138,12 @@ class TransactionService:
             if c.meta and c.meta.get('original_reference') == original_tx.reference:
                 return c, False
 
+        # Refund refs stay alphanumeric-only after the 12-digit stamp so
+        # any downstream code paths that might hand this reference to
+        # VTPass (e.g. ops-initiated requery) stay compliant. See
+        # app/utils/references.py for the full format spec.
         refund_ref = new_transaction_reference(
-            user_id=str(original_tx.user_id), prefix='TMP-R'
+            user_id=str(original_tx.user_id), prefix='TMPR'
         )
         refund = Transaction(
             user_id=original_tx.user_id,

@@ -143,3 +143,38 @@ class CablePlanList(BaseModel):
 
     service_id: str                        # "dstv"
     variations: list[CablePlanVariation]
+
+
+# ── Sprint 5 audit: dynamic service catalog ─────────────────────────────
+
+class ServiceCatalogEntry(BaseModel):
+    """One row in the VTPass `/api/services?identifier=X` response.
+
+    Used to enumerate networks / cable providers / DisCos / etc. without
+    hardcoding the lists in our codebase. VTPass owns the canonical
+    serviceID strings (we previously had `phed` and `yedc` but the live
+    API uses `portharcourt-electric` and `yola-electric`); fetching at
+    runtime keeps us drift-proof.
+
+    VTPass field names retained verbatim because they ship typos
+    (`minimium_amount`, `convinience_fee`); we expose them under cleaner
+    Python names but model the JSON aliases so deserialization works.
+    """
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    service_id: str = Field(alias="serviceID")
+    name: str
+    minimum_amount: Decimal = Field(alias="minimium_amount")
+    maximum_amount: Decimal = Field(alias="maximum_amount")
+    convenience_fee: str = Field(alias="convinience_fee")
+    product_type: str           # "flexible" (price-by-amount) | "fix" (price-by-variation)
+    image: str                  # absolute URL to the provider logo
+
+
+class ServiceCatalog(BaseModel):
+    """Complete service catalog for a given identifier (electricity-bill,
+    airtime, data, tv-subscription)."""
+    model_config = ConfigDict(frozen=True)
+
+    identifier: str             # the category key we queried with
+    services: list[ServiceCatalogEntry]

@@ -37,13 +37,38 @@ from app.integrations.vtpass.schemas import (
     DataPlanList,
     DataPlanVariation,
     MeterValidation,
+    ServiceCatalog,
+    ServiceCatalogEntry,
     SmartcardValidation,
 )
 
 
-# VTPass `code` values we treat as success. Per VTPass docs, "000" is the
-# only universal success code; "099" means accepted-but-pending (upstream
-# telco hasn't confirmed yet). Everything else is a failure.
+# VTPass response code buckets. Source:
+# https://vtpass.com/documentation/response-codes/
+#
+# `_SUCCESS_CODES`  — terminal-success codes:
+#   * 000 → "TRANSACTION PROCESSED" (then check nested `content.transactions.status`)
+#   * 044 → "TRANSACTION RESOLVED" — only seen on requery responses
+#
+# `_PENDING_CODES`  — non-terminal: leave tx in processing, reconcile worker
+#   will requery.
+#   * 099 → "TRANSACTION IS PROCESSING"
+#   * 001 → "TRANSACTION QUERY" (in-flight requery state)
+#   * 089 → "REQUEST IS PROCESSING, PLEASE WAIT"
+#
+# `_REVERSAL_CODE` — VTPass already credited our merchant wallet back; we
+# treat it as a failed delivery so BillService refunds the user. Logged
+# distinctly so ops can tell "we failed at delivery" from "VTPass reversed
+# upstream."
+#
+# Everything else is bucketed as failed (with the raw code surfaced in the
+# log + tx.meta).
+_SUCCESS_CODES = {"000", "044"}
+_PENDING_CODES = {"099", "001", "089"}
+_REVERSAL_CODE = "040"
+
+# Back-compat aliases for tests / external readers that pre-date the
+# multi-code refactor. Kept since they still describe the dominant case.
 _SUCCESS_CODE = "000"
 _PENDING_CODE = "099"
 
@@ -67,7 +92,7 @@ def translate_response(
     tx = (content.get("transactions") or {}) if isinstance(content, dict) else {}
     tx_id = str(tx.get("transactionId") or tx.get("transaction_id") or "")
 
-    if code == _SUCCESS_CODE:
+    if code in _SUCCESS_CODES:
         delivered_amt = _safe_decimal(
             tx.get("amount")
             or body.get("amount")
@@ -81,7 +106,7 @@ def translate_response(
             description=description,
             raw=body,
         )
-    if code == _PENDING_CODE:
+    if code in _PENDING_CODES:
         return BillPurchaseResponse(
             request_id=request_id, transaction_id=tx_id,
             status=BillDeliveryStatus.pending, code=code,
@@ -90,11 +115,19 @@ def translate_response(
             description=description or "Pending upstream confirmation",
             raw=body,
         )
-    # Anything else is a failure. Log the code for ops triage.
-    log.warning(
-        "vtpass: purchase failed request_id=%s code=%s description=%s",
-        request_id, code, description,
-    )
+    # Reversal: VTPass already credited our merchant wallet — we still
+    # bucket this as `failed` (so BillService refunds the user wallet),
+    # but the log says REVERSAL not GENERIC FAIL so ops can triage.
+    if code == _REVERSAL_CODE:
+        log.warning(
+            "vtpass: REVERSAL (upstream bounced) request_id=%s description=%s",
+            request_id, description,
+        )
+    else:
+        log.warning(
+            "vtpass: purchase failed request_id=%s code=%s description=%s",
+            request_id, code, description,
+        )
     return BillPurchaseResponse(
         request_id=request_id, transaction_id=tx_id,
         status=BillDeliveryStatus.failed, code=code,
@@ -338,23 +371,50 @@ class VTPassClient(BillProvider):
         smartcard_number: str,
         variation_code: str,
         amount_ngn: Decimal,
+        subscription_type: str,
+        phone: str,
+        quantity: int = 1,
     ) -> BillPurchaseResponse:
-        """Renew or switch a cable subscription. Caller controls the
-        renew-vs-switch mode by choosing `service_id`: pass the bare
-        provider slug (`dstv`) to renew the current bouquet, or the
-        `-change` variant (`dstv-change`) to switch to `variation_code`.
-        That decision lives in BillService (B8) — the client just
-        forwards whatever service_id it's given."""
+        """Renew or switch a cable subscription. The renew-vs-switch
+        decision lives on the wire as ``subscription_type`` (per
+        https://vtpass.com/documentation/dstv-subscription-api/) — the
+        ``serviceID`` stays as the bare provider slug. A previous draft
+        used a ``-change`` suffix on serviceID instead of
+        subscription_type; that's a non-canonical convention VTPass
+        silently mishandles, so it's been removed."""
         body = await self._post_pay({
-            "request_id":     request_id,
-            "serviceID":      service_id,
-            "billersCode":    smartcard_number,
-            "variation_code": variation_code,
-            "amount":         str(int(amount_ngn)),
+            "request_id":        request_id,
+            "serviceID":         service_id,
+            "billersCode":       smartcard_number,
+            "variation_code":    variation_code,
+            "amount":            str(int(amount_ngn)),
+            "phone":             phone,
+            "subscription_type": subscription_type,
+            "quantity":          quantity,
         })
         return translate_response(
             body, request_id=request_id, requested=amount_ngn
         )
+
+    async def list_services(self, *, identifier: str) -> ServiceCatalog:
+        """Fetch the canonical service catalog for a category. VTPass
+        owns the source-of-truth list; we proxy + cache it on top so
+        we don't end up with drift like our prior `phed` / `yedc`
+        hardcoded slugs (live API uses `portharcourt-electric` /
+        `yola-electric`).
+
+        `identifier` values per VTPass docs:
+          * `airtime`           → MTN/Airtel/Glo/9mobile + foreign-airtime
+          * `data`              → MTN/Airtel/Glo/9mobile data + Smile/Spectranet
+          * `tv-subscription`   → DSTV/GOtv/Startimes (+ ShowMax)
+          * `electricity-bill`  → all 12 NG DisCos
+        """
+        body = await self._get("/api/services", {"identifier": identifier})
+        content = body.get("content") or []
+        services = [
+            ServiceCatalogEntry.model_validate(row) for row in content
+        ]
+        return ServiceCatalog(identifier=identifier, services=services)
 
     async def requery(self, *, request_id: str) -> BillPurchaseResponse:
         body = await self._post(

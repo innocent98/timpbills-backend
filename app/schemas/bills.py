@@ -112,8 +112,11 @@ class ElectricityPurchaseResponse(BaseModel):
 
 
 class CableProviderView(BaseModel):
-    id: str                                  # "dstv"
-    name: str                                # "DStv"
+    id: str                                  # "dstv" — VTPass serviceID
+    name: str                                # "DSTV Subscription"
+    image: str | None = None                 # absolute logo URL from VTPass
+    minimum_amount: Decimal | None = None    # from VTPass catalog
+    maximum_amount: Decimal | None = None
 
 
 class CableProviderListResponse(BaseModel):
@@ -172,10 +175,33 @@ class CablePurchaseResponse(BaseModel):
 
 
 class NetworkView(BaseModel):
-    id: str                          # "mtn"
-    name: str                        # "MTN"
-    prefixes: list[str]              # ["0803", "0806", ...]
+    id: str                          # "mtn" — VTPass serviceID
+    name: str                        # display name from VTPass catalog
+    prefixes: list[str]              # ["0803", "0806", ...] — UX-side autodetect
+    image: str | None = None         # absolute logo URL from VTPass
+    minimum_amount: Decimal | None = None  # from VTPass catalog
+    maximum_amount: Decimal | None = None
 
 
 class NetworkListResponse(BaseModel):
     networks: list[NetworkView]
+
+
+# ── Electricity DisCo catalog (Sprint 5 audit) ─────────────────────────
+# Replaces the hardcoded mobile + backend DisCo lists with a live
+# pass-through of VTPass's /api/services?identifier=electricity-bill.
+# Our prior static lists had drifted slugs (`phed` → live is
+# `portharcourt-electric`; `yedc` → `yola-electric`) that caused
+# "product does not exist" failures at purchase time.
+
+
+class DiscoView(BaseModel):
+    id: str                          # VTPass serviceID, e.g. "ikeja-electric"
+    name: str                        # "Ikeja Electric Payment - IKEDC"
+    image: str | None = None         # absolute logo URL
+    minimum_amount: Decimal | None = None
+    maximum_amount: Decimal | None = None
+
+
+class DiscoListResponse(BaseModel):
+    discos: list[DiscoView]

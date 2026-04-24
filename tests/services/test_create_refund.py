@@ -57,7 +57,10 @@ def test_create_refund_creates_new_transaction_linked_to_original(db_session):
     assert refund.status == TransactionStatus.success
     assert refund.amount == Decimal('1000.00')
     assert refund.user_id == user.id
-    assert refund.reference.startswith('TMP-R-')
+    # Refund marker "TMPR" appears after the 12-digit YYYYMMDDHHMI stamp
+    # so the reference stays VTPass-compliant if it ever ends up in a
+    # requery call. See app/utils/references.py.
+    assert refund.reference[12:].startswith('TMPR')
     assert refund.meta['original_reference'] == original.reference
     assert refund.meta['original_type'] == TransactionType.airtime.value
 

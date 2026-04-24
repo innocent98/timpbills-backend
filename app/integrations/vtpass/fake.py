@@ -27,6 +27,8 @@ from app.integrations.vtpass.schemas import (
     DataPlanList,
     DataPlanVariation,
     MeterValidation,
+    ServiceCatalog,
+    ServiceCatalogEntry,
     SmartcardValidation,
 )
 
@@ -249,15 +251,15 @@ class FakeVTPassClient(BillProvider):
         smartcard_number: str,
         variation_code: str,
         amount_ngn: Decimal,
+        subscription_type: str,
+        phone: str,
+        quantity: int = 1,
     ) -> BillPurchaseResponse:
         # Same safety pattern as purchase_data: look up the variation in
         # the seeded catalog so a client-spoofed code can't succeed.
-        # BillService sends ``{slug}-change`` on plan-change purchases;
-        # strip the suffix because our catalog is seeded under the base
-        # slugs. Mirrors VTPass's own routing where "dstv-change" and
-        # "dstv" share the same bouquet list.
-        lookup_id = service_id[:-7] if service_id.endswith("-change") else service_id
-        plans = await self.list_cable_plans(service_id=lookup_id)
+        # subscription_type controls renew-vs-change at the wire level;
+        # the catalog is keyed on the bare service_id regardless.
+        plans = await self.list_cable_plans(service_id=service_id)
         match = next(
             (v for v in plans.variations if v.variation_code == variation_code),
             None,
@@ -268,6 +270,19 @@ class FakeVTPassClient(BillProvider):
         self._requested_amounts[request_id] = match.price_ngn
         self._transaction_ids[request_id] = f"vtp_{request_id[:12]}"
         return self._build_response(request_id, match.price_ngn)
+
+    # ── Service catalog ────────────────────────────────────────────────
+
+    async def list_services(self, *, identifier: str) -> ServiceCatalog:
+        """Return a deterministic catalog mirroring the live VTPass
+        sandbox response shape so tests can exercise the catalog endpoints
+        without network. Catalogs match the live identifiers we proxy
+        (airtime, data, tv-subscription, electricity-bill); other
+        identifiers return an empty list."""
+        return ServiceCatalog(
+            identifier=identifier,
+            services=_FAKE_CATALOGS.get(identifier, []),
+        )
 
     # ── Status requery ─────────────────────────────────────────────────
 
@@ -487,5 +502,48 @@ _DEFAULT_CABLE_PLANS: dict[str, list[CablePlanVariation]] = {
                            name="Pro",
                            price_ngn=Decimal("6300.00"),
                            validity="1 month"),
+    ],
+}
+
+
+# Sprint 5 audit — fake service catalogs mirroring the live VTPass
+# `/api/services?identifier=X` shapes. IDs are intentionally taken
+# verbatim from the user-shared sandbox responses so any tests that
+# go through the dynamic catalog path see realistic slugs (the live
+# response uses `portharcourt-electric` and `yola-electric`, not
+# `phed` / `yedc`).
+def _stub(sid: str, name: str, *, min_amt: str = "100", max_amt: str = "500000",
+          fee: str = "0 %", product_type: str = "flexible") -> ServiceCatalogEntry:
+    return ServiceCatalogEntry.model_validate({
+        "serviceID":        sid,
+        "name":             name,
+        "minimium_amount":  min_amt,
+        "maximum_amount":   max_amt,
+        "convinience_fee":  fee,
+        "product_type":     product_type,
+        "image":            f"https://sandbox.vtpass.com/resources/products/200X200/{sid}.jpg",
+    })
+
+
+_FAKE_CATALOGS: dict[str, list[ServiceCatalogEntry]] = {
+    "airtime": [
+        _stub("mtn",      "MTN Airtime VTU"),
+        _stub("airtel",   "Airtel Airtime VTU"),
+        _stub("glo",      "GLO Airtime VTU"),
+        _stub("etisalat", "9mobile Airtime VTU"),
+    ],
+    "data": [
+        _stub("mtn-data",      "MTN Data",      product_type="fix"),
+        _stub("airtel-data",   "Airtel Data",   product_type="fix"),
+        _stub("glo-data",      "GLO Data",      product_type="fix"),
+        _stub("etisalat-data", "9mobile Data",  product_type="fix"),
+    ],
+    "tv-subscription": [
+        _stub("dstv",      "DSTV Subscription",     product_type="fix"),
+        _stub("gotv",      "Gotv Payment",          product_type="fix"),
+        _stub("startimes", "Startimes Subscription"),
+    ],
+    "electricity-bill": [
+        _stub(sid, label) for sid, label in _DEFAULT_DISCOS.items()
     ],
 }

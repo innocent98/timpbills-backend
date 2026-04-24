@@ -94,7 +94,10 @@ async def test_fund_wallet_happy_path(client):
     )
     assert r.status_code == 200, r.text
     data = r.json()["data"]
-    assert data["reference"].startswith("TMP-")
+    # Reference format is VTPass-compliant: 12 numeric YYYYMMDDHHMI, then
+    # the "TMP" marker, then user-short + ULID. See app/utils/references.py.
+    import re
+    assert re.match(r"^\d{12}TMP[a-z0-9]{6}[0-9A-HJKMNP-TV-Z]{10,}$", data["reference"])
     assert "authorization_url" in data
     from app.api.deps import _fake_paystack_singleton as fps
     assert fps.initialized[-1][0] == data["reference"]

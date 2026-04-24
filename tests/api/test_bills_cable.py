@@ -120,15 +120,19 @@ async def _validate_smartcard(client, headers, *, service_id="dstv",
 
 
 @pytest.mark.asyncio
-async def test_cable_providers_returns_four_static_entries(client):
+async def test_cable_providers_returns_three_supported_entries(client):
+    """Sprint 5 audit: the endpoint now proxies VTPass's live catalog
+    filtered to the three providers our validate-smartcard flow
+    supports. ShowMax is surfaced by VTPass under this identifier too
+    but is streaming-only, so we exclude it to avoid confusing the
+    smartcard prompt."""
     _, headers = await _seed_logged_in_user(client)
 
     r = await client.get("/api/v1/bills/cable/providers", headers=headers)
     assert r.status_code == 200, r.text
     providers = r.json()["data"]["providers"]
     ids = [p["id"] for p in providers]
-    assert set(ids) == {"dstv", "gotv", "startimes", "showmax"}
-    # Every provider has a display name
+    assert set(ids) == {"dstv", "gotv", "startimes"}
     assert all(p["name"] for p in providers)
 
 

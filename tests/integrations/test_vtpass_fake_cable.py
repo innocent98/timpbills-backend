@@ -84,6 +84,8 @@ async def test_purchase_cable_happy_path_uses_catalog_price():
         smartcard_number="1234567890",
         variation_code=compact.variation_code,
         amount_ngn=compact.price_ngn,
+        subscription_type="renew",
+        phone="08011111111",
     )
     assert r.status == BillDeliveryStatus.delivered
     assert r.requested_amount_ngn == compact.price_ngn
@@ -102,5 +104,7 @@ async def test_purchase_cable_unknown_variation_fails():
         smartcard_number="1234567890",
         variation_code="bogus-bouquet",
         amount_ngn=Decimal("1000.00"),
+        subscription_type="change",
+        phone="08011111111",
     )
     assert r.status == BillDeliveryStatus.failed

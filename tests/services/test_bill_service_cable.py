@@ -102,10 +102,12 @@ async def test_validate_smartcard_happy_path_caches_result(db_session):
     assert result.renewal_amount_ngn == Decimal("15500.00")
     assert provider.validate_calls == 1
 
-    # Request-id prefix is TMP-SCV so log greps distinguish smartcard
-    # validation refs from meter validation (TMP-MV) and real tx refs (TMP).
+    # Prefix "TMPSCV" appears after the 12-digit YYYYMMDDHHMI stamp so
+    # log greps can distinguish smartcard validation refs from meter
+    # validation (TMPMV) and real tx refs (TMP). Hyphens dropped in
+    # refs.py to satisfy VTPass's alphanumeric-after-position-12 rule.
     assert provider.last_request_id is not None
-    assert provider.last_request_id.startswith("TMP-SCV-")
+    assert provider.last_request_id[12:].startswith("TMPSCV")
 
     # Cache was populated under the :smartcard: key (NOT :meter:).
     key = f"bill_validate:smartcard:{user_id}:dstv:1234567890"
@@ -396,17 +398,11 @@ class _CableCountingProvider:
     async def purchase_cable(self, **kw):
         self.purchase_calls += 1
         self.last_purchase_kwargs = dict(kw)
-        # Strip the "-change" suffix before forwarding so the FakeVTPassClient's
-        # seeded bouquet catalog (keyed on base slugs like "dstv") resolves
-        # the variation. The suffix is purely a wire-level serviceID; our
-        # assertions inspect ``last_purchase_kwargs`` to verify BillService
-        # forwarded the suffixed form correctly. The real VTPass sandbox
-        # accepts both "dstv" and "dstv-change" on the purchase endpoint —
-        # the fake hasn't split its catalog, so we normalize here.
-        forward = dict(kw)
-        if forward["service_id"].endswith("-change"):
-            forward["service_id"] = forward["service_id"][: -len("-change")]
-        return await self._inner.purchase_cable(**forward)
+        # No more suffix stripping — Sprint 5 audit fix uses
+        # subscription_type on the wire for renew/change, and serviceID
+        # stays as the bare slug, so the fake's catalog resolves the
+        # variation directly.
+        return await self._inner.purchase_cable(**kw)
 
     def __getattr__(self, name: str):
         return getattr(self._inner, name)
@@ -495,12 +491,13 @@ async def test_purchase_cable_renew_happy_path(db_session):
         service_id="dstv",
         smartcard_number="1234567890",
         mode="renew",
+        phone="08011111111",
     )
 
     assert result.tx.status == TransactionStatus.success
     assert result.tx.type == TransactionType.cable
     assert result.tx.amount == Decimal("15500.00")
-    # Meta fields: base service_id (not -change), mode, plan_code/plan_name.
+    # Meta fields: service_id, mode, plan_code/plan_name.
     meta = result.tx.meta
     assert meta["service_id"]       == "dstv"
     assert meta["smartcard_number"] == "1234567890"
@@ -511,14 +508,17 @@ async def test_purchase_cable_renew_happy_path(db_session):
     # Wallet debited by the renewal amount.
     assert _wallet_balance_of(db_session, user.id) == Decimal("44500.00")
 
-    # Wire assertions: provider called with base service_id (NOT -change)
+    # Wire assertions: provider called with base service_id, the
+    # subscription_type field carrying the renew/change distinction,
     # and the cached variation_code.
     assert provider.purchase_calls == 1
     assert provider.last_purchase_kwargs is not None
-    assert provider.last_purchase_kwargs["service_id"]     == "dstv"
-    assert provider.last_purchase_kwargs["variation_code"] == "dstv-compact"
-    assert provider.last_purchase_kwargs["smartcard_number"] == "1234567890"
-    assert provider.last_purchase_kwargs["amount_ngn"]     == Decimal("15500.00")
+    assert provider.last_purchase_kwargs["service_id"]        == "dstv"
+    assert provider.last_purchase_kwargs["variation_code"]    == "dstv-compact"
+    assert provider.last_purchase_kwargs["smartcard_number"]  == "1234567890"
+    assert provider.last_purchase_kwargs["amount_ngn"]        == Decimal("15500.00")
+    assert provider.last_purchase_kwargs["subscription_type"] == "renew"
+    assert provider.last_purchase_kwargs["phone"]             == "08011111111"
 
     await redis.aclose()
 
@@ -542,6 +542,7 @@ async def test_purchase_cable_renew_cache_empty_raises(db_session):
             service_id="dstv",
             smartcard_number="1234567890",
             mode="renew",
+            phone="08011111111",
         )
 
     # Provider was NOT reached — we bailed before touching the wallet.
@@ -583,6 +584,7 @@ async def test_purchase_cable_renew_inactive_card_raises(db_session):
             service_id="dstv",
             smartcard_number="1234567890",
             mode="renew",
+            phone="08011111111",
         )
 
     assert provider.purchase_calls == 0
@@ -609,6 +611,7 @@ async def test_purchase_cable_change_happy_path(db_session):
         service_id="dstv",
         smartcard_number="1234567890",
         mode="change",
+        phone="08011111111",
         variation_code="dstv-premium",
     )
 
@@ -618,7 +621,7 @@ async def test_purchase_cable_change_happy_path(db_session):
     assert result.tx.amount == Decimal("44500.00")
 
     meta = result.tx.meta
-    assert meta["service_id"]       == "dstv"   # base slug in meta
+    assert meta["service_id"]       == "dstv"
     assert meta["smartcard_number"] == "1234567890"
     assert meta["mode"]             == "change"
     assert meta["plan_code"]        == "dstv-premium"
@@ -627,12 +630,14 @@ async def test_purchase_cable_change_happy_path(db_session):
     # Wallet debited by the catalog price.
     assert _wallet_balance_of(db_session, user.id) == Decimal("15500.00")
 
-    # Wire: serviceID MUST be "dstv-change" on the provider call.
+    # Wire: serviceID stays as "dstv"; subscription_type="change" is
+    # the VTPass-canonical signal for bouquet switching.
     assert provider.purchase_calls == 1
     assert provider.last_purchase_kwargs is not None
-    assert provider.last_purchase_kwargs["service_id"]     == "dstv-change"
-    assert provider.last_purchase_kwargs["variation_code"] == "dstv-premium"
-    assert provider.last_purchase_kwargs["amount_ngn"]     == Decimal("44500.00")
+    assert provider.last_purchase_kwargs["service_id"]        == "dstv"
+    assert provider.last_purchase_kwargs["variation_code"]    == "dstv-premium"
+    assert provider.last_purchase_kwargs["amount_ngn"]        == Decimal("44500.00")
+    assert provider.last_purchase_kwargs["subscription_type"] == "change"
 
     await redis.aclose()
 
@@ -655,6 +660,7 @@ async def test_purchase_cable_change_unknown_variation_raises(db_session):
             service_id="dstv",
             smartcard_number="1234567890",
             mode="change",
+            phone="08011111111",
             variation_code="dstv-does-not-exist",
         )
 
@@ -689,6 +695,7 @@ async def test_purchase_cable_change_missing_variation_raises_value_error(
             service_id="dstv",
             smartcard_number="1234567890",
             mode="change",
+            phone="08011111111",
             variation_code=None,
         )
 
@@ -717,6 +724,7 @@ async def test_purchase_cable_invalid_mode_raises_value_error(db_session):
             service_id="dstv",
             smartcard_number="1234567890",
             mode="upgrade",   # not a real mode
+            phone="08011111111",
         )
 
     assert provider.purchase_calls == 0

@@ -187,7 +187,9 @@ async def test_list_cable_plans_unknown_provider_returns_empty(vtpass_client):
 
 @pytest.mark.asyncio
 async def test_purchase_cable_renew_happy_path(vtpass_client):
-    """Bare service_id (`dstv`) → renew the current bouquet."""
+    """`subscription_type="renew"` on the wire keeps the current
+    bouquet. serviceID stays as the bare slug; the VTPass-canonical
+    signal is the subscription_type field, not a service_id suffix."""
     body = {
         "code": "000",
         "response_description": "TRANSACTION SUCCESSFUL",
@@ -210,6 +212,8 @@ async def test_purchase_cable_renew_happy_path(vtpass_client):
             smartcard_number="7031234567",
             variation_code="dstv-compact",
             amount_ngn=Decimal("15500.00"),
+            subscription_type="renew",
+            phone="08011111111",
         )
     assert result.status == BillDeliveryStatus.delivered
     assert result.delivered_amount_ngn == Decimal("15500.00")
@@ -218,13 +222,16 @@ async def test_purchase_cable_renew_happy_path(vtpass_client):
     assert call.args[0].endswith("/api/pay")
     assert call.kwargs["json"]["serviceID"] == "dstv"
     assert call.kwargs["json"]["variation_code"] == "dstv-compact"
+    assert call.kwargs["json"]["subscription_type"] == "renew"
+    assert call.kwargs["json"]["phone"] == "08011111111"
+    assert call.kwargs["json"]["quantity"] == 1
 
 
 @pytest.mark.asyncio
 async def test_purchase_cable_change_happy_path(vtpass_client):
-    """`-change` suffix on service_id flips to plan-switch mode. The
-    client just forwards whatever service_id it's given — the renew
-    vs switch decision lives in BillService."""
+    """`subscription_type="change"` on the wire switches to a different
+    bouquet. serviceID stays as `dstv` — the prior `-change` suffix
+    convention was non-canonical and VTPass silently mishandled it."""
     body = {
         "code": "000",
         "response_description": "TRANSACTION SUCCESSFUL",
@@ -243,13 +250,15 @@ async def test_purchase_cable_change_happy_path(vtpass_client):
     with patcher:
         result = await vtpass_client.purchase_cable(
             request_id="TMP-260421-21",
-            service_id="dstv-change",
+            service_id="dstv",
             smartcard_number="7031234567",
             variation_code="dstv-compact-plus",
             amount_ngn=Decimal("25000.00"),
+            subscription_type="change",
+            phone="08011111111",
         )
     assert result.status == BillDeliveryStatus.delivered
     call = inner.post.call_args
-    # The suffix must be preserved verbatim on the wire.
-    assert call.kwargs["json"]["serviceID"] == "dstv-change"
+    assert call.kwargs["json"]["serviceID"] == "dstv"
     assert call.kwargs["json"]["variation_code"] == "dstv-compact-plus"
+    assert call.kwargs["json"]["subscription_type"] == "change"

@@ -26,7 +26,9 @@ def test_create_pending_transaction(db_session):
         fee=Decimal("50.00"),
     )
     assert tx.status == TransactionStatus.pending
-    assert tx.reference.startswith("TMP-")
+    # New format: 12-digit YYYYMMDDHHMI stamp + "TMP" marker + user-short + ULID.
+    # See app/utils/references.py for the VTPass compliance rationale.
+    assert tx.reference[12:].startswith("TMP")
     assert tx.amount == Decimal("5000.00")
 
 

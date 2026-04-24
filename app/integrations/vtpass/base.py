@@ -11,6 +11,7 @@ from app.integrations.vtpass.schemas import (
     CablePlanList,
     DataPlanList,
     MeterValidation,
+    ServiceCatalog,
     SmartcardValidation,
 )
 
@@ -104,15 +105,22 @@ class BillProvider(Protocol):
         self,
         *,
         request_id: str,
-        service_id: str,
+        service_id: str,                 # bare slug e.g. "dstv" — no -change suffix
         smartcard_number: str,
         variation_code: str,
         amount_ngn: Decimal,
+        subscription_type: str,          # "renew" | "change" — VTPass-canonical
+        phone: str,                      # required by VTPass for SMS dispatch
+        quantity: int = 1,               # months/units — VTPass defaults to 1
     ) -> BillPurchaseResponse: ...
 
     # ── Status requery (used by the reconcile worker) ───────────────────
 
     async def requery(self, *, request_id: str) -> BillPurchaseResponse: ...
+
+    # ── Service catalog (Sprint 5 audit) ────────────────────────────────
+
+    async def list_services(self, *, identifier: str) -> ServiceCatalog: ...
 
 
 # ── Domain exceptions — raised by the real client, caught by BillService ──

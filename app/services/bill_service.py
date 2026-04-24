@@ -52,6 +52,7 @@ from app.integrations.vtpass.schemas import (
     CablePlanList,
     DataPlanList,
     MeterValidation,
+    ServiceCatalog,
     SmartcardValidation,
 )
 from app.services.notification_service import (
@@ -224,6 +225,40 @@ class BillService:
             service_id=f"{network.lower()}-data"
         )
 
+    async def list_service_catalog(self, *, identifier: str) -> "ServiceCatalog":
+        """Fetch + cache the VTPass service catalog for a category. The
+        catalog rarely changes (DisCos, networks, cable providers are
+        stable); we cache for 24h to avoid hammering VTPass on every
+        endpoint hit. On cache miss we go live; on VTPass failure we
+        re-raise so the endpoint can return 503.
+
+        Replaces the hardcoded `_NETWORK_CATALOG` / `_CABLE_CATALOG`
+        slugs we used to maintain by hand — the live response uses
+        `portharcourt-electric` and `yola-electric`, not `phed` /
+        `yedc`, and our static lists had drifted.
+        """
+        cache_key = f"vtpass:catalog:{identifier}"
+        try:
+            cached = await self._redis.get(cache_key)
+        except RedisError as exc:
+            log.warning(
+                "list_service_catalog: cache read failed: %s", exc,
+            )
+            cached = None
+        if cached is not None:
+            return ServiceCatalog.model_validate_json(cached)
+
+        catalog = await self._provider.list_services(identifier=identifier)
+        try:
+            await self._redis.set(
+                cache_key, catalog.model_dump_json(), ex=86400,  # 24h
+            )
+        except RedisError as exc:
+            log.warning(
+                "list_service_catalog: cache write failed: %s", exc,
+            )
+        return catalog
+
     async def purchase_electricity(
         self,
         *,
@@ -380,8 +415,11 @@ class BillService:
             return MeterValidation.model_validate_json(cached)
 
         # 2. Cache miss — mint a validation-only reference and hit VTPass.
+        # VTPass rejects request_ids with non-alphanumeric chars after
+        # position 12, so the prefix is "TMPMV" (meter-validation), not
+        # "TMP-MV" — the hyphen would cause a silent pending-forever.
         request_id = new_transaction_reference(
-            user_id=str(user_id), prefix="TMP-MV",
+            user_id=str(user_id), prefix="TMPMV",
         )
         # Any ProviderPermanentFailure / ProviderTemporaryFailure bubbles
         # up untouched; we intentionally do NOT catch-and-cache.
@@ -455,8 +493,10 @@ class BillService:
         #    distinguishes smartcard refs from meter refs in logs) and
         #    hit VTPass. Permanent / temporary failures bubble up unwrapped;
         #    we intentionally do NOT catch-and-cache on the error path.
+        # See the TMPMV note in validate_meter — hyphens after position
+        # 12 break VTPass's request_id parser, so the marker is "TMPSCV".
         request_id = new_transaction_reference(
-            user_id=str(user_id), prefix="TMP-SCV",
+            user_id=str(user_id), prefix="TMPSCV",
         )
         validation = await self._provider.validate_smartcard(
             request_id=request_id,
@@ -519,6 +559,7 @@ class BillService:
         service_id: str,                    # base slug, e.g. "dstv"
         smartcard_number: str,
         mode: str,                          # "renew" | "change"
+        phone: str,                         # user.phone — VTPass wire requirement
         variation_code: str | None = None,
     ) -> BillResult:
         """Purchase a cable subscription in one of two modes.
@@ -570,7 +611,6 @@ class BillService:
             resolved_code = validation.current_plan_code
             plan_name = validation.current_plan_name
             price = validation.renewal_amount_ngn
-            wire_service_id = service_id
         else:  # mode == "change"
             if variation_code is None:
                 raise ValueError("variation_code required for mode=change")
@@ -586,15 +626,18 @@ class BillService:
             resolved_code = variation_code
             plan_name = match.name
             price = match.price_ngn
-            wire_service_id = f"{service_id}-change"
 
         meta = {
-            "service_id":       service_id,          # base slug (not -change)
+            "service_id":       service_id,
             "smartcard_number": smartcard_number,
             "mode":             mode,                # for pay-again + audit
             "plan_code":        resolved_code,
             "plan_name":        plan_name,
         }
+        # Per VTPass docs the renew/change distinction is the
+        # `subscription_type` body field, not a `-change` serviceID
+        # variant — we forward `mode` straight through. `phone` and
+        # `quantity` are also required by VTPass for cable purchases.
         return await self._execute_bill(
             user_id=user_id,
             tx_type=TransactionType.cable,
@@ -602,10 +645,13 @@ class BillService:
             meta=meta,
             provider_fn=lambda req_id: self._provider.purchase_cable(
                 request_id=req_id,
-                service_id=wire_service_id,
+                service_id=service_id,
                 smartcard_number=smartcard_number,
                 variation_code=resolved_code,
                 amount_ngn=price,
+                subscription_type=mode,
+                phone=phone,
+                quantity=1,
             ),
         )
 

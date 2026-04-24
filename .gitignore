@@ -51,6 +51,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+timpbills-firebase-adminsdk.json
 
 # Poetry
 poetry.lock

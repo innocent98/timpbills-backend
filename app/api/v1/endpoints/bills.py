@@ -37,6 +37,8 @@ from app.schemas.bills import (
     DataPlanView,
     DataPurchaseRequest,
     DataPurchaseResponse,
+    DiscoListResponse,
+    DiscoView,
     ElectricityPurchaseRequest,
     ElectricityPurchaseResponse,
     MeterValidationRequest,
@@ -91,27 +93,17 @@ def _scrub_vtpass_error(exc: Exception) -> str:
     return f"{prefix}{service_id}/{masked}{tail}"
 
 
-# Static catalog — VTPass serviceIDs are stable. Prefix table drives the
-# client-side network autodetect.
-_NETWORK_CATALOG = [
-    NetworkView(
-        id="mtn", name="MTN",
-        prefixes=["0803", "0806", "0810", "0813", "0814", "0816", "0703",
-                  "0706", "0903", "0906"],
-    ),
-    NetworkView(
-        id="airtel", name="Airtel",
-        prefixes=["0802", "0808", "0812", "0701", "0708", "0902", "0907", "0901"],
-    ),
-    NetworkView(
-        id="glo", name="Glo",
-        prefixes=["0805", "0807", "0811", "0815", "0705", "0905"],
-    ),
-    NetworkView(
-        id="etisalat", name="9mobile",
-        prefixes=["0809", "0817", "0818", "0909", "0908"],
-    ),
-]
+# Prefix table for client-side network autodetect — VTPass doesn't own
+# this, so it stays server-side. The catalog names/logos come from VTPass
+# at runtime; this table just tells the mobile UI "these prefixes route
+# to this serviceID."
+_NETWORK_PREFIXES: dict[str, list[str]] = {
+    "mtn":      ["0803", "0806", "0810", "0813", "0814", "0816", "0703",
+                 "0706", "0903", "0906"],
+    "airtel":   ["0802", "0808", "0812", "0701", "0708", "0902", "0907", "0901"],
+    "glo":      ["0805", "0807", "0811", "0815", "0705", "0905"],
+    "etisalat": ["0809", "0817", "0818", "0909", "0908"],
+}
 
 
 def _cap_for(service_id: str) -> Decimal:
@@ -126,23 +118,42 @@ def _cap_for(service_id: str) -> Decimal:
     )
 
 
-# Cable bouquet providers. IDs match the VTPass ``service_id`` slug we
-# send through to ``/api/pay``. Static — VTPass doesn't add or retire
-# these often; when they do we bump the list and ship.
-_CABLE_CATALOG = [
-    CableProviderView(id="dstv",      name="DStv"),
-    CableProviderView(id="gotv",      name="GOtv"),
-    CableProviderView(id="startimes", name="StarTimes"),
-    CableProviderView(id="showmax",   name="Showmax"),
-]
+# Cable bouquet providers — fetched live from VTPass
+# /api/services?identifier=tv-subscription via BillService.list_service_catalog.
+# Filter set: we only surface the bouquets our mobile app knows how to
+# transact (streaming-only providers like ShowMax don't fit the
+# validate-smartcard + variation-code flow yet).
+_CABLE_SUPPORTED_IDS = {"dstv", "gotv", "startimes"}
 
 
 # ── Networks ─────────────────────────────────────────────────────────────
 
 
 @router.get("/airtime/networks", response_model=None)
-async def list_airtime_networks(request: Request, user: User = Depends(get_current_user)):
-    body = NetworkListResponse(networks=_NETWORK_CATALOG)
+async def list_airtime_networks(
+    request: Request,
+    user: User = Depends(get_current_user),
+    bill_svc: BillService = Depends(get_bill_service),
+):
+    """Dynamic network list — names + logos + min/max amounts come from
+    VTPass; prefix table (for client-side autodetect) comes from our
+    `_NETWORK_PREFIXES`. Only the four NG GSM networks are surfaced
+    (VTPass also returns `foreign-airtime` under this identifier; we
+    filter it out because our airtime flow is NG-only)."""
+    catalog = await bill_svc.list_service_catalog(identifier="airtime")
+    networks = [
+        NetworkView(
+            id=s.service_id,
+            name=s.name,
+            prefixes=_NETWORK_PREFIXES.get(s.service_id, []),
+            image=s.image,
+            minimum_amount=s.minimum_amount,
+            maximum_amount=s.maximum_amount,
+        )
+        for s in catalog.services
+        if s.service_id in _NETWORK_PREFIXES
+    ]
+    body = NetworkListResponse(networks=networks)
     return success(
         body.model_dump(mode="json"),
         request_id=getattr(request.state, "request_id", None),
@@ -397,8 +408,59 @@ async def purchase_electricity(
 
 
 @router.get("/cable/providers", response_model=None)
-async def list_cable_providers(request: Request, user: User = Depends(get_current_user)):
-    body = CableProviderListResponse(providers=_CABLE_CATALOG)
+async def list_cable_providers(
+    request: Request,
+    user: User = Depends(get_current_user),
+    bill_svc: BillService = Depends(get_bill_service),
+):
+    """Dynamic cable provider list — fetched from VTPass then filtered
+    to the three providers our validate-smartcard + bouquet-catalog
+    flow supports (DStv / GOtv / StarTimes). ShowMax is surfaced by
+    VTPass under the same identifier but is streaming-only — we exclude
+    it to avoid confusing the smartcard prompt."""
+    catalog = await bill_svc.list_service_catalog(identifier="tv-subscription")
+    providers = [
+        CableProviderView(
+            id=s.service_id,
+            name=s.name,
+            image=s.image,
+            minimum_amount=s.minimum_amount,
+            maximum_amount=s.maximum_amount,
+        )
+        for s in catalog.services
+        if s.service_id in _CABLE_SUPPORTED_IDS
+    ]
+    body = CableProviderListResponse(providers=providers)
+    return success(
+        body.model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+
+@router.get("/electricity/discos", response_model=None)
+async def list_electricity_discos(
+    request: Request,
+    user: User = Depends(get_current_user),
+    bill_svc: BillService = Depends(get_bill_service),
+):
+    """NEW in Sprint 5 audit — enumerate the NG DisCos VTPass supports.
+    The mobile picker used to ship a hardcoded list that had drifted
+    (we had `phed` / `yedc`; live API returns `portharcourt-electric`
+    / `yola-electric` + two providers we never listed: `benin-electric`
+    and `aba-electric`). Sourcing the canonical list from VTPass makes
+    this drift-proof."""
+    catalog = await bill_svc.list_service_catalog(identifier="electricity-bill")
+    discos = [
+        DiscoView(
+            id=s.service_id,
+            name=s.name,
+            image=s.image,
+            minimum_amount=s.minimum_amount,
+            maximum_amount=s.maximum_amount,
+        )
+        for s in catalog.services
+    ]
+    body = DiscoListResponse(discos=discos)
     return success(
         body.model_dump(mode="json"),
         request_id=getattr(request.state, "request_id", None),
@@ -555,6 +617,7 @@ async def purchase_cable(
             service_id=body.service_id,
             smartcard_number=body.smartcard_number,
             mode=body.mode,
+            phone=user.phone,
             variation_code=body.variation_code,
         )
     except CableRenewalUnavailable as exc:

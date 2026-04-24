@@ -97,7 +97,14 @@ class Settings(BaseSettings):
     VTPASS_API_KEY: Optional[str] = None
     VTPASS_PUBLIC_KEY: Optional[str] = None
     VTPASS_SECRET_KEY: Optional[str] = None
-    VTPASS_BASE_URL: str = "https://sandbox-api.vtpass.com"
+    # VTPass docs (verified 2026-04-24):
+    #   sandbox → https://sandbox.vtpass.com  (POST /api/pay, /api/requery)
+    #   live    → https://vtpass.com
+    # The `sandbox-api.vtpass.com` hostname a prior draft used does not
+    # resolve — every VTPass call hung or silently failed, parking bills
+    # in `processing` with no operator signal. Override this per-env in
+    # .env if you need staging to point elsewhere.
+    VTPASS_BASE_URL: str = "https://sandbox.vtpass.com"
     VTPASS_WEBHOOK_SECRET: Optional[str] = None
 
     # ── Firebase Cloud Messaging (push notifications) ────────────────────
