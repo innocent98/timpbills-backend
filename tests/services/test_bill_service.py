@@ -354,3 +354,21 @@ async def test_sync_path_skips_apply_when_tx_already_finalized(db_session):
 
     # And the wallet wasn't credited back by the sync path.
     assert _wallet_balance(db_session, user.id) == Decimal("4500.00")
+
+
+# ── _resolve_network_slug regression ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("input_name,expected_slug", [
+    ("9mobile", "etisalat"),
+    ("9MOBILE", "etisalat"),
+    ("etisalat", "etisalat"),
+    ("ETISALAT", "etisalat"),
+    ("mtn", "mtn"),
+    ("MTN", "mtn"),
+    ("glo-sme", "glo-sme"),
+    ("GLO_SME", "glo-sme"),
+])
+def test_resolve_network_slug(input_name, expected_slug):
+    from app.services.bill_service import _resolve_network_slug
+    assert _resolve_network_slug(input_name) == expected_slug

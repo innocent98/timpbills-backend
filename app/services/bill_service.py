@@ -31,6 +31,28 @@ from decimal import Decimal
 from typing import Awaitable, Callable
 from uuid import UUID
 
+# 9mobile is referred to as 'etisalat' on VTPass for historical reasons
+# (the rebrand happened after VTPass slugged it). Mobile clients send the
+# user-facing slug '9mobile'; we map here so the rest of the code (catalogs,
+# admin, logs) can continue to refer to it as either term.
+_NETWORK_ALIASES = {
+    "9mobile": "etisalat",
+    "9MOBILE": "etisalat",
+    "glo-sme": "glo-sme",
+    "GLO_SME": "glo-sme",
+    "glo_sme": "glo-sme",
+}
+
+
+def _resolve_network_slug(network: str) -> str:
+    """Return the canonical VTPass slug for a network identifier.
+
+    Accepts user-facing names ('9mobile', 'glo-sme') or VTPass canonical
+    slugs ('etisalat', 'glo-sme') and returns the lowercase canonical slug.
+    """
+    n = network.strip()
+    return _NETWORK_ALIASES.get(n, n).lower()
+
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import select
@@ -160,7 +182,7 @@ class BillService:
         phone: str,
         amount_ngn: Decimal,
     ) -> BillResult:
-        service_id = network.lower()
+        service_id = _resolve_network_slug(network)
         meta = {
             "network":    network.upper(),
             "phone":      phone,
@@ -187,7 +209,7 @@ class BillService:
         phone: str,
         variation_code: str,
     ) -> BillResult:
-        service_id = f"{network.lower()}-data"
+        service_id = f"{_resolve_network_slug(network)}-data"
         # Resolve price server-side — never trust a client-sent amount.
         plans = await self._provider.list_data_plans(service_id=service_id)
         match = next(
@@ -222,7 +244,7 @@ class BillService:
         """Passthrough for the `GET /bills/data/plans` endpoint. Live
         fetch per product decision — no Redis cache."""
         return await self._provider.list_data_plans(
-            service_id=f"{network.lower()}-data"
+            service_id=f"{_resolve_network_slug(network)}-data"
         )
 
     async def list_service_catalog(self, *, identifier: str) -> "ServiceCatalog":

@@ -53,8 +53,14 @@ from app.integrations.vtpass.schemas import (
 # `_PENDING_CODES`  — non-terminal: leave tx in processing, reconcile worker
 #   will requery.
 #   * 099 → "TRANSACTION IS PROCESSING"
-#   * 001 → "TRANSACTION QUERY" (in-flight requery state)
 #   * 089 → "REQUEST IS PROCESSING, PLEASE WAIT"
+#
+# `_REQUERY_RESULT_CODE` — code 001 ("TRANSACTION QUERY") is returned by the
+#   /api/requery endpoint when the query itself succeeded. In this case the
+#   *real* status lives in content.transactions.status: we route through the
+#   existing delivered/failed/pending classification based on that nested field.
+#   Treating it as unconditionally pending (the old behaviour) caused a
+#   delivered requery to remain in processing indefinitely.
 #
 # `_REVERSAL_CODE` — VTPass already credited our merchant wallet back; we
 # treat it as a failed delivery so BillService refunds the user. Logged
@@ -64,13 +70,25 @@ from app.integrations.vtpass.schemas import (
 # Everything else is bucketed as failed (with the raw code surfaced in the
 # log + tx.meta).
 _SUCCESS_CODES = {"000", "044"}
-_PENDING_CODES = {"099", "001", "089"}
+_PENDING_CODES = {"099", "089"}
+_REQUERY_RESULT_CODE = "001"   # Requery success — read content.transactions.status
 _REVERSAL_CODE = "040"
 
 # Back-compat aliases for tests / external readers that pre-date the
 # multi-code refactor. Kept since they still describe the dominant case.
 _SUCCESS_CODE = "000"
 _PENDING_CODE = "099"
+
+
+# Known permanent-failure codes per VTPass response-codes doc:
+#   011  INVALID ARGUMENTS
+#   012  PRODUCT DOES NOT EXIST
+#   015  INVALID REQUEST ID
+#   016  TRANSACTION FAILED
+#   019  LIKELY DUPLICATE TRANSACTION
+#   083  SYSTEM ERROR
+#   087  INVALID CREDENTIALS
+#   091  TRANSACTION NOT PROCESSED
 
 
 def translate_response(
@@ -81,10 +99,12 @@ def translate_response(
     BillPurchaseResponse. Used by both VTPassClient and the
     /webhooks/vtpass endpoint.
 
-    Handles the three branches:
-      code == 000  → delivered (potentially partial if amount differs)
-      code == 099  → pending (reconcile worker will requery)
-      otherwise    → failed
+    Handles the four branches:
+      code in {000,044}  → delivered (potentially partial if amount differs)
+      code == 001        → requery result — read content.transactions.status
+                           to determine delivered/failed/pending
+      code in {099,089}  → pending (reconcile worker will requery)
+      otherwise          → failed (see _KNOWN_FAILURE_CODES comment above)
     """
     code = str(body.get("code", ""))
     description = str(body.get("response_description", ""))
@@ -106,6 +126,51 @@ def translate_response(
             description=description,
             raw=body,
         )
+
+    # Code 001 is the requery-success envelope: the outer code only means
+    # "requery was processed"; the actual delivery outcome lives in
+    # content.transactions.status. Route through the same delivered/failed/
+    # pending paths so callers don't need to special-case it.
+    if code == _REQUERY_RESULT_CODE:
+        nested_status = str(tx.get("status", "")).lower()
+        if nested_status == "delivered":
+            delivered_amt = _safe_decimal(
+                tx.get("amount")
+                or body.get("amount")
+                or requested
+            )
+            return BillPurchaseResponse(
+                request_id=request_id, transaction_id=tx_id,
+                status=BillDeliveryStatus.delivered, code=code,
+                requested_amount_ngn=requested,
+                delivered_amount_ngn=delivered_amt,
+                description=description or "Requery: delivered",
+                raw=body,
+            )
+        if nested_status == "failed":
+            log.warning(
+                "vtpass: requery code 001 nested status=failed request_id=%s",
+                request_id,
+            )
+            return BillPurchaseResponse(
+                request_id=request_id, transaction_id=tx_id,
+                status=BillDeliveryStatus.failed, code=code,
+                requested_amount_ngn=requested,
+                delivered_amount_ngn=Decimal("0.00"),
+                description=description or "Requery: failed",
+                raw=body,
+            )
+        # Any other nested status (e.g. "initiated", "processing", empty) →
+        # still pending; reconcile worker will requery again.
+        return BillPurchaseResponse(
+            request_id=request_id, transaction_id=tx_id,
+            status=BillDeliveryStatus.pending, code=code,
+            requested_amount_ngn=requested,
+            delivered_amount_ngn=Decimal("0.00"),
+            description=description or "Requery: pending upstream confirmation",
+            raw=body,
+        )
+
     if code in _PENDING_CODES:
         return BillPurchaseResponse(
             request_id=request_id, transaction_id=tx_id,
@@ -161,7 +226,9 @@ class VTPassClient(BillProvider):
             "request_id":  request_id,
             "serviceID":   service_id,
             "billersCode": phone,
-            "amount":      str(int(amount_ngn)),  # VTPass wants a whole number
+            "amount":      int(amount_ngn),  # VTPass spec: numeric, not string
+            # VTPass docs type phone as Number but examples preserve leading zeros
+            # ("08011111111"); int() drops the leading zero. Keep as string.
             "phone":       phone,
         })
         return translate_response(body, request_id=request_id, requested=amount_ngn)
@@ -273,7 +340,9 @@ class VTPassClient(BillProvider):
             "serviceID":      service_id,
             "billersCode":    meter_number,
             "variation_code": meter_type,  # "prepaid" | "postpaid"
-            "amount":         str(int(amount_ngn)),  # VTPass: whole NGN
+            "amount":         int(amount_ngn),  # VTPass spec: numeric, not string
+            # VTPass docs type phone as Number but examples preserve leading zeros
+            # ("08011111111"); int() drops the leading zero. Keep as string.
             "phone":          phone or "",
         })
         response = translate_response(
@@ -387,7 +456,9 @@ class VTPassClient(BillProvider):
             "serviceID":         service_id,
             "billersCode":       smartcard_number,
             "variation_code":    variation_code,
-            "amount":            str(int(amount_ngn)),
+            "amount":            int(amount_ngn),  # VTPass spec: numeric, not string
+            # VTPass docs type phone as Number but examples preserve leading zeros
+            # ("08011111111"); int() drops the leading zero. Keep as string.
             "phone":             phone,
             "subscription_type": subscription_type,
             "quantity":          quantity,

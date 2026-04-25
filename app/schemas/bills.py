@@ -7,7 +7,10 @@ from pydantic import BaseModel, Field
 
 # Canonical NG network identifiers. Accepted both upper and lower cased;
 # BillService normalizes via `.lower()` for VTPass service IDs.
-Network = Literal["MTN", "AIRTEL", "GLO", "ETISALAT", "mtn", "airtel", "glo", "etisalat"]
+Network = Literal[
+    "MTN", "AIRTEL", "GLO", "GLO_SME", "ETISALAT", "9MOBILE",
+    "mtn", "airtel", "glo", "glo-sme", "glo_sme", "etisalat", "9mobile",
+]
 
 
 # ── Airtime ─────────────────────────────────────────────────────────────

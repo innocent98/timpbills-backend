@@ -93,3 +93,54 @@ def test_safe_decimal_handles_strings_and_nones():
     assert _safe_decimal("not a number") == Decimal("0.00")
     assert _safe_decimal(500) == Decimal("500.00")
     assert _safe_decimal(Decimal("500.00")) == Decimal("500.00")
+
+
+def test_translate_response_code_001_reads_nested_status():
+    """Code 001 is the requery-success envelope. The actual delivery outcome
+    lives in content.transactions.status; we must NOT blindly mark pending."""
+    body = {
+        "code": "001",
+        "content": {"transactions": {"status": "delivered"}},
+        "response_description": "OK",
+    }
+    out = _trans(body)
+    assert out.status == BillDeliveryStatus.delivered
+
+    body["content"]["transactions"]["status"] = "failed"
+    out = _trans(body)
+    assert out.status == BillDeliveryStatus.failed
+
+
+def test_translate_response_code_001_nested_pending():
+    """Code 001 with an unrecognised nested status (e.g. 'initiated') stays
+    pending — reconcile worker will requery again."""
+    body = {
+        "code": "001",
+        "content": {"transactions": {"status": "initiated"}},
+        "response_description": "TRANSACTION QUERY",
+    }
+    out = _trans(body)
+    assert out.status == BillDeliveryStatus.pending
+
+
+def test_translate_response_code_089_is_pending():
+    """Code 089 must still be treated as pending after the code 001
+    reclassification (regression guard)."""
+    body = {
+        "code": "089",
+        "response_description": "REQUEST IS PROCESSING, PLEASE WAIT",
+        "content": {},
+    }
+    out = _trans(body)
+    assert out.status == BillDeliveryStatus.pending
+
+
+def test_translate_response_code_016_is_failed():
+    """Code 016 TRANSACTION FAILED → permanent failure (regression guard)."""
+    body = {
+        "code": "016",
+        "response_description": "TRANSACTION FAILED",
+        "content": {},
+    }
+    out = _trans(body)
+    assert out.status == BillDeliveryStatus.failed

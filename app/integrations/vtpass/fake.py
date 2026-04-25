@@ -415,6 +415,16 @@ _DEFAULT_PLANS: dict[str, list[DataPlanVariation]] = {
                           price_ngn=Decimal("500.00"),
                           validity="30 days"),
     ],
+    "glo-sme-data": [
+        DataPlanVariation(variation_code="glo-sme-1gb-monthly",
+                          name="1GB SME - 30 days",
+                          price_ngn=Decimal("350.00"),
+                          validity="30 days"),
+        DataPlanVariation(variation_code="glo-sme-2gb-monthly",
+                          name="2GB SME - 30 days",
+                          price_ngn=Decimal("700.00"),
+                          validity="30 days"),
+    ],
 }
 
 
@@ -537,6 +547,7 @@ _FAKE_CATALOGS: dict[str, list[ServiceCatalogEntry]] = {
         _stub("airtel-data",   "Airtel Data",   product_type="fix"),
         _stub("glo-data",      "GLO Data",      product_type="fix"),
         _stub("etisalat-data", "9mobile Data",  product_type="fix"),
+        _stub("glo-sme-data",  "Glo SME Data",  product_type="fix"),
     ],
     "tv-subscription": [
         _stub("dstv",      "DSTV Subscription",     product_type="fix"),
