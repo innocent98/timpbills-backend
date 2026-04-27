@@ -83,7 +83,7 @@ async def fund_wallet(
         body=body.model_dump(mode="json"),
     )
     try:
-        cached = await idem.lookup(
+        state, cached = await idem.lookup_or_acquire(
             user_id=str(user.id), key=idem_key, request_hash=req_hash
         )
     except IdempotencyConflict:
@@ -92,75 +92,89 @@ async def fund_wallet(
             detail={"code": "IDEMPOTENCY_CONFLICT",
                     "message": "Idempotency key reused with different request"},
         )
-    if cached is not None:
+    if state == "hit":
+        assert cached is not None
         return cached[1]
-
-    # Pre-flight KYC gate (S3C-P4b). Refuse the fund request before we
-    # call Paystack if the credit would eventually overshoot the user's
-    # balance cap. Without this, an over-cap amount would: call Paystack
-    # → user pays → charge.success webhook tries to credit →
-    # WalletService.credit raises KycCapExceeded → 422 + Paystack retries
-    # until ops raises the tier — meanwhile the user's money sits at
-    # Paystack's merchant balance. Short-circuiting here gives the mobile
-    # client a clear error + a `remaining_headroom` to drive an "Upgrade
-    # KYC" CTA.
-    wallet_row = wallet_svc.get_or_create(user_id=user.id)
-    projected = wallet_row.balance + body.amount
-    if projected > wallet_row.balance_cap:
-        remaining = max(wallet_row.balance_cap - wallet_row.balance, Decimal("0"))
+    if state == "in_flight":
         raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "KYC_LIMIT_EXCEEDED",
-                "message": (
-                    "This amount would push your wallet past your tier cap. "
-                    "Fund a smaller amount or upgrade your KYC tier."
-                ),
-                "details": {
-                    "remaining_headroom": str(remaining),
-                    "balance_cap":        str(wallet_row.balance_cap),
-                },
-            },
+            status_code=409,
+            detail={"code": "TX_IN_FLIGHT",
+                    "message": "Transaction is still being processed; retry shortly"},
         )
 
-    fee = _calculate_fee(body.amount)
-    tx = tx_svc.create(
-        user_id=user.id,
-        type=TransactionType.wallet_funding,
-        amount=body.amount,
-        fee=fee,
-    )
+    try:
+        # Pre-flight KYC gate (S3C-P4b). Refuse the fund request before we
+        # call Paystack if the credit would eventually overshoot the user's
+        # balance cap. Without this, an over-cap amount would: call Paystack
+        # → user pays → charge.success webhook tries to credit →
+        # WalletService.credit raises KycCapExceeded → 422 + Paystack retries
+        # until ops raises the tier — meanwhile the user's money sits at
+        # Paystack's merchant balance. Short-circuiting here gives the mobile
+        # client a clear error + a `remaining_headroom` to drive an "Upgrade
+        # KYC" CTA.
+        wallet_row = wallet_svc.get_or_create(user_id=user.id)
+        projected = wallet_row.balance + body.amount
+        if projected > wallet_row.balance_cap:
+            remaining = max(wallet_row.balance_cap - wallet_row.balance, Decimal("0"))
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "KYC_LIMIT_EXCEEDED",
+                    "message": (
+                        "This amount would push your wallet past your tier cap. "
+                        "Fund a smaller amount or upgrade your KYC tier."
+                    ),
+                    "details": {
+                        "remaining_headroom": str(remaining),
+                        "balance_cap":        str(wallet_row.balance_cap),
+                    },
+                },
+            )
 
-    gross_kobo = int((body.amount + fee) * 100)
-    init = await paystack.initialize(
-        amount_kobo=gross_kobo,
-        email=user.email,
-        reference=tx.reference,
-        callback_url=settings.PAYSTACK_CALLBACK_URL,
-        metadata={"transaction_id": str(tx.id), "user_id": str(user.id)},
-    )
-
-    payment = Payment(
-        transaction_id=tx.id,
-        provider="paystack",
-        provider_reference=init.reference,
-        status=PaymentStatus.pending,
-    )
-    tx_svc._db.add(payment)
-    tx_svc.transition(tx, to_status=TransactionStatus.processing, reason="paystack_init")
-
-    body_out = success(
-        FundWalletResponse(
-            reference=tx.reference,
-            authorization_url=init.authorization_url,
+        fee = _calculate_fee(body.amount)
+        tx = tx_svc.create(
+            user_id=user.id,
+            type=TransactionType.wallet_funding,
             amount=body.amount,
             fee=fee,
-        ).model_dump(mode="json"),
-        request_id=getattr(request.state, "request_id", None),
-    )
+        )
 
-    await idem.store(
-        user_id=str(user.id), key=idem_key, request_hash=req_hash,
-        response_status=200, response_body=body_out,
-    )
-    return body_out
+        gross_kobo = int((body.amount + fee) * 100)
+        init = await paystack.initialize(
+            amount_kobo=gross_kobo,
+            email=user.email,
+            reference=tx.reference,
+            callback_url=settings.PAYSTACK_CALLBACK_URL,
+            metadata={"transaction_id": str(tx.id), "user_id": str(user.id)},
+        )
+
+        payment = Payment(
+            transaction_id=tx.id,
+            provider="paystack",
+            provider_reference=init.reference,
+            status=PaymentStatus.pending,
+        )
+        tx_svc._db.add(payment)
+        tx_svc.transition(tx, to_status=TransactionStatus.processing, reason="paystack_init")
+
+        body_out = success(
+            FundWalletResponse(
+                reference=tx.reference,
+                authorization_url=init.authorization_url,
+                amount=body.amount,
+                fee=fee,
+            ).model_dump(mode="json"),
+            request_id=getattr(request.state, "request_id", None),
+        )
+
+        await idem.store(
+            user_id=str(user.id), key=idem_key, request_hash=req_hash,
+            response_status=200, response_body=body_out,
+        )
+        return body_out
+    except HTTPException:
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise
+    except Exception:
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise

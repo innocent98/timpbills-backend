@@ -180,7 +180,7 @@ async def purchase_airtime(
         body=body.model_dump(mode="json"),
     )
     try:
-        cached = await idem.lookup(
+        state, cached = await idem.lookup_or_acquire(
             user_id=str(user.id), key=idem_key, request_hash=req_hash,
         )
     except IdempotencyConflict:
@@ -189,45 +189,66 @@ async def purchase_airtime(
             detail={"code": "IDEMPOTENCY_CONFLICT",
                     "message": "Idempotency key reused with different request"},
         )
-    if cached is not None:
+    if state == "hit":
+        assert cached is not None
         return cached[1]
+    if state == "in_flight":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TX_IN_FLIGHT",
+                    "message": "Transaction is still being processed; retry shortly"},
+        )
 
     try:
-        result = await bill_svc.purchase_airtime(
-            user_id=UUID(str(user.id)),
-            network=body.network,
-            phone=body.phone,
-            amount_ngn=body.amount,
+        try:
+            result = await bill_svc.purchase_airtime(
+                user_id=UUID(str(user.id)),
+                network=body.network,
+                phone=body.phone,
+                amount_ngn=body.amount,
+            )
+        except InsufficientBalance:
+            raise HTTPException(
+                status_code=402,
+                detail={"code": "INSUFFICIENT_BALANCE",
+                        "message": "Wallet balance is not enough for this purchase"},
+            )
+
+        tx = result.tx
+        resp = result.response
+        partial = (
+            resp.status.value == "delivered"
+            and resp.delivered_amount_ngn < resp.requested_amount_ngn
         )
-    except InsufficientBalance:
-        raise HTTPException(
-            status_code=402,
-            detail={"code": "INSUFFICIENT_BALANCE",
-                    "message": "Wallet balance is not enough for this purchase"},
+        body_out = success(
+            AirtimePurchaseResponse(
+                reference=tx.reference,
+                status=tx.status.value,
+                delivered_amount=resp.delivered_amount_ngn,
+                requested_amount=resp.requested_amount_ngn,
+                partial=partial,
+            ).model_dump(mode="json"),
+            request_id=getattr(request.state, "request_id", None),
         )
 
-    tx = result.tx
-    resp = result.response
-    partial = (
-        resp.status.value == "delivered"
-        and resp.delivered_amount_ngn < resp.requested_amount_ngn
-    )
-    body_out = success(
-        AirtimePurchaseResponse(
-            reference=tx.reference,
-            status=tx.status.value,
-            delivered_amount=resp.delivered_amount_ngn,
-            requested_amount=resp.requested_amount_ngn,
-            partial=partial,
-        ).model_dump(mode="json"),
-        request_id=getattr(request.state, "request_id", None),
-    )
-
-    await idem.store(
-        user_id=str(user.id), key=idem_key, request_hash=req_hash,
-        response_status=200, response_body=body_out,
-    )
-    return body_out
+        await idem.store(
+            user_id=str(user.id), key=idem_key, request_hash=req_hash,
+            response_status=200, response_body=body_out,
+        )
+        return body_out
+    except HTTPException:
+        # Known/expected error — release the sentinel so the user can retry
+        # with the same Idempotency-Key after fixing the underlying issue
+        # (e.g., funding the wallet). store() never ran, so the slot still
+        # holds the in-flight sentinel.
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise
+    except Exception:
+        # Unexpected failure — release sentinel too. Sentinel TTL (60s)
+        # would catch it eventually, but explicit cleanup avoids a stuck
+        # 60-second window for the user.
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise
 
 
 # ── Electricity ──────────────────────────────────────────────────────────
@@ -351,7 +372,7 @@ async def purchase_electricity(
         body=body.model_dump(mode="json"),
     )
     try:
-        cached = await idem.lookup(
+        state, cached = await idem.lookup_or_acquire(
             user_id=str(user.id), key=idem_key, request_hash=req_hash,
         )
     except IdempotencyConflict:
@@ -360,48 +381,62 @@ async def purchase_electricity(
             detail={"code": "IDEMPOTENCY_CONFLICT",
                     "message": "Idempotency key reused with different request"},
         )
-    if cached is not None:
+    if state == "hit":
+        assert cached is not None
         return cached[1]
+    if state == "in_flight":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TX_IN_FLIGHT",
+                    "message": "Transaction is still being processed; retry shortly"},
+        )
 
     try:
-        result = await bill_svc.purchase_electricity(
-            user_id=UUID(str(user.id)),
-            service_id=body.service_id,
-            meter_number=body.meter_number,
-            meter_type=body.meter_type,
-            # Sprint 4 B26: phone is pulled from the authenticated user
-            # profile, not the request body. VTPass still receives it;
-            # BillService.purchase_electricity signature is unchanged.
-            phone=user.phone,
-            amount_ngn=body.amount,
-        )
-    except InsufficientBalance:
-        raise HTTPException(
-            status_code=402,
-            detail={"code": "INSUFFICIENT_BALANCE",
-                    "message": "Wallet balance is not enough for this purchase"},
+        try:
+            result = await bill_svc.purchase_electricity(
+                user_id=UUID(str(user.id)),
+                service_id=body.service_id,
+                meter_number=body.meter_number,
+                meter_type=body.meter_type,
+                # Sprint 4 B26: phone is pulled from the authenticated user
+                # profile, not the request body. VTPass still receives it;
+                # BillService.purchase_electricity signature is unchanged.
+                phone=user.phone,
+                amount_ngn=body.amount,
+            )
+        except InsufficientBalance:
+            raise HTTPException(
+                status_code=402,
+                detail={"code": "INSUFFICIENT_BALANCE",
+                        "message": "Wallet balance is not enough for this purchase"},
+            )
+
+        tx = result.tx
+        meta = tx.meta or {}
+        body_out = success(
+            ElectricityPurchaseResponse(
+                reference=tx.reference,
+                status=tx.status.value,
+                service_id=body.service_id,
+                meter_number=body.meter_number,
+                amount=tx.amount,
+                token=meta.get("token"),
+                units=meta.get("units"),
+            ).model_dump(mode="json"),
+            request_id=getattr(request.state, "request_id", None),
         )
 
-    tx = result.tx
-    meta = tx.meta or {}
-    body_out = success(
-        ElectricityPurchaseResponse(
-            reference=tx.reference,
-            status=tx.status.value,
-            service_id=body.service_id,
-            meter_number=body.meter_number,
-            amount=tx.amount,
-            token=meta.get("token"),
-            units=meta.get("units"),
-        ).model_dump(mode="json"),
-        request_id=getattr(request.state, "request_id", None),
-    )
-
-    await idem.store(
-        user_id=str(user.id), key=idem_key, request_hash=req_hash,
-        response_status=200, response_body=body_out,
-    )
-    return body_out
+        await idem.store(
+            user_id=str(user.id), key=idem_key, request_hash=req_hash,
+            response_status=200, response_body=body_out,
+        )
+        return body_out
+    except HTTPException:
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise
+    except Exception:
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise
 
 
 # ── Cable ────────────────────────────────────────────────────────────────
@@ -599,7 +634,7 @@ async def purchase_cable(
         body=body.model_dump(mode="json"),
     )
     try:
-        cached = await idem.lookup(
+        state, cached = await idem.lookup_or_acquire(
             user_id=str(user.id), key=idem_key, request_hash=req_hash,
         )
     except IdempotencyConflict:
@@ -608,56 +643,70 @@ async def purchase_cable(
             detail={"code": "IDEMPOTENCY_CONFLICT",
                     "message": "Idempotency key reused with different request"},
         )
-    if cached is not None:
+    if state == "hit":
+        assert cached is not None
         return cached[1]
-
-    try:
-        result = await bill_svc.purchase_cable(
-            user_id=UUID(str(user.id)),
-            service_id=body.service_id,
-            smartcard_number=body.smartcard_number,
-            mode=body.mode,
-            phone=user.phone,
-            variation_code=body.variation_code,
-        )
-    except CableRenewalUnavailable as exc:
+    if state == "in_flight":
         raise HTTPException(
             status_code=409,
-            detail={"code": "CABLE_RENEWAL_UNAVAILABLE", "message": str(exc)},
-        )
-    except CablePlanNotFound as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "UNKNOWN_CABLE_PLAN", "message": str(exc)},
-        )
-    except InsufficientBalance:
-        raise HTTPException(
-            status_code=402,
-            detail={"code": "INSUFFICIENT_BALANCE",
-                    "message": "Wallet balance is not enough for this purchase"},
+            detail={"code": "TX_IN_FLIGHT",
+                    "message": "Transaction is still being processed; retry shortly"},
         )
 
-    tx = result.tx
-    meta = tx.meta or {}
-    body_out = success(
-        CablePurchaseResponse(
-            reference=tx.reference,
-            status=tx.status.value,
-            service_id=body.service_id,
-            smartcard_number=body.smartcard_number,
-            mode=body.mode,
-            plan_code=meta.get("plan_code", ""),
-            plan_name=meta.get("plan_name", ""),
-            amount=tx.amount,
-        ).model_dump(mode="json"),
-        request_id=getattr(request.state, "request_id", None),
-    )
+    try:
+        try:
+            result = await bill_svc.purchase_cable(
+                user_id=UUID(str(user.id)),
+                service_id=body.service_id,
+                smartcard_number=body.smartcard_number,
+                mode=body.mode,
+                phone=user.phone,
+                variation_code=body.variation_code,
+            )
+        except CableRenewalUnavailable as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "CABLE_RENEWAL_UNAVAILABLE", "message": str(exc)},
+            )
+        except CablePlanNotFound as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "UNKNOWN_CABLE_PLAN", "message": str(exc)},
+            )
+        except InsufficientBalance:
+            raise HTTPException(
+                status_code=402,
+                detail={"code": "INSUFFICIENT_BALANCE",
+                        "message": "Wallet balance is not enough for this purchase"},
+            )
 
-    await idem.store(
-        user_id=str(user.id), key=idem_key, request_hash=req_hash,
-        response_status=200, response_body=body_out,
-    )
-    return body_out
+        tx = result.tx
+        meta = tx.meta or {}
+        body_out = success(
+            CablePurchaseResponse(
+                reference=tx.reference,
+                status=tx.status.value,
+                service_id=body.service_id,
+                smartcard_number=body.smartcard_number,
+                mode=body.mode,
+                plan_code=meta.get("plan_code", ""),
+                plan_name=meta.get("plan_name", ""),
+                amount=tx.amount,
+            ).model_dump(mode="json"),
+            request_id=getattr(request.state, "request_id", None),
+        )
+
+        await idem.store(
+            user_id=str(user.id), key=idem_key, request_hash=req_hash,
+            response_status=200, response_body=body_out,
+        )
+        return body_out
+    except HTTPException:
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise
+    except Exception:
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise
 
 
 # ── Data ─────────────────────────────────────────────────────────────────
@@ -707,7 +756,7 @@ async def purchase_data(
         body=body.model_dump(mode="json"),
     )
     try:
-        cached = await idem.lookup(
+        state, cached = await idem.lookup_or_acquire(
             user_id=str(user.id), key=idem_key, request_hash=req_hash,
         )
     except IdempotencyConflict:
@@ -716,41 +765,55 @@ async def purchase_data(
             detail={"code": "IDEMPOTENCY_CONFLICT",
                     "message": "Idempotency key reused with different request"},
         )
-    if cached is not None:
+    if state == "hit":
+        assert cached is not None
         return cached[1]
+    if state == "in_flight":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TX_IN_FLIGHT",
+                    "message": "Transaction is still being processed; retry shortly"},
+        )
 
     try:
-        result = await bill_svc.purchase_data(
-            user_id=UUID(str(user.id)),
-            network=body.network,
-            phone=body.phone,
-            variation_code=body.variation_code,
-        )
-    except DataPlanNotFound as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "UNKNOWN_DATA_PLAN", "message": str(exc)},
-        )
-    except InsufficientBalance:
-        raise HTTPException(
-            status_code=402,
-            detail={"code": "INSUFFICIENT_BALANCE",
-                    "message": "Wallet balance is not enough for this purchase"},
+        try:
+            result = await bill_svc.purchase_data(
+                user_id=UUID(str(user.id)),
+                network=body.network,
+                phone=body.phone,
+                variation_code=body.variation_code,
+            )
+        except DataPlanNotFound as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "UNKNOWN_DATA_PLAN", "message": str(exc)},
+            )
+        except InsufficientBalance:
+            raise HTTPException(
+                status_code=402,
+                detail={"code": "INSUFFICIENT_BALANCE",
+                        "message": "Wallet balance is not enough for this purchase"},
+            )
+
+        tx = result.tx
+        body_out = success(
+            DataPurchaseResponse(
+                reference=tx.reference,
+                status=tx.status.value,
+                plan_name=(tx.meta or {}).get("plan_name", ""),
+                price=tx.amount,
+            ).model_dump(mode="json"),
+            request_id=getattr(request.state, "request_id", None),
         )
 
-    tx = result.tx
-    body_out = success(
-        DataPurchaseResponse(
-            reference=tx.reference,
-            status=tx.status.value,
-            plan_name=(tx.meta or {}).get("plan_name", ""),
-            price=tx.amount,
-        ).model_dump(mode="json"),
-        request_id=getattr(request.state, "request_id", None),
-    )
-
-    await idem.store(
-        user_id=str(user.id), key=idem_key, request_hash=req_hash,
-        response_status=200, response_body=body_out,
-    )
-    return body_out
+        await idem.store(
+            user_id=str(user.id), key=idem_key, request_hash=req_hash,
+            response_status=200, response_body=body_out,
+        )
+        return body_out
+    except HTTPException:
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise
+    except Exception:
+        await idem.release_in_flight(user_id=str(user.id), key=idem_key)
+        raise
