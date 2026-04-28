@@ -444,25 +444,75 @@ class VTPassClient(BillProvider):
         phone: str,
         quantity: int = 1,
     ) -> BillPurchaseResponse:
-        """Renew or switch a cable subscription. The renew-vs-switch
-        decision lives on the wire as ``subscription_type`` (per
-        https://vtpass.com/documentation/dstv-subscription-api/) — the
-        ``serviceID`` stays as the bare provider slug. A previous draft
-        used a ``-change`` suffix on serviceID instead of
-        subscription_type; that's a non-canonical convention VTPass
-        silently mishandles, so it's been removed."""
-        body = await self._post_pay({
-            "request_id":        request_id,
-            "serviceID":         service_id,
-            "billersCode":       smartcard_number,
-            "variation_code":    variation_code,
-            "amount":            int(amount_ngn),  # VTPass spec: numeric, not string
-            # VTPass docs type phone as Number but examples preserve leading zeros
-            # ("08011111111"); int() drops the leading zero. Keep as string.
-            "phone":             phone,
-            "subscription_type": subscription_type,
-            "quantity":          quantity,
-        })
+        """Renew or switch a cable subscription.
+
+        Wire shape is provider-specific; per VTPass docs:
+
+        * DSTV / GOtv (M-Net family — same docs shape):
+          - https://vtpass.com/documentation/dstv-subscription-api/
+          - https://vtpass.com/documentation/gotv-subscription-api/
+
+          Renew: send ``subscription_type=renew`` + ``amount`` (mandatory);
+          ``variation_code`` is **omitted** — VTPass derives the bouquet
+          from the smartcard's current subscription.
+
+          Change: send ``subscription_type=change`` + ``variation_code``
+          (mandatory); ``amount`` is **omitted** — VTPass uses the price
+          set for the bouquet, eliminating a stale-price drift window
+          between catalog GET and pay POST.
+
+          ``quantity`` (months viewing) is optional on both paths; we
+          default to 1.
+
+        * StarTimes (https://vtpass.com/documentation/startimes-subscription-api/)
+          docs the call differently: there's **no** ``subscription_type``
+          and **no** ``quantity`` field. Every purchase is a flat
+          variation_code charge — the caller represents "renew" by
+          re-paying the current variation_code. We omit both fields on
+          the wire to stay strict to the documented contract; sending
+          unknown fields risks a permanent failure or silent reject
+          depending on VTPass's mood.
+
+        Showmax (also MultiChoice) follows the DSTV/GOtv shape — it's
+        not separately documented but the production behaviour matches.
+
+        ``serviceID`` always stays as the bare provider slug (e.g.
+        ``"dstv"``); the prior ``-change`` suffix convention was non-
+        canonical and VTPass silently mishandled it.
+        """
+        # Phone must round-trip as a string preserving leading zeros
+        # ("08011111111"); VTPass docs type it as Number but examples
+        # keep the leading zero, so int() would corrupt it.
+        if service_id == "startimes":
+            payload: dict[str, Any] = {
+                "request_id":     request_id,
+                "serviceID":      service_id,
+                "billersCode":    smartcard_number,
+                "variation_code": variation_code,
+                "amount":         int(amount_ngn),  # numeric per spec
+                "phone":          phone,
+            }
+        else:
+            payload = {
+                "request_id":        request_id,
+                "serviceID":         service_id,
+                "billersCode":       smartcard_number,
+                "phone":             phone,
+                "subscription_type": subscription_type,
+                "quantity":          quantity,
+            }
+            if subscription_type == "change":
+                # Change carries variation_code; amount is omitted so
+                # VTPass uses its own price for the bouquet (avoids
+                # stale-price rejection if the catalog drifted between
+                # our GET and POST).
+                payload["variation_code"] = variation_code
+            else:  # "renew" — and any future value falls through to renew shape
+                # Renew carries amount (mandatory per DSTV/GOtv docs);
+                # variation_code is omitted — VTPass renews the
+                # smartcard's currently-active bouquet.
+                payload["amount"] = int(amount_ngn)
+        body = await self._post_pay(payload)
         return translate_response(
             body, request_id=request_id, requested=amount_ngn
         )

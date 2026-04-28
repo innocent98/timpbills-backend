@@ -594,9 +594,11 @@ class BillService:
 
         ``change``: caller supplies ``variation_code``. We fetch the bouquet
         catalog and server-resolve the price — never trust a client-sent
-        amount (cf. S3 data-plan precedent). Wire ``serviceID`` is
-        ``"{service_id}-change"`` (e.g. ``"dstv-change"``) — that's how
-        VTPass distinguishes "switch bouquet" from "renew current bouquet".
+        amount (cf. S3 data-plan precedent). Wire ``serviceID`` stays
+        as the bare slug; the renew-vs-change distinction lives in the
+        ``subscription_type`` body field (DSTV/GOtv) or is absorbed
+        into the variation_code (StarTimes) — see ``VTPassClient.purchase_cable``
+        for the per-provider wire shape.
 
         Mode validation happens FIRST so a programmer-typo "renewal" / "switch"
         fails fast with a ValueError rather than surfacing as "cache empty".

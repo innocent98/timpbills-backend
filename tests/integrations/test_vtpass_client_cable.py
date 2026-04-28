@@ -183,27 +183,51 @@ async def test_list_cable_plans_unknown_provider_returns_empty(vtpass_client):
     assert result.variations == []
 
 
-# ── purchase_cable ────────────────────────────────────────────────────
+# ── purchase_cable: wire-shape snapshots ──────────────────────────────
+#
+# The six tests below pin the wire body for every (provider × mode)
+# combination so a regression to the prior shape (variation_code on
+# renew, amount on change, subscription_type/quantity sent to StarTimes)
+# fails loudly. Sources:
+#   * https://vtpass.com/documentation/dstv-subscription-api/
+#   * https://vtpass.com/documentation/gotv-subscription-api/
+#   * https://vtpass.com/documentation/startimes-subscription-api/
+
+_OK_RENEW_BODY = {
+    "code": "000",
+    "response_description": "TRANSACTION SUCCESSFUL",
+    "amount": "15500",
+    "content": {
+        "transactions": {
+            "status":        "delivered",
+            "amount":        "15500",
+            "transactionId": "vt_tx_cable_1",
+        },
+    },
+}
+
+_OK_CHANGE_BODY = {
+    "code": "000",
+    "response_description": "TRANSACTION SUCCESSFUL",
+    "amount": "25000",
+    "content": {
+        "transactions": {
+            "status":        "delivered",
+            "amount":        "25000",
+            "transactionId": "vt_tx_cable_2",
+        },
+    },
+}
+
 
 @pytest.mark.asyncio
-async def test_purchase_cable_renew_happy_path(vtpass_client):
-    """`subscription_type="renew"` on the wire keeps the current
-    bouquet. serviceID stays as the bare slug; the VTPass-canonical
-    signal is the subscription_type field, not a service_id suffix."""
-    body = {
-        "code": "000",
-        "response_description": "TRANSACTION SUCCESSFUL",
-        "amount": "15500",
-        "content": {
-            "transactions": {
-                "status":        "delivered",
-                "amount":        "15500",
-                "transactionId": "vt_tx_cable_1",
-            },
-        },
-    }
+async def test_purchase_cable_dstv_renew_wire_shape(vtpass_client):
+    """DSTV renew per docs: subscription_type=renew + amount mandatory.
+    variation_code is OMITTED — VTPass derives the bouquet from the
+    smartcard's current subscription. quantity defaults to 1.
+    serviceID stays as the bare slug (`dstv`, not `dstv-change`)."""
     patcher, inner = _patch_async_client(
-        post_return=_mock_httpx_response(json_body=body)
+        post_return=_mock_httpx_response(json_body=_OK_RENEW_BODY)
     )
     with patcher:
         result = await vtpass_client.purchase_cable(
@@ -220,32 +244,26 @@ async def test_purchase_cable_renew_happy_path(vtpass_client):
     assert result.transaction_id == "vt_tx_cable_1"
     call = inner.post.call_args
     assert call.args[0].endswith("/api/pay")
-    assert call.kwargs["json"]["serviceID"] == "dstv"
-    assert call.kwargs["json"]["variation_code"] == "dstv-compact"
-    assert call.kwargs["json"]["subscription_type"] == "renew"
-    assert call.kwargs["json"]["phone"] == "08011111111"
-    assert call.kwargs["json"]["quantity"] == 1
+    assert call.kwargs["json"] == {
+        "request_id":        "TMP-260421-20",
+        "serviceID":         "dstv",
+        "billersCode":       "7031234567",
+        "phone":             "08011111111",
+        "subscription_type": "renew",
+        "quantity":          1,
+        "amount":            15500,
+    }
+    assert "variation_code" not in call.kwargs["json"]
 
 
 @pytest.mark.asyncio
-async def test_purchase_cable_change_happy_path(vtpass_client):
-    """`subscription_type="change"` on the wire switches to a different
-    bouquet. serviceID stays as `dstv` — the prior `-change` suffix
-    convention was non-canonical and VTPass silently mishandled it."""
-    body = {
-        "code": "000",
-        "response_description": "TRANSACTION SUCCESSFUL",
-        "amount": "25000",
-        "content": {
-            "transactions": {
-                "status":        "delivered",
-                "amount":        "25000",
-                "transactionId": "vt_tx_cable_2",
-            },
-        },
-    }
+async def test_purchase_cable_dstv_change_wire_shape(vtpass_client):
+    """DSTV change per docs: subscription_type=change + variation_code
+    mandatory. amount is OMITTED — VTPass uses the price set for the
+    bouquet (avoids stale-price drift between catalog GET and pay POST).
+    serviceID stays as `dstv` — the prior `-change` suffix was wrong."""
     patcher, inner = _patch_async_client(
-        post_return=_mock_httpx_response(json_body=body)
+        post_return=_mock_httpx_response(json_body=_OK_CHANGE_BODY)
     )
     with patcher:
         result = await vtpass_client.purchase_cable(
@@ -259,6 +277,135 @@ async def test_purchase_cable_change_happy_path(vtpass_client):
         )
     assert result.status == BillDeliveryStatus.delivered
     call = inner.post.call_args
-    assert call.kwargs["json"]["serviceID"] == "dstv"
-    assert call.kwargs["json"]["variation_code"] == "dstv-compact-plus"
-    assert call.kwargs["json"]["subscription_type"] == "change"
+    assert call.kwargs["json"] == {
+        "request_id":        "TMP-260421-21",
+        "serviceID":         "dstv",
+        "billersCode":       "7031234567",
+        "phone":             "08011111111",
+        "subscription_type": "change",
+        "quantity":          1,
+        "variation_code":    "dstv-compact-plus",
+    }
+    assert "amount" not in call.kwargs["json"]
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_gotv_renew_wire_shape(vtpass_client):
+    """GOtv shares DSTV's docs shape — renew omits variation_code,
+    sends amount + subscription_type."""
+    patcher, inner = _patch_async_client(
+        post_return=_mock_httpx_response(json_body=_OK_RENEW_BODY)
+    )
+    with patcher:
+        await vtpass_client.purchase_cable(
+            request_id="TMP-260421-30",
+            service_id="gotv",
+            smartcard_number="2025123456",
+            variation_code="gotv-jolli",
+            amount_ngn=Decimal("5700.00"),
+            subscription_type="renew",
+            phone="08022222222",
+        )
+    payload = inner.post.call_args.kwargs["json"]
+    assert payload == {
+        "request_id":        "TMP-260421-30",
+        "serviceID":         "gotv",
+        "billersCode":       "2025123456",
+        "phone":             "08022222222",
+        "subscription_type": "renew",
+        "quantity":          1,
+        "amount":            5700,
+    }
+    assert "variation_code" not in payload
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_gotv_change_wire_shape(vtpass_client):
+    """GOtv change carries variation_code; amount is omitted."""
+    patcher, inner = _patch_async_client(
+        post_return=_mock_httpx_response(json_body=_OK_CHANGE_BODY)
+    )
+    with patcher:
+        await vtpass_client.purchase_cable(
+            request_id="TMP-260421-31",
+            service_id="gotv",
+            smartcard_number="2025123456",
+            variation_code="gotv-max",
+            amount_ngn=Decimal("8500.00"),
+            subscription_type="change",
+            phone="08022222222",
+        )
+    payload = inner.post.call_args.kwargs["json"]
+    assert payload == {
+        "request_id":        "TMP-260421-31",
+        "serviceID":         "gotv",
+        "billersCode":       "2025123456",
+        "phone":             "08022222222",
+        "subscription_type": "change",
+        "quantity":          1,
+        "variation_code":    "gotv-max",
+    }
+    assert "amount" not in payload
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_startimes_renew_wire_shape(vtpass_client):
+    """StarTimes' docs differ from DSTV/GOtv: NO subscription_type,
+    NO quantity. Every purchase is a flat variation_code charge — the
+    caller represents 'renew' by re-paying the current variation.
+    The client must drop both fields to stay strict to the docs."""
+    patcher, inner = _patch_async_client(
+        post_return=_mock_httpx_response(json_body=_OK_RENEW_BODY)
+    )
+    with patcher:
+        await vtpass_client.purchase_cable(
+            request_id="TMP-260421-40",
+            service_id="startimes",
+            smartcard_number="3033333333",
+            variation_code="startimes-basic-monthly",
+            amount_ngn=Decimal("2600.00"),
+            subscription_type="renew",  # ignored on the wire
+            phone="08033333333",
+        )
+    payload = inner.post.call_args.kwargs["json"]
+    assert payload == {
+        "request_id":     "TMP-260421-40",
+        "serviceID":      "startimes",
+        "billersCode":    "3033333333",
+        "variation_code": "startimes-basic-monthly",
+        "amount":         2600,
+        "phone":          "08033333333",
+    }
+    assert "subscription_type" not in payload
+    assert "quantity" not in payload
+
+
+@pytest.mark.asyncio
+async def test_purchase_cable_startimes_change_wire_shape(vtpass_client):
+    """StarTimes change uses the same flat shape; the only difference
+    is the variation_code. subscription_type and quantity are still
+    omitted on the wire."""
+    patcher, inner = _patch_async_client(
+        post_return=_mock_httpx_response(json_body=_OK_CHANGE_BODY)
+    )
+    with patcher:
+        await vtpass_client.purchase_cable(
+            request_id="TMP-260421-41",
+            service_id="startimes",
+            smartcard_number="3033333333",
+            variation_code="startimes-smart-monthly",
+            amount_ngn=Decimal("3800.00"),
+            subscription_type="change",  # ignored on the wire
+            phone="08033333333",
+        )
+    payload = inner.post.call_args.kwargs["json"]
+    assert payload == {
+        "request_id":     "TMP-260421-41",
+        "serviceID":      "startimes",
+        "billersCode":    "3033333333",
+        "variation_code": "startimes-smart-monthly",
+        "amount":         3800,
+        "phone":          "08033333333",
+    }
+    assert "subscription_type" not in payload
+    assert "quantity" not in payload
