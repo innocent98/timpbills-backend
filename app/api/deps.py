@@ -137,6 +137,26 @@ def get_current_user(
     return user
 
 
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Authorize an admin-only endpoint.
+
+    Builds on top of `get_current_user` (so the JWT auth + token-type
+    checks still run) and additionally requires `user.is_admin`. We
+    return 403 (not 404) on a non-admin: the user is authenticated and
+    the route exists; they're just not allowed.
+
+    Sprint 5 BE-52 — manual-refund endpoint. Sprint 8 will fold the
+    full admin dashboard surface in here; the dependency stays generic
+    so other admin endpoints can opt in by name.
+    """
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "ADMIN_REQUIRED", "message": "Admin privilege required"},
+        )
+    return user
+
+
 # --- Added by B5 (IdempotencyService + header guard) ---
 from app.services.idempotency_service import IdempotencyService
 

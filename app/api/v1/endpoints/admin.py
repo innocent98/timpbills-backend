@@ -1,0 +1,148 @@
+"""Admin-only endpoints — Sprint 5 BE-52.
+
+v1 surface is intentionally minimal: a single manual-refund trigger
+that ops can hit on a stuck/disputed transaction. Sprint 8 builds the
+full admin dashboard UI on top of this and any sibling endpoints we
+add here.
+
+Auth model: every route under /admin requires `require_admin`, which
+extends the standard `get_current_user` JWT path with an `is_admin`
+check. Non-admin authenticated users get 403 (route exists, just not
+allowed); unauthenticated → 401 from the underlying dep. Sprint 1 docs
+mentioned an `admin_users` join table; we deferred to a single
+`is_admin` column on `users` for v1 — see migration 202604281200.
+"""
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_bill_service, get_db, require_admin
+from app.db.models._enums import TransactionStatus, TransactionType
+from app.db.models.transaction import Transaction
+from app.db.models.transaction_event import TransactionEvent
+from app.db.models.user import User
+from app.services.bill_service import BillService
+from app.utils.responses import success
+
+
+router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+class ManualRefundRequest(BaseModel):
+    """Body for `POST /admin/refunds/{reference}/trigger`.
+
+    `reason` is mandatory — every admin write logs an audit row in
+    `transaction_events` with this string + the actor admin id, so
+    downstream review can reconstruct why a refund was forced. We
+    cap the length so a runaway log injection can't bloat the
+    audit table.
+    """
+
+    reason: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/refunds/{reference}/trigger", response_model=None)
+async def admin_trigger_refund(
+    reference: str,
+    body: ManualRefundRequest,
+    request: Request,
+    admin: Annotated[User, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    bill_svc: Annotated[BillService, Depends(get_bill_service)],
+):
+    """Force a refund on a transaction.
+
+    Idempotent: if the underlying tx already has a refund row (any prior
+    refund path — webhook, reconcile, sync-purchase failure, or a prior
+    admin trigger), we return 200 with a `was_created=false` payload and
+    do nothing. We still write an audit `transaction_events` row marking
+    the admin attempt — ops should be able to see "Adebayo tried to
+    re-trigger this on 2026-04-29 and there was already a refund."
+
+    Non-bill transactions (e.g. wallet_funding, refund itself) reject
+    with 400; refund_engine fan-out for those is owned by the relevant
+    sprint (wallet refunds → S2 webhook reconciliation, not this
+    endpoint).
+    """
+    tx = (
+        db.query(Transaction)
+        .filter(Transaction.reference == reference)
+        .first()
+    )
+    if tx is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "TRANSACTION_NOT_FOUND", "message": "Transaction not found"},
+        )
+
+    # Refunds and wallet-funding don't flow through BillService refund
+    # path. Be explicit; "trying to refund a refund" is operator error
+    # and silent success would obscure it.
+    if tx.type in (TransactionType.refund, TransactionType.wallet_funding):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "UNREFUNDABLE_TX_TYPE",
+                "message": f"Cannot manually refund tx of type {tx.type.value}",
+            },
+        )
+
+    # Use TransactionService.create_refund directly so we can read
+    # back `was_created` — the BillService wrapper drops it. Same
+    # idempotency-by-original_reference semantics as the live failure
+    # path; a second admin trigger after a webhook refund is a no-op.
+    refund, was_created = bill_svc._tx.create_refund(  # noqa: SLF001
+        original_tx=tx, amount=tx.amount,
+        reason=f"admin_manual_refund: {body.reason}",
+    )
+    if was_created:
+        bill_svc._wallet.credit(user_id=tx.user_id, amount=refund.amount)  # noqa: SLF001
+
+    # Audit row on the original tx — every admin action gets one, even
+    # the no-op idempotent path. context records the admin actor + the
+    # refund row's reference so the audit trail is self-contained.
+    audit_event = TransactionEvent(
+        transaction_id=tx.id,
+        from_status=tx.status,
+        to_status=tx.status,  # placeholder; the real transition (if any)
+                              # writes its own event below via TransactionService.transition
+        reason=f"admin_manual_refund_attempt: {body.reason}",
+        context={
+            "actor_admin_user_id": str(admin.id),
+            "actor_admin_email":   admin.email,
+            "refund_reference":    refund.reference,
+            "refund_was_created":  was_created,
+        },
+    )
+    db.add(audit_event)
+    db.commit()
+
+    # If we just created the refund row AND the original tx isn't yet
+    # in a refund-related state, walk it through success/failed →
+    # refund_pending → refunded so the user-facing history reads right.
+    # The state machine in TransactionService rejects illegal transitions,
+    # so we gate the call site rather than try/excepting after the fact.
+    if was_created and tx.status in (TransactionStatus.success, TransactionStatus.failed):
+        bill_svc._tx.transition(  # noqa: SLF001
+            tx, to_status=TransactionStatus.refund_pending,
+            reason=f"admin_manual_refund: {body.reason}",
+            context={"actor_admin_user_id": str(admin.id)},
+        )
+        bill_svc._tx.transition(  # noqa: SLF001
+            tx, to_status=TransactionStatus.refunded,
+            reason=f"admin_manual_refund: {body.reason}",
+            context={"actor_admin_user_id": str(admin.id)},
+        )
+
+    return success(
+        {
+            "transaction_reference": tx.reference,
+            "transaction_status":    tx.status.value,
+            "refund_reference":      refund.reference,
+            "refund_amount":         str(refund.amount),
+            "was_created":           was_created,
+        },
+        request_id=getattr(request.state, "request_id", None),
+    )
