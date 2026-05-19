@@ -2,8 +2,26 @@ import uuid
 import enum
 from sqlalchemy import Boolean, Column, Enum, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
+
 from app.db.base import Base
 from app.db.mixins import TimestampMixin
+from app.services.referral_code import generate_referral_code
+
+
+def _default_referral_code() -> str:
+    """ORM-level default for users.referral_code.
+
+    SQLAlchemy invokes this when no code is supplied at construction. We
+    intentionally pass a no-op ``code_exists`` here — the model layer has
+    no DB session of its own, and the column's UNIQUE index is the
+    backstop against the (vanishingly improbable) collision.
+
+    Production user-creation code (Sprint 5b/B2 onward) should still call
+    ``generate_referral_code`` directly with a real DB-backed
+    ``code_exists`` so collisions are caught proactively instead of via a
+    failed INSERT.
+    """
+    return generate_referral_code(code_exists=lambda _candidate: False)
 
 
 class KycLevel(str, enum.Enum):
@@ -33,7 +51,13 @@ class User(TimestampMixin, Base):
     # Sprint 5b: referral system. `referral_code` is the system-generated
     # 6-char invite code (immutable per user). `referred_by_user_id` is
     # nullable — most users sign up cold.
-    referral_code = Column(String(8), nullable=False, unique=True, index=True)
+    referral_code = Column(
+        String(8),
+        nullable=False,
+        unique=True,
+        index=True,
+        default=_default_referral_code,
+    )
     referred_by_user_id = Column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
