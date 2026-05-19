@@ -1,5 +1,13 @@
 name: CD - Staging Gate and Deploy
 
+# Branch strategy (gitflow-lite):
+#   push to develop -> staging only
+#   push to main    -> production only (gated on staging E2E)
+#
+# Deploy strategy: GHCR-pull. CD builds + pushes the image tagged by
+# commit SHA to ghcr.io/<owner>/timpbills-backend; the VPS pulls by SHA.
+# No scp-tarball.
+
 on:
   workflow_run:
     workflows: ["CI"]
@@ -18,6 +26,11 @@ on:
 
 permissions:
   contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   staging-deploy:
@@ -27,13 +40,14 @@ jobs:
       group: timpbills-staging-deploy
       cancel-in-progress: false
     if: >
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging') ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
-       (github.event.workflow_run.head_branch == 'develop' || github.event.workflow_run.head_branch == 'main'))
+       github.event.workflow_run.head_branch == 'develop')
     environment:
       name: staging
     outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
       deployed_at: ${{ steps.meta.outputs.deployed_at }}
 
     steps:
@@ -41,19 +55,36 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - name: Set deploy timestamp
+      - name: Set deploy metadata
         id: meta
-        run: echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+        run: |
+          IMAGE_TAG="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and save API image
-        env:
-          IMAGE_TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
-        run: |
-          docker build -t timpbills-api:$IMAGE_TAG .
-          docker save timpbills-api:$IMAGE_TAG | gzip > api-image.tar.gz
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Decrypt staging .env
         env:
@@ -67,7 +98,7 @@ jobs:
             echo "No .env.staging.enc or key — server .env must already exist at $DEPLOY_PATH/.env"
           fi
 
-      - name: Copy files to staging stack directory
+      - name: Copy stack files to staging VPS dir
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -75,29 +106,40 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          source: "api-image.tar.gz,docker-compose.prod.yml,alembic.ini,alembic/,.env"
+          source: "docker-compose.prod.yml,alembic.ini,alembic/,scripts/backup_cron.sh,.env"
           target: ${{ secrets.DEPLOY_PATH }}
 
-      - name: Deploy API to staging
+      - name: Pull image + deploy staging
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}
           port: ${{ secrets.VPS_PORT || 22 }}
+          envs: IMAGE_TAG
           script: |
             set -euo pipefail
             mkdir -p "${{ secrets.DEPLOY_PATH }}"
             cd "${{ secrets.DEPLOY_PATH }}"
-            docker load < api-image.tar.gz
-            export API_IMAGE="timpbills-api:${{ github.event.workflow_run.head_sha || github.sha }}"
-            docker compose -f docker-compose.prod.yml pull || true
+
+            # GHCR pull requires `docker login ghcr.io` already configured on
+            # the VPS with a PAT scoped to read:packages — see
+            # docs/deployment/GITHUB_ACTIONS_SETUP.md.
+            export API_IMAGE="ghcr.io/${{ github.repository }}:${IMAGE_TAG}"
+            export COMPOSE_PROJECT_NAME=timpbills-staging
+            docker compose -f docker-compose.prod.yml pull
+
+            # Migrations BEFORE swapping the running api. Fail fast.
             docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
-            # Optional seed hook: only runs if scripts/seed_data.py exists in the image.
-            docker compose -f docker-compose.prod.yml run --rm api sh -c '[ -f /app/scripts/seed_data.py ] && python /app/scripts/seed_data.py || echo "No seed script; skipping."'
+            docker compose -f docker-compose.prod.yml run --rm api \
+              sh -c '[ -f /app/scripts/seed_data.py ] && python /app/scripts/seed_data.py || echo "No seed script; skipping."'
+
             docker compose -f docker-compose.prod.yml up -d
-            HEALTH_URL="http://localhost:${{ secrets.API_PORT || 8000 }}/api/v1/health"
+
+            HEALTH_URL="http://localhost:${{ secrets.API_PORT || 8001 }}/api/v1/health"
             for attempt in $(seq 1 12); do
               if curl --fail --silent --show-error "$HEALTH_URL" >/dev/null; then
                 echo "Staging API is healthy."
@@ -113,8 +155,8 @@ jobs:
               sleep 10
             done
             docker compose -f docker-compose.prod.yml ps
-            rm -f api-image.tar.gz
-            # Optional: install daily backup cron if scripts/backup_cron.sh exists.
+            docker image prune -f
+
             if [ -f scripts/backup_cron.sh ]; then
               chmod +x scripts/backup_cron.sh
               (crontab -l 2>/dev/null | grep -v "backup_cron.sh"; echo "0 2 * * * ${{ secrets.DEPLOY_PATH }}/scripts/backup_cron.sh >> ${{ secrets.DEPLOY_PATH }}/backups/backup.log 2>&1") | crontab -
@@ -124,7 +166,7 @@ jobs:
       - name: Capture staging deployment context
         run: |
           echo "Staging API URL: ${{ secrets.APP_URL }}"
-          echo "Deployed backend SHA: ${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "Deployed backend SHA: ${{ steps.meta.outputs.image_tag }}"
 
   staging-api-e2e:
     name: Run staging API E2E
@@ -163,6 +205,7 @@ jobs:
           script: |
             set -euo pipefail
             cd "${{ secrets.DEPLOY_PATH }}"
+            export COMPOSE_PROJECT_NAME=timpbills-staging
             # Flush any http_* rate limit keys Redis might have accumulated.
             docker compose -f docker-compose.prod.yml exec -T redis sh -lc '
               for pattern in http_*; do
@@ -209,14 +252,16 @@ jobs:
   production-deploy:
     name: Deploy production stack
     runs-on: ubuntu-latest
-    needs: [staging-api-e2e]
     concurrency:
       group: timpbills-production-deploy
       cancel-in-progress: false
+    # Production deploys ONLY on main, OR via manual workflow_dispatch
+    # with environment=production. The develop chain does NOT reach prod.
     if: |
-      ((github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production') ||
-       (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success')) &&
-      needs.staging-api-e2e.result == 'success'
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     environment:
       name: production
 
@@ -225,15 +270,36 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
+      - name: Set deploy metadata
+        id: meta
+        run: |
+          IMAGE_TAG="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and save API image
-        env:
-          IMAGE_TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
-        run: |
-          docker build -t timpbills-api:$IMAGE_TAG .
-          docker save timpbills-api:$IMAGE_TAG | gzip > api-image.tar.gz
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image to GHCR (production tags)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:production
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Decrypt production .env
         env:
@@ -247,7 +313,7 @@ jobs:
             echo "No .env.production.enc or key — server .env must already exist at $DEPLOY_PATH/.env"
           fi
 
-      - name: Copy files to production stack directory
+      - name: Copy stack files to production VPS dir
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -255,27 +321,41 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          source: "api-image.tar.gz,docker-compose.prod.yml,alembic.ini,alembic/,.env"
+          source: "docker-compose.prod.yml,alembic.ini,alembic/,scripts/backup_cron.sh,.env"
           target: ${{ secrets.DEPLOY_PATH }}
 
-      - name: Deploy to production
+      - name: Pull image + deploy production
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}
           port: ${{ secrets.VPS_PORT || 22 }}
+          envs: IMAGE_TAG
           script: |
             set -euo pipefail
             mkdir -p "${{ secrets.DEPLOY_PATH }}"
             cd "${{ secrets.DEPLOY_PATH }}"
-            docker load < api-image.tar.gz
-            export API_IMAGE="timpbills-api:${{ github.event.workflow_run.head_sha || github.sha }}"
-            docker compose -f docker-compose.prod.yml pull || true
+
+            # Record previous tag for rollback before swapping.
+            if [ -f .image_tag ]; then
+              cp .image_tag .image_tag.previous
+            fi
+            echo "${IMAGE_TAG}" > .image_tag
+
+            export API_IMAGE="ghcr.io/${{ github.repository }}:${IMAGE_TAG}"
+            export COMPOSE_PROJECT_NAME=timpbills
+            docker compose -f docker-compose.prod.yml pull
+
             docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
-            docker compose -f docker-compose.prod.yml run --rm api sh -c '[ -f /app/scripts/seed_data.py ] && python /app/scripts/seed_data.py || echo "No seed script; skipping."'
+            docker compose -f docker-compose.prod.yml run --rm api \
+              sh -c '[ -f /app/scripts/seed_data.py ] && python /app/scripts/seed_data.py || echo "No seed script; skipping."'
+
             docker compose -f docker-compose.prod.yml up -d
+
             HEALTH_URL="http://localhost:${{ secrets.API_PORT || 8000 }}/api/v1/health"
             for attempt in $(seq 1 12); do
               if curl --fail --silent --show-error "$HEALTH_URL" >/dev/null; then
@@ -293,7 +373,7 @@ jobs:
             done
             docker compose -f docker-compose.prod.yml ps
             docker image prune -f
-            rm -f api-image.tar.gz
+
             if [ -f scripts/backup_cron.sh ]; then
               chmod +x scripts/backup_cron.sh
               (crontab -l 2>/dev/null | grep -v "backup_cron.sh"; echo "0 2 * * * ${{ secrets.DEPLOY_PATH }}/scripts/backup_cron.sh >> ${{ secrets.DEPLOY_PATH }}/backups/backup.log 2>&1") | crontab -
@@ -304,5 +384,5 @@ jobs:
         if: always()
         run: |
           echo "Production deployment ${{ job.status }}"
-          echo "Commit: ${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "Commit: ${{ steps.meta.outputs.image_tag }}"
           echo "Actor: ${{ github.actor }}"
