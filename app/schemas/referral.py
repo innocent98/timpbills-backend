@@ -7,8 +7,6 @@ these payloads.
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
-from typing import Optional
 
 from pydantic import BaseModel
 
@@ -20,7 +18,7 @@ class ReferralActivityItem(BaseModel):
     status: str
     referee_display_name: str
     amount_naira: int
-    credited_at: Optional[datetime] = None
+    credited_at: datetime | None = None
     created_at: datetime
 
 

@@ -22,7 +22,6 @@ Both endpoints:
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
@@ -66,7 +65,7 @@ def _hidden_filter():
 
 
 def _build_activity_item(
-    *, row: Referral, referee: Optional[User], referrer_reward: int,
+    *, row: Referral, referee: User | None, referrer_reward: int,
 ) -> ReferralActivityItem:
     return ReferralActivityItem(
         id=str(row.id),

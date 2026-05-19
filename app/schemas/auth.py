@@ -1,4 +1,5 @@
 import re
+
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 _NIGERIAN_PHONE_RE = re.compile(r"^(\+234|0)[789][01]\d{8}$")

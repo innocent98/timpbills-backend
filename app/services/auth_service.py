@@ -1,5 +1,5 @@
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
@@ -33,7 +33,7 @@ from app.schemas.auth import (
 )
 from app.services.app_setting_service import AppSettingService
 from app.services.referral_code import generate_referral_code
-from app.services.token_store import NullTokenStore, TokenStore
+from app.services.token_store import TokenStore
 
 _ACCESS_EXPIRE = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 _REFRESH_EXPIRE = timedelta(days=30)
@@ -47,11 +47,11 @@ def _ensure_aware_utc(dt: datetime) -> datetime:
     DateTime(timezone=True); Postgres preserves it. This helper lets the same
     comparison code work against both backends.
     """
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _is_expired(expires_at: datetime) -> bool:
-    return datetime.now(timezone.utc) > _ensure_aware_utc(expires_at)
+    return datetime.now(UTC) > _ensure_aware_utc(expires_at)
 
 
 def _short_display_name(full_name: str) -> str:
@@ -140,7 +140,7 @@ class AuthService:
             email=user.email,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.email_verification,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -257,7 +257,7 @@ class AuthService:
             email=user.email,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.email_verification,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -293,7 +293,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.now(timezone.utc)
+        otp.used_at = datetime.now(UTC)
         user.email_verified = True
         self._db.commit()
 
@@ -320,7 +320,7 @@ class AuthService:
             phone=user.phone,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.phone_verification,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -357,7 +357,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.now(timezone.utc)
+        otp.used_at = datetime.now(UTC)
         user.kyc_level = KycLevel.tier_1
         user.is_phone_verified = True
         self._db.commit()
@@ -400,7 +400,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.now(timezone.utc)
+        otp.used_at = datetime.now(UTC)
         user.kyc_level = KycLevel.tier_1
         user.is_phone_verified = True
         self._db.commit()
@@ -491,7 +491,7 @@ class AuthService:
             phone=user.phone,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.password_reset,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -531,7 +531,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.now(timezone.utc)
+        otp.used_at = datetime.now(UTC)
         user.password_hash = hash_password(new_password)
         self._db.commit()
 

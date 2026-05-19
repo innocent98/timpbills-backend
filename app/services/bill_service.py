@@ -26,9 +26,9 @@ Invariants this service owns:
     and stays at processing when VTPass was transient/pending (reconcile
     worker finishes).
 """
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Awaitable, Callable
 from uuid import UUID
 
 # 9mobile is referred to as 'etisalat' on VTPass for historical reasons
@@ -84,7 +84,6 @@ from app.services.notification_service import (
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import InsufficientBalance, WalletService
 from app.utils.references import new_transaction_reference
-
 
 # ── Result payload returned to the endpoint layer ────────────────────────
 
@@ -957,7 +956,7 @@ def _maybe_credit_referral(
             db=db,
             wallet_svc=WalletService(db=db),
             settings_svc=settings_svc,
-            push=_referral_push_adapter,
+            push=_build_push_adapter(db),
         )
         ref_svc.attempt_credit(
             referee_user_id=referee.id,
@@ -974,10 +973,12 @@ def _maybe_credit_referral(
         )
 
 
-def _referral_push_adapter(
-    *, event: str, user_id, context: dict,
-) -> None:
-    """Adapt ReferralService's push callback to dispatch_delay.
+def _build_push_adapter(db: Session):
+    """Build a ReferralService-compatible push adapter bound to the
+    caller's db session. Reuses the request session for the email
+    lookup so tests' dependency_overrides[get_db] take effect —
+    opening a fresh SessionLocal would bypass the override and
+    silently drop the push in test runs.
 
     ReferralService fires three event names (``referral_credited``,
     ``welcome_bonus``, ``referral_cap_blocked``). The first two map to
@@ -985,24 +986,16 @@ def _referral_push_adapter(
     has no NotificationEvent yet (referrer-KYC-cap path) and is logged
     only for now — surfacing it as a push without an upgrade-CTA copy
     would be worse UX than silence."""
+    from app.db.models.user import User as _User  # noqa: PLC0415
     from app.services.notification_service import NotificationEvent  # noqa: PLC0415
     from app.workers.tasks.notification_tasks import dispatch_delay  # noqa: PLC0415
-    from app.db.models.user import User as _User  # noqa: PLC0415
-    from app.db.session import SessionLocal  # noqa: PLC0415
 
-    try:
-        evt = NotificationEvent(event)
-    except ValueError:
-        log.info("referral push: unmapped event %r — skipping", event)
-        return
-
-    # Open a short-lived session JUST to read the user's email. The
-    # ReferralService caller's session has already committed by the
-    # time _fire_push runs (post-commit side effect), so reusing it
-    # is fine — but we keep the lookup off the request session to
-    # avoid clobbering the caller's identity-map invariants.
-    db = SessionLocal()
-    try:
+    def _adapter(*, event: str, user_id, context: dict) -> None:
+        try:
+            evt = NotificationEvent(event)
+        except ValueError:
+            log.info("referral push: unmapped event %r — skipping", event)
+            return
         user = db.query(_User).filter(_User.id == user_id).first()
         if user is None:
             return
@@ -1012,8 +1005,8 @@ def _referral_push_adapter(
             event=evt,
             context=context,
         )
-    finally:
-        db.close()
+
+    return _adapter
 
 
 # ── Placeholder response builders for transient / permanent failure paths
