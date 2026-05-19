@@ -1,0 +1,202 @@
+# docker-compose.prod.yml — Timpbills production / staging stack.
+#
+# Image source: GHCR-pull. CI builds + tags by SHA and pushes to
+# ghcr.io/innocent98/timpbills-backend:<sha>. CD exports API_IMAGE and runs
+# `docker compose pull && docker compose up -d` on the VPS. This file
+# NEVER builds — no `build:` directive anywhere.
+#
+# Per-env switching is via COMPOSE_PROJECT_NAME. Staging and production share
+# a single VPS:
+#   prod:    COMPOSE_PROJECT_NAME=timpbills           API_PORT=8000
+#   staging: COMPOSE_PROJECT_NAME=timpbills-staging   API_PORT=8001
+# Different COMPOSE_PROJECT_NAME = different volume namespace = isolated DBs.
+#
+# Redis policy: `noeviction` (deliberate deviation from PRD §11's `allkeys-lru`).
+# Reason: idempotency sentinels MUST NOT be silently evicted under memory
+# pressure — see docs/DEPLOY_PLAN.md §2.8 (I-01).
+
+services:
+  api:
+    image: ${API_IMAGE:-ghcr.io/innocent98/timpbills-backend:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-timpbills}_api
+    command:
+      - gunicorn
+      - app.main:app
+      - -k
+      - uvicorn.workers.UvicornWorker
+      - -w
+      - "${WEB_CONCURRENCY:-4}"
+      - -b
+      - "0.0.0.0:8000"
+      - --graceful-timeout
+      - "30"
+      - --timeout
+      - "60"
+      - --access-logfile
+      - "-"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: ${API_MEM_LIMIT:-900m}
+    cpus: ${API_CPUS:-1.5}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    image: ${API_IMAGE:-ghcr.io/innocent98/timpbills-backend:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-timpbills}_worker
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app
+      - worker
+      - -l
+      - info
+      - --concurrency=${WORKER_CONCURRENCY:-2}
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: ${WORKER_MEM_LIMIT:-700m}
+    cpus: ${WORKER_CPUS:-1.0}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "celery -A app.workers.celery_app inspect ping -d celery@$$HOSTNAME || exit 1"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  beat:
+    image: ${API_IMAGE:-ghcr.io/innocent98/timpbills-backend:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-timpbills}_beat
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app
+      - beat
+      - -l
+      - info
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: ${BEAT_MEM_LIMIT:-200m}
+    cpus: ${BEAT_CPUS:-0.3}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pgrep -f 'celery.*beat' || exit 1"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  db:
+    image: postgres:15-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-timpbills}_db
+    # No `ports:` — internal-only. Tunnel via SSH for psql access.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-256MB}
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
+      - -c
+      - work_mem=${PG_WORK_MEM:-8MB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1GB}
+    restart: unless-stopped
+    mem_limit: ${DB_MEM_LIMIT:-1200m}
+    cpus: ${DB_CPUS:-1.5}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-timpbills}_redis
+    # No `ports:` — internal-only.
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_MAX_MEMORY:-200mb}
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    mem_limit: ${REDIS_MEM_LIMIT:-256m}
+    cpus: ${REDIS_CPUS:-0.5}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "redis-cli -a $${REDIS_PASSWORD} ping | grep -q PONG"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+  redis_data:
