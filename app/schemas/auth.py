@@ -46,6 +46,12 @@ class RegisterResponse(BaseModel):
     user_id: str
     email: str
     phone: str
+    # Sprint 5b/B4: true when a referral_code was supplied AND attribution
+    # succeeded (a pending `referrals` row was created). False when no code
+    # was supplied OR the code was rejected (invalid, self-referral,
+    # killswitch off, referrer inactive, etc.). Lets mobile surface a
+    # soft-fail SnackBar when a code was sent but silently dropped.
+    referred_by: bool = False
 
 
 class VerifyOtpRequest(BaseModel):

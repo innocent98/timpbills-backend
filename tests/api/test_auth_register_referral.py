@@ -188,6 +188,44 @@ async def test_register_without_code_succeeds_and_creates_unique_referral_code(
 
 
 @pytest.mark.asyncio
+async def test_register_response_referred_by_true_when_attribution_succeeds(db_session):
+    """B4: register response signals attribution success so mobile can
+    skip the soft-fail SnackBar when the code worked."""
+    _seed_settings(db_session)
+    _seed_referrer(db_session, code="WIN888")
+    svc = _make_service(db_session)
+
+    res = await svc.register(_make_req(referral_code="win888"))
+
+    assert res.referred_by is True
+
+
+@pytest.mark.asyncio
+async def test_register_response_referred_by_false_when_code_invalid(db_session):
+    """B4: invalid codes are silently dropped server-side; the response
+    flag lets mobile detect this and surface the soft-fail SnackBar."""
+    _seed_settings(db_session)
+    svc = _make_service(db_session)
+
+    res = await svc.register(_make_req(referral_code="NOPE99"))
+
+    assert res.referred_by is False
+
+
+@pytest.mark.asyncio
+async def test_register_response_referred_by_false_when_no_code_supplied(db_session):
+    """B4: with no code in the request, the response flag is False (mobile
+    distinguishes the no-SnackBar case by checking whether it sent a code
+    in the first place, not by inspecting this flag alone)."""
+    _seed_settings(db_session)
+    svc = _make_service(db_session)
+
+    res = await svc.register(_make_req())
+
+    assert res.referred_by is False
+
+
+@pytest.mark.asyncio
 async def test_register_eager_code_generation_retries_on_collision(db_session):
     """Smoke that the auth_service uses generate_referral_code with a
     DB-backed code_exists callback. We patch the helper to verify the

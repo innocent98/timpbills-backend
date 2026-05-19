@@ -131,8 +131,12 @@ class AuthService:
         self._db.flush()
 
         # Process incoming referral_code (spec §5.2). All failure paths
-        # are silent — the user is registered regardless.
-        self._maybe_attribute_referral(referee=user, raw_code=req.referral_code)
+        # are silent — the user is registered regardless. The bool result
+        # is surfaced in RegisterResponse so mobile can soft-fail-toast
+        # when a code was sent but dropped (B4).
+        referred_by = self._maybe_attribute_referral(
+            referee=user, raw_code=req.referral_code,
+        )
 
         code = f"{secrets.randbelow(1_000_000):06d}"
         otp = OtpCode(
@@ -146,13 +150,18 @@ class AuthService:
         self._db.commit()
 
         await self._email.send_otp(to=user.email, code=code)
-        return RegisterResponse(user_id=str(user.id), email=user.email, phone=user.phone)
+        return RegisterResponse(
+            user_id=str(user.id),
+            email=user.email,
+            phone=user.phone,
+            referred_by=referred_by,
+        )
 
     # ── Referral attribution (Sprint 5b/B3) ──────────────────────────────
 
     def _maybe_attribute_referral(
         self, *, referee: User, raw_code: str | None
-    ) -> None:
+    ) -> bool:
         """Look up a referral code at signup; attribute on success; stay
         silent on failure (spec §5.2 / §6).
 
@@ -165,9 +174,13 @@ class AuthService:
         On success: set ``user.referred_by_user_id`` + INSERT a
         ``referrals`` row in ``pending`` status, and fire a
         ``referrer_signup_notified`` push to the referrer (fire-and-forget
-        via the notification Celery task; failure is swallowed)."""
+        via the notification Celery task; failure is swallowed).
+
+        Returns ``True`` iff a ``referrals`` row was created (B4 — lets
+        the register response signal attribution success/failure to
+        mobile). Returns ``False`` for every silent-drop branch."""
         if not raw_code:
-            return
+            return False
 
         # Killswitch — if referrals are disabled, ignore the field entirely.
         # AppSettingService TTL=0 because each register call is a fresh
@@ -175,14 +188,14 @@ class AuthService:
         try:
             settings_svc = AppSettingService(db=self._db, ttl_seconds=0)
             if not settings_svc.get_bool("REFERRAL_ENABLED", default=True):
-                return
+                return False
         except Exception as exc:  # noqa: BLE001
             log.warning("referral attribution: settings read failed: %s", exc)
-            return
+            return False
 
         code = raw_code.strip().upper()
         if not code:
-            return
+            return False
 
         # Case-insensitive lookup (codes are uppercased on write + on read).
         referrer = (
@@ -191,11 +204,11 @@ class AuthService:
             .first()
         )
         if referrer is None:
-            return
+            return False
         if not referrer.is_active:
-            return
+            return False
         if referrer.id == referee.id:
-            return
+            return False
 
         # Idempotency: a referrals row may already exist (re-register
         # attempts shouldn't happen because the duplicate check above
@@ -206,7 +219,7 @@ class AuthService:
             .first()
         )
         if existing_row is not None:
-            return
+            return False
 
         referee.referred_by_user_id = referrer.id
         row = Referral(
@@ -241,6 +254,8 @@ class AuthService:
                 "referral attribution: push enqueue failed referrer=%s err=%s",
                 referrer.id, exc,
             )
+
+        return True
 
     async def send_email_otp(self, email: str) -> None:
         """Re-send an email OTP for the given address (e.g. resend during countdown)."""
