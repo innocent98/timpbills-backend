@@ -9,6 +9,10 @@ class RegisterRequest(BaseModel):
     phone: str
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+    # Sprint 5b: optional referral code at signup. Invalid / missing
+    # codes are non-fatal — the user is registered regardless. See
+    # spec §5.2 and the auth_service.register flow.
+    referral_code: str | None = Field(default=None, max_length=8)
 
     @field_validator("phone")
     @classmethod
@@ -27,6 +31,14 @@ class RegisterRequest(BaseModel):
         if not re.search(r"\d", v):
             raise ValueError("Password must contain a digit")
         return v
+
+    @field_validator("referral_code")
+    @classmethod
+    def _normalise_referral_code(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip().upper()
+        return v or None
 
 
 class RegisterResponse(BaseModel):
