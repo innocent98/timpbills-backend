@@ -185,6 +185,9 @@ async def test_overview_empty_state_returns_zero_stats_and_no_activity(
         "referrer_reward_naira": 100,
         "referee_reward_naira": 50,
         "min_tx_amount_naira": 1000,
+        "daily_cap": 5,
+        "lifetime_cap_naira": 50000,
+        "clawback_window_days": 7,
     }
 
 
@@ -268,6 +271,9 @@ async def test_overview_killswitch_off_reports_zeroed_config(
         "referrer_reward_naira": 0,
         "referee_reward_naira": 0,
         "min_tx_amount_naira": 0,
+        "daily_cap": 0,
+        "lifetime_cap_naira": 0,
+        "clawback_window_days": 0,
     }
 
 
