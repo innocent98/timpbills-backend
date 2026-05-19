@@ -861,6 +861,13 @@ class BillService:
                 context={"code": result.code},
             )
             _notify_bill_success(db=self._db, tx=tx, amount=amount, result=result)
+            # Sprint 5b: fire the referral credit pipeline for this user's
+            # first qualifying paid tx (≥ REFERRAL_MIN_TX_AMOUNT_NAIRA).
+            # The threshold guard lives at the call site so a sub-threshold
+            # tx is a true no-op — no referrals-table touch, no Settings read
+            # for the cap path. attempt_credit itself is idempotent on the
+            # referee_user_id row (status != pending → early return).
+            _maybe_credit_referral(db=self._db, tx=tx, amount=amount)
             return BillResult(tx=tx, response=result)
 
         if result.status == BillDeliveryStatus.pending:
@@ -900,6 +907,113 @@ class BillService:
         )
         if was_created:
             self._wallet.credit(user_id=tx.user_id, amount=refund.amount)
+
+
+# ── Referral hook (Sprint 5b/B3) ────────────────────────────────────────
+
+
+def _maybe_credit_referral(
+    *, db: Session, tx: Transaction, amount: Decimal,
+) -> None:
+    """Fire the referral credit pipeline if this tx is a qualifying first
+    paid tx for a referee.
+
+    Threshold guard is at the call site (spec §5.3): sub-threshold txs
+    don't even reach attempt_credit, so the referrals table is untouched
+    and the cap-check paths never run. The referee must have a referrer
+    on their user row; if not, this is a cheap user-row read and bail.
+
+    Pushes (referral_credited / welcome_bonus) are routed through the
+    notification Celery task so they go out post-commit, never on the
+    sync request thread. A push failure (or AppSetting outage) never
+    poisons the bill tx — the tx is already final by the time this
+    helper runs.
+
+    Imported lazily inside the function so the bill_service module
+    doesn't pull AppSettingService + ReferralService into the import
+    graph for every callsite (Sprint 3 tests pre-date these modules)."""
+    from app.db.models.user import User as _User  # noqa: PLC0415
+    from app.services.app_setting_service import AppSettingService  # noqa: PLC0415
+    from app.services.referral_service import ReferralService  # noqa: PLC0415
+    from app.services.wallet_service import WalletService  # noqa: PLC0415
+
+    try:
+        # Cheap user-row read — bail before any settings query if the
+        # referee was never attributed.
+        referee = db.query(_User).filter(_User.id == tx.user_id).first()
+        if referee is None or referee.referred_by_user_id is None:
+            return
+
+        settings_svc = AppSettingService(db=db, ttl_seconds=0)
+        # Spec default is 1000; missing → assume the canonical default
+        # rather than raising. ops can override mid-flight without redeploy.
+        min_naira = settings_svc.get_decimal(
+            "REFERRAL_MIN_TX_AMOUNT_NAIRA", default=Decimal("1000"),
+        )
+        if amount < min_naira:
+            return
+
+        ref_svc = ReferralService(
+            db=db,
+            wallet_svc=WalletService(db=db),
+            settings_svc=settings_svc,
+            push=_referral_push_adapter,
+        )
+        ref_svc.attempt_credit(
+            referee_user_id=referee.id,
+            qualifying_tx_id=tx.id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Never let referral plumbing roll back a successful bill tx. The
+        # tx is already committed and the wallet debit / provider success
+        # are durable. Log loud so ops sees it; the sweeper retries
+        # pending rows nightly so transient outages self-heal.
+        log.warning(
+            "referral credit hook failed tx=%s err=%s",
+            tx.reference, exc,
+        )
+
+
+def _referral_push_adapter(
+    *, event: str, user_id, context: dict,
+) -> None:
+    """Adapt ReferralService's push callback to dispatch_delay.
+
+    ReferralService fires three event names (``referral_credited``,
+    ``welcome_bonus``, ``referral_cap_blocked``). The first two map to
+    NotificationEvent members of the same name; ``referral_cap_blocked``
+    has no NotificationEvent yet (referrer-KYC-cap path) and is logged
+    only for now — surfacing it as a push without an upgrade-CTA copy
+    would be worse UX than silence."""
+    from app.services.notification_service import NotificationEvent  # noqa: PLC0415
+    from app.workers.tasks.notification_tasks import dispatch_delay  # noqa: PLC0415
+    from app.db.models.user import User as _User  # noqa: PLC0415
+    from app.db.session import SessionLocal  # noqa: PLC0415
+
+    try:
+        evt = NotificationEvent(event)
+    except ValueError:
+        log.info("referral push: unmapped event %r — skipping", event)
+        return
+
+    # Open a short-lived session JUST to read the user's email. The
+    # ReferralService caller's session has already committed by the
+    # time _fire_push runs (post-commit side effect), so reusing it
+    # is fine — but we keep the lookup off the request session to
+    # avoid clobbering the caller's identity-map invariants.
+    db = SessionLocal()
+    try:
+        user = db.query(_User).filter(_User.id == user_id).first()
+        if user is None:
+            return
+        dispatch_delay(
+            user_id=str(user.id),
+            user_email=user.email,
+            event=evt,
+            context=context,
+        )
+    finally:
+        db.close()
 
 
 # ── Placeholder response builders for transient / permanent failure paths
