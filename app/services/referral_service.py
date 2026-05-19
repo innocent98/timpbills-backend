@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Callable, Optional
 from uuid import UUID
@@ -48,7 +48,6 @@ from app.db.models.referral import Referral, ReferralStatus
 from app.db.models.user import User
 from app.services.app_setting_service import AppSettingService
 from app.services.wallet_service import KycCapExceeded, WalletService
-
 
 # ── Public types ───────────────────────────────────────────────────────
 
