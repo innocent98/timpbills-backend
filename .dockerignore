@@ -1,30 +1,73 @@
+# Build context exclusions for the production Dockerfile.
+# Keep this tight — anything that lands in /app increases image size,
+# CVE surface, and rebuild churn.
+
+# Version control & local tool caches
+.git
+.gitignore
+.github
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.hypothesis
+.tox
+.cache
+
+# Python build / runtime artefacts
 __pycache__
 *.pyc
 *.pyo
 *.pyd
+*.egg-info
 .Python
+build/
+dist/
 env/
 venv/
 .venv
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
+
+# Tests + coverage (NEVER ship to runtime)
+tests/
+htmlcov/
 .coverage
 .coverage.*
-.cache
-nosetests.xml
 coverage.xml
 *.cover
-*.log
-.git
-.mypy_cache
-.pytest_cache
-.hypothesis
+nosetests.xml
+
+# Docs (DEPLOY_PLAN etc. — large markdown not needed at runtime)
+docs/
+*.md
+!alembic/**/*.md
+
+# Secrets & env (defence-in-depth; gitignored already)
 .env
-.env.local
+.env.*
+!.env.example
+.env.key
+*.pem
+*.key
+timpbills-firebase-adminsdk.json
+
+# Local databases / dev artefacts
 *.db
 *.sqlite
+*.sqlite3
+test.db
+
+# Logs
+logs/
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
-.ruff_cache
-htmlcov/
-dist/
+Thumbs.db
+
+# Misc
+pip-log.txt
+pip-delete-this-directory.txt
+Dockerfile.dev
