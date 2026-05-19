@@ -93,10 +93,16 @@ def _config_block(settings_svc: AppSettingService) -> ReferralConfig:
     flag the client has to interpret."""
     enabled = settings_svc.get_bool("REFERRAL_ENABLED", default=True)
     if not enabled:
+        # Killswitch off — every knob reported as 0 so the mobile UI
+        # can render a uniform "paused" empty state without splitting
+        # the reward zeros from the cap values.
         return ReferralConfig(
             referrer_reward_naira=0,
             referee_reward_naira=0,
             min_tx_amount_naira=0,
+            daily_cap=0,
+            lifetime_cap_naira=0,
+            clawback_window_days=0,
         )
     return ReferralConfig(
         referrer_reward_naira=int(
@@ -107,6 +113,13 @@ def _config_block(settings_svc: AppSettingService) -> ReferralConfig:
         ),
         min_tx_amount_naira=int(
             settings_svc.get_decimal("REFERRAL_MIN_TX_AMOUNT_NAIRA", default=Decimal("1000"))
+        ),
+        daily_cap=settings_svc.get_int("REFERRAL_DAILY_CAP", default=5),
+        lifetime_cap_naira=settings_svc.get_int(
+            "REFERRAL_LIFETIME_CAP_NAIRA", default=50000,
+        ),
+        clawback_window_days=settings_svc.get_int(
+            "REFERRAL_CLAWBACK_WINDOW_DAYS", default=7,
         ),
     )
 

@@ -33,6 +33,9 @@ class ReferralConfig(BaseModel):
     referrer_reward_naira: int
     referee_reward_naira: int
     min_tx_amount_naira: int
+    daily_cap: int
+    lifetime_cap_naira: int
+    clawback_window_days: int
 
 
 class ReferralOverviewResponse(BaseModel):
