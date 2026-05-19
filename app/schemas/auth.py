@@ -1,4 +1,5 @@
 import re
+
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 _NIGERIAN_PHONE_RE = re.compile(r"^(\+234|0)[789][01]\d{8}$")
@@ -9,6 +10,10 @@ class RegisterRequest(BaseModel):
     phone: str
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+    # Sprint 5b: optional referral code at signup. Invalid / missing
+    # codes are non-fatal — the user is registered regardless. See
+    # spec §5.2 and the auth_service.register flow.
+    referral_code: str | None = Field(default=None, max_length=8)
 
     @field_validator("phone")
     @classmethod
@@ -28,11 +33,25 @@ class RegisterRequest(BaseModel):
             raise ValueError("Password must contain a digit")
         return v
 
+    @field_validator("referral_code")
+    @classmethod
+    def _normalise_referral_code(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip().upper()
+        return v or None
+
 
 class RegisterResponse(BaseModel):
     user_id: str
     email: str
     phone: str
+    # Sprint 5b/B4: true when a referral_code was supplied AND attribution
+    # succeeded (a pending `referrals` row was created). False when no code
+    # was supplied OR the code was rejected (invalid, self-referral,
+    # killswitch off, referrer inactive, etc.). Lets mobile surface a
+    # soft-fail SnackBar when a code was sent but silently dropped.
+    referred_by: bool = False
 
 
 class VerifyOtpRequest(BaseModel):

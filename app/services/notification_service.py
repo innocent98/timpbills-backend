@@ -60,6 +60,13 @@ class NotificationEvent(str, Enum):
     # Reserved for a future flow (e.g. ops-initiated refunds, reconcile
     # worker refunds where we want a distinct user-visible message).
     refund_complete                 = "refund_complete"
+    # Sprint 5b: referral-system pushes. No email templates today —
+    # these are push-only events sent to the referrer at the milestone
+    # moments (signup with their code, qualifying-tx credit issued).
+    # The referee receives the welcome-bonus push at credit time.
+    referrer_signup_notified        = "referrer_signup_notified"
+    referral_credited               = "referral_credited"
+    welcome_bonus                   = "welcome_bonus"
 
 
 # Maps event → (email_template_name, push_title_template, push_body_key)
@@ -71,6 +78,9 @@ _EMAIL_TEMPLATES: dict[NotificationEvent, str | None] = {
     NotificationEvent.electricity_token_delivered: "electricity_token_delivered",
     NotificationEvent.cable_activated:             "cable_activated",
     NotificationEvent.refund_complete:             None,
+    NotificationEvent.referrer_signup_notified:    None,
+    NotificationEvent.referral_credited:           None,
+    NotificationEvent.welcome_bonus:               None,
 }
 
 
@@ -121,6 +131,24 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
         return _PushCopy(
             title=f"{ctx.get('provider_label', 'Cable')} {mode_label}",
             body=f"{ctx.get('plan_name', '')} on your smartcard. ₦{ctx.get('amount', '')} paid.",
+        )
+    if event is NotificationEvent.referrer_signup_notified:
+        name = ctx.get("referee_display_name") or "Someone"
+        return _PushCopy(
+            title="A friend just joined",
+            body=f"{name} signed up with your referral code.",
+        )
+    if event is NotificationEvent.referral_credited:
+        amount = ctx.get("amount_naira", "")
+        return _PushCopy(
+            title="Referral reward credited",
+            body=f"₦{amount} added to your wallet for a successful referral.",
+        )
+    if event is NotificationEvent.welcome_bonus:
+        amount = ctx.get("amount_naira", "")
+        return _PushCopy(
+            title="Welcome bonus added",
+            body=f"₦{amount} landed in your wallet — enjoy.",
         )
     return None
 

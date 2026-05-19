@@ -1,5 +1,5 @@
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from app.core.security import (
     verify_pin,
 )
 from app.db.models.otp import OtpCode, OtpPurpose
+from app.db.models.referral import Referral, ReferralStatus
 from app.db.models.user import KycLevel, User
 from app.integrations.base import SmsProvider
 from app.integrations.email.base import EmailProvider
@@ -30,7 +31,9 @@ from app.schemas.auth import (
     VerifyOtpRequest,
     VerifyOtpResponse,
 )
-from app.services.token_store import NullTokenStore, TokenStore
+from app.services.app_setting_service import AppSettingService
+from app.services.referral_code import generate_referral_code
+from app.services.token_store import TokenStore
 
 _ACCESS_EXPIRE = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 _REFRESH_EXPIRE = timedelta(days=30)
@@ -44,11 +47,29 @@ def _ensure_aware_utc(dt: datetime) -> datetime:
     DateTime(timezone=True); Postgres preserves it. This helper lets the same
     comparison code work against both backends.
     """
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _is_expired(expires_at: datetime) -> bool:
-    return datetime.now(timezone.utc) > _ensure_aware_utc(expires_at)
+    return datetime.now(UTC) > _ensure_aware_utc(expires_at)
+
+
+def _short_display_name(full_name: str) -> str:
+    """Mask a user's name for visibility in referral feeds + push copy.
+
+    ``"Tobi Adebayo"`` → ``"Tobi A."``  /  ``"Solo"`` → ``"Solo"``.
+    Never exposes email / phone / surname — addresses spec §4.3
+    "Mask referee PII"."""
+    if not full_name:
+        return "Friend"
+    parts = full_name.strip().split()
+    if not parts:
+        return "Friend"
+    first = parts[0]
+    if len(parts) == 1:
+        return first
+    last_initial = parts[-1][:1].upper()
+    return f"{first} {last_initial}."
 
 
 def _issue_token_pair(user_id: str) -> tuple[AuthTokens, str]:
@@ -87,15 +108,35 @@ class AuthService:
         if existing:
             raise ValueError("USER_ALREADY_EXISTS")
 
+        # Eager referral-code generation (spec §5.1 + B1 decision #3):
+        # call the helper with a real DB-backed `code_exists` so collisions
+        # are caught before INSERT rather than via a failed unique-index.
+        # The ORM-level `default=` on the column is kept as a backstop.
+        new_code = generate_referral_code(
+            code_exists=lambda c: self._db.query(User)
+            .filter(User.referral_code == c)
+            .first()
+            is not None,
+        )
+
         user = User(
             phone=req.phone,
             email=req.email,
             full_name=req.full_name,
             password_hash=hash_password(req.password),
             kyc_level=KycLevel.tier_0,
+            referral_code=new_code,
         )
         self._db.add(user)
         self._db.flush()
+
+        # Process incoming referral_code (spec §5.2). All failure paths
+        # are silent — the user is registered regardless. The bool result
+        # is surfaced in RegisterResponse so mobile can soft-fail-toast
+        # when a code was sent but dropped (B4).
+        referred_by = self._maybe_attribute_referral(
+            referee=user, raw_code=req.referral_code,
+        )
 
         code = f"{secrets.randbelow(1_000_000):06d}"
         otp = OtpCode(
@@ -103,13 +144,118 @@ class AuthService:
             email=user.email,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.email_verification,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
 
         await self._email.send_otp(to=user.email, code=code)
-        return RegisterResponse(user_id=str(user.id), email=user.email, phone=user.phone)
+        return RegisterResponse(
+            user_id=str(user.id),
+            email=user.email,
+            phone=user.phone,
+            referred_by=referred_by,
+        )
+
+    # ── Referral attribution (Sprint 5b/B3) ──────────────────────────────
+
+    def _maybe_attribute_referral(
+        self, *, referee: User, raw_code: str | None
+    ) -> bool:
+        """Look up a referral code at signup; attribute on success; stay
+        silent on failure (spec §5.2 / §6).
+
+        Validations (any failure → no row, no error to client):
+          * killswitch (``REFERRAL_ENABLED``) is true
+          * referrer found by case-insensitive code match
+          * referrer is active
+          * referrer is not the signing-up user (covers ``my-own-code``)
+          * no existing ``referrals`` row for this referee yet
+        On success: set ``user.referred_by_user_id`` + INSERT a
+        ``referrals`` row in ``pending`` status, and fire a
+        ``referrer_signup_notified`` push to the referrer (fire-and-forget
+        via the notification Celery task; failure is swallowed).
+
+        Returns ``True`` iff a ``referrals`` row was created (B4 — lets
+        the register response signal attribution success/failure to
+        mobile). Returns ``False`` for every silent-drop branch."""
+        if not raw_code:
+            return False
+
+        # Killswitch — if referrals are disabled, ignore the field entirely.
+        # AppSettingService TTL=0 because each register call is a fresh
+        # request; we want a live read, not a cached one.
+        try:
+            settings_svc = AppSettingService(db=self._db, ttl_seconds=0)
+            if not settings_svc.get_bool("REFERRAL_ENABLED", default=True):
+                return False
+        except Exception as exc:  # noqa: BLE001
+            log.warning("referral attribution: settings read failed: %s", exc)
+            return False
+
+        code = raw_code.strip().upper()
+        if not code:
+            return False
+
+        # Case-insensitive lookup (codes are uppercased on write + on read).
+        referrer = (
+            self._db.query(User)
+            .filter(User.referral_code == code)
+            .first()
+        )
+        if referrer is None:
+            return False
+        if not referrer.is_active:
+            return False
+        if referrer.id == referee.id:
+            return False
+
+        # Idempotency: a referrals row may already exist (re-register
+        # attempts shouldn't happen because the duplicate check above
+        # bails, but be defensive).
+        existing_row = (
+            self._db.query(Referral)
+            .filter(Referral.referee_user_id == referee.id)
+            .first()
+        )
+        if existing_row is not None:
+            return False
+
+        referee.referred_by_user_id = referrer.id
+        row = Referral(
+            referrer_user_id=referrer.id,
+            referee_user_id=referee.id,
+            code_used=code,
+            status=ReferralStatus.pending,
+        )
+        self._db.add(row)
+        self._db.flush()
+
+        # Fire-and-forget push to the referrer. We deliberately don't
+        # block the register response on push delivery. If dispatch_delay
+        # is unavailable (test harness without Celery loaded — shouldn't
+        # happen but be defensive), swallow.
+        try:
+            from app.services.notification_service import NotificationEvent
+            from app.workers.tasks.notification_tasks import dispatch_delay
+
+            referee_display = _short_display_name(referee.full_name)
+            dispatch_delay(
+                user_id=str(referrer.id),
+                user_email=referrer.email,
+                event=NotificationEvent.referrer_signup_notified,
+                context={
+                    "referee_display_name": referee_display,
+                    "reference": str(row.id),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "referral attribution: push enqueue failed referrer=%s err=%s",
+                referrer.id, exc,
+            )
+
+        return True
 
     async def send_email_otp(self, email: str) -> None:
         """Re-send an email OTP for the given address (e.g. resend during countdown)."""
@@ -126,7 +272,7 @@ class AuthService:
             email=user.email,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.email_verification,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -162,7 +308,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.now(timezone.utc)
+        otp.used_at = datetime.now(UTC)
         user.email_verified = True
         self._db.commit()
 
@@ -189,7 +335,7 @@ class AuthService:
             phone=user.phone,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.phone_verification,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -226,7 +372,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.now(timezone.utc)
+        otp.used_at = datetime.now(UTC)
         user.kyc_level = KycLevel.tier_1
         user.is_phone_verified = True
         self._db.commit()
@@ -269,7 +415,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.now(timezone.utc)
+        otp.used_at = datetime.now(UTC)
         user.kyc_level = KycLevel.tier_1
         user.is_phone_verified = True
         self._db.commit()
@@ -360,7 +506,7 @@ class AuthService:
             phone=user.phone,
             code_hash=hash_pin(code),
             purpose=OtpPurpose.password_reset,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
         self._db.add(otp)
         self._db.commit()
@@ -400,7 +546,7 @@ class AuthService:
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
-        otp.used_at = datetime.now(timezone.utc)
+        otp.used_at = datetime.now(UTC)
         user.password_hash = hash_password(new_password)
         self._db.commit()
 
