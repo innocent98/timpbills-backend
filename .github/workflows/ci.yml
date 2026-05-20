@@ -135,6 +135,18 @@ jobs:
           # Force-fake all third-party providers in CI so tests never hit
           # real Termii / Resend / Paystack / VTPass / FCM endpoints.
           FORCE_FAKE_PROVIDERS: "true"
+          # Placeholder values for factory tests that monkeypatch
+          # FORCE_FAKE_PROVIDERS=False and then construct the real client.
+          # The real client constructors only check that these are non-empty;
+          # they never actually call the upstream APIs in tests.
+          PAYSTACK_SECRET_KEY: "sk_test_ci_placeholder_not_used"
+          PAYSTACK_PUBLIC_KEY: "pk_test_ci_placeholder_not_used"
+          VTPASS_API_KEY: "vtpass_api_ci_placeholder"
+          VTPASS_PUBLIC_KEY: "vtpass_pub_ci_placeholder"
+          VTPASS_SECRET_KEY: "vtpass_sec_ci_placeholder"
+          # Marker used by env-conditional skips for tests that can't run
+          # under GitHub Actions threading characteristics.
+          CI: "true"
         run: poetry run pytest --cov=app --cov-report=xml --cov-report=html
 
       - name: Upload coverage
