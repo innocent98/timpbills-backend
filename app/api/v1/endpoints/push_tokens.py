@@ -16,7 +16,6 @@ from app.schemas.push_tokens import PushTokenRequest, PushTokenResponse
 from app.services.push_tokens_service import PushTokensService
 from app.utils.responses import success
 
-
 router = APIRouter(prefix="/users/me/push-tokens", tags=["push-tokens"])
 
 

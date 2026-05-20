@@ -1,25 +1,23 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
+
 from app.api.deps import get_auth_service, get_current_user, get_pin_service
+from app.core.limiter import limiter
 from app.db.models.user import User
-from app.schemas.pin import VerifyPinRequest, VerifyPinResponse
-from app.services.pin_service import InvalidPin, PinLocked, PinNotSet, PinService
 from app.schemas.auth import (
-    EmailVerifiedResponse,
+    ForgotPasswordRequest,
+    LoginRequest,
+    RefreshRequest,
     RegisterRequest,
-    RegisterResponse,
+    ResetPasswordRequest,
     SendEmailOtpRequest,
+    SetPinRequest,
     VerifyEmailOtpRequest,
     VerifyPhoneOtpRequest,
-    LoginRequest,
-    LoginResponse,
-    RefreshRequest,
-    SetPinRequest,
-    ForgotPasswordRequest,
-    ResetPasswordRequest,
 )
+from app.schemas.pin import VerifyPinRequest, VerifyPinResponse
 from app.services.auth_service import AuthService
+from app.services.pin_service import InvalidPin, PinLocked, PinNotSet, PinService
 from app.utils.responses import success
-from app.core.limiter import limiter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

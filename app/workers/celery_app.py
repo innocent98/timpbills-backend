@@ -5,7 +5,6 @@ from celery.schedules import crontab
 from app.core.config import settings
 from app.core.sentry_setup import setup_sentry
 
-
 # Worker process needs its own Sentry init; web + worker run as separate
 # processes so they don't share the SDK state.
 setup_sentry()
@@ -18,6 +17,7 @@ celery_app = Celery(
     include=[
         "app.workers.tasks.reconcile_tasks",
         "app.workers.tasks.notification_tasks",
+        "app.workers.tasks.referral_tasks",
     ],
 )
 
@@ -44,5 +44,13 @@ celery_app.conf.beat_schedule = {
     "reconcile-pending-bills-every-2min": {
         "task": "app.workers.tasks.reconcile_tasks.reconcile_pending_bills",
         "schedule": crontab(minute="*/2"),
+    },
+    # Sprint 5b — nightly referral sweep: re-evaluates pending /
+    # referee_cap_pending / clawback_pending rows. Cadence is daily
+    # because each bucket is naturally a "tomorrow" problem (daily-cap
+    # reset, KYC upgrade, refund-window settle).
+    "sweep-referrals-nightly": {
+        "task": "app.workers.tasks.referral_tasks.sweep_referrals",
+        "schedule": crontab(hour=2, minute=15),  # 02:15 UTC
     },
 }

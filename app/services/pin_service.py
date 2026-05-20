@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.core.security import create_access_token, verify_pin
 from app.db.models.user import User
 
-
 PIN_TOKEN_TTL = timedelta(minutes=5)
 MAX_ATTEMPTS = 5
 LOCKOUT_TTL_SECONDS = 30 * 60

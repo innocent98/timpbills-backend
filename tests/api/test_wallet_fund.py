@@ -13,7 +13,6 @@ from app.api.deps import (
     reset_fake_sms,
     reset_fake_email,
     reset_fake_paystack,
-    _fake_paystack_singleton,
 )
 from app.integrations.email.fake import FakeEmailClient
 from app.core.limiter import limiter

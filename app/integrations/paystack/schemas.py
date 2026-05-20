@@ -1,5 +1,4 @@
 from decimal import Decimal
-from typing import Optional
 
 from pydantic import BaseModel
 
@@ -11,9 +10,9 @@ class InitResponse(BaseModel):
 
 
 class PaystackAuthorization(BaseModel):
-    channel: Optional[str] = None       # 'card' | 'bank_transfer' | 'ussd' | ...
-    last4: Optional[str] = None
-    bank: Optional[str] = None
+    channel: str | None = None       # 'card' | 'bank_transfer' | 'ussd' | ...
+    last4: str | None = None
+    bank: str | None = None
 
 
 class VerifyResponse(BaseModel):
@@ -21,4 +20,4 @@ class VerifyResponse(BaseModel):
     status: str  # "success" | "failed" | "abandoned"
     amount: Decimal  # Naira
     paid_at: str | None = None
-    authorization: Optional[PaystackAuthorization] = None
+    authorization: PaystackAuthorization | None = None

@@ -15,7 +15,6 @@ from typing import Any, Literal
 
 from redis.asyncio import Redis
 
-
 TTL_SECONDS = 24 * 60 * 60
 IN_FLIGHT_TTL_SECONDS = 60
 

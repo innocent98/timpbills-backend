@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from app.db.models.user import KycLevel, User
 from app.db.models.wallet import Wallet
 
-
 # Naira caps per KYC tier, from PRD §13.
 _KYC_CAPS: dict[KycLevel, Decimal] = {
     KycLevel.tier_0: Decimal("50000.00"),

@@ -32,7 +32,6 @@ from app.integrations.vtpass.schemas import (
     SmartcardValidation,
 )
 
-
 _Outcome = Literal["success", "failed", "pending", "partial"]
 
 

@@ -2,7 +2,7 @@
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import Column, Enum, ForeignKey, Index, JSON, Numeric, String
+from sqlalchemy import JSON, Column, Enum, ForeignKey, Index, Numeric, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.db.base import Base

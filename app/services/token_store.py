@@ -10,6 +10,7 @@ Operations:
     revoke_all(user_id)     — called on password reset (logout all devices)
 """
 from typing import Protocol
+
 from redis.asyncio import Redis
 
 

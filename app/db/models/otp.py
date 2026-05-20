@@ -1,8 +1,9 @@
-import uuid
 import enum
-from datetime import datetime, timezone
+import uuid
+
 from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
+
 from app.db.base import Base
 from app.db.mixins import TimestampMixin
 

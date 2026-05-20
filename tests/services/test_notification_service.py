@@ -7,7 +7,6 @@ contract (a push outage must not break the email send, and vice versa).
 import asyncio
 from decimal import Decimal
 
-import pytest
 
 from app.integrations.email.fake import FakeEmailClient
 from app.integrations.email.renderer import render_email
@@ -299,7 +298,7 @@ def test_dispatch_is_sequential_not_gather_or_create_task():
 
 
 from dataclasses import dataclass as _dc
-from uuid import UUID as _UUID, uuid4 as _uuid4
+from uuid import uuid4 as _uuid4
 
 from app.integrations.push.fcm import DeadFCMToken
 

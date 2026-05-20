@@ -2,7 +2,6 @@
 import uuid
 from decimal import Decimal
 
-import pytest
 
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.transaction import Transaction

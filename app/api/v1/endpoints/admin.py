@@ -26,7 +26,6 @@ from app.db.models.user import User
 from app.services.bill_service import BillService
 from app.utils.responses import success
 
-
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 

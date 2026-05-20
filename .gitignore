@@ -45,6 +45,11 @@ coverage.xml
 .env
 .env.local
 .env.docker
+.env.staging
+.env.production
+.env.key
+.env.SECRETS_TO_STORE.txt
+# Encrypted env files (.env.<env>.enc) ARE checked in — see ENV_ENCRYPTION.md.
 .venv
 env/
 venv/

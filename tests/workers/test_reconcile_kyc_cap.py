@@ -16,6 +16,7 @@ from app.db.models.transaction import Transaction
 from app.db.models.user import User
 from app.db.models.wallet import Wallet
 from app.integrations.paystack.schemas import PaystackAuthorization, VerifyResponse
+from datetime import UTC
 
 
 def _seed_user_wallet_tx(db, balance: Decimal, amount: Decimal) -> Payment:
@@ -87,8 +88,8 @@ def test_reconcile_defers_kyc_cap_and_keeps_batch_going(db_session, monkeypatch)
     )
 
     # Make it eligible for the 30s-old sweep.
-    from datetime import datetime, timedelta, timezone
-    payment.created_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    from datetime import datetime, timedelta
+    payment.created_at = datetime.now(UTC) - timedelta(minutes=5)
     db_session.commit()
 
     from app.workers.tasks import reconcile_tasks as rt

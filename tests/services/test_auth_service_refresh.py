@@ -1,7 +1,7 @@
 import pytest
 
 from app.services.auth_service import AuthService
-from app.schemas.auth import RegisterRequest, LoginRequest, VerifyEmailOtpRequest
+from app.schemas.auth import RegisterRequest, VerifyEmailOtpRequest
 from app.integrations.termii.fake import FakeTermiiClient
 from app.integrations.email.fake import FakeEmailClient
 from app.services.token_store import NullTokenStore

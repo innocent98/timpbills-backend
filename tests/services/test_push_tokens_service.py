@@ -1,5 +1,5 @@
 """Tests for PushTokensService (B15)."""
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from uuid import uuid4
 
 from app.db.models.push_token import PushToken
@@ -36,7 +36,7 @@ def test_upsert_existing_token_same_user_updates_last_seen(db_session):
         platform="android",
     )
     # Backdate last_seen_at so we can detect the bump.
-    first.last_seen_at = datetime.now(timezone.utc) - timedelta(days=1)
+    first.last_seen_at = datetime.now(UTC) - timedelta(days=1)
     db_session.commit()
     old_seen = first.last_seen_at
 
@@ -99,7 +99,7 @@ def test_list_for_user_orders_by_last_seen_desc(db_session):
 
     # Override last_seen_at so ordering is deterministic regardless of
     # sub-millisecond insert timing on fast hardware.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     older.last_seen_at = now - timedelta(hours=2)
     middle.last_seen_at = now - timedelta(hours=1)
     newer.last_seen_at = now
@@ -179,7 +179,7 @@ def test_upsert_survives_concurrent_insert_race(db_session, monkeypatch):
         user_id=user_a,
         fcm_token="race-token",
         platform="android",
-        last_seen_at=datetime.now(timezone.utc),
+        last_seen_at=datetime.now(UTC),
     )
     db_session.add(winner)
     db_session.commit()
@@ -271,7 +271,7 @@ def test_upsert_retries_when_row_vanishes_between_insert_race_and_update(
         user_id=other_user,
         fcm_token="race-and-vanish-token",
         platform="android",
-        last_seen_at=datetime.now(timezone.utc),
+        last_seen_at=datetime.now(UTC),
     )
     db_session.add(seed)
     db_session.commit()

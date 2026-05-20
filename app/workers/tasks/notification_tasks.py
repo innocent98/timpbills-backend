@@ -20,7 +20,8 @@ either (a) double-query for no gain in production or (b) miss
 transactional visibility under eager mode in tests."""
 import asyncio
 import threading
-from typing import Any, Awaitable
+from collections.abc import Awaitable
+from typing import Any
 
 from app.core.logger import log
 from app.integrations.email.base import EmailProvider
@@ -146,7 +147,7 @@ def _resolve_clients() -> tuple[EmailProvider, BasePushClient]:
 
     Imports are inside the function so importing this module at Celery
     boot doesn't drag provider SDKs into the worker until a task runs."""
-    from app.api.deps import _fake_email_singleton, _fake_push_singleton  # noqa: PLC0415
+    from app.api.deps import _fake_email_singleton  # noqa: PLC0415
     from app.core.config import settings
     from app.integrations.email.resend import ResendClient
     from app.integrations.push.factory import select_push_client

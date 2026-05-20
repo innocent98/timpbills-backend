@@ -7,7 +7,6 @@ the other returns False and skips its credit/transition.
 """
 import uuid
 
-import pytest
 
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction

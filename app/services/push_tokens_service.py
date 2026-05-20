@@ -8,7 +8,7 @@ re-used across users (logout + new login), the token row is reassigned to
 the new user rather than duplicated, so push targeting never sends to a
 stale owner.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
@@ -48,7 +48,7 @@ class PushTokensService:
         the UPDATE path. Portable across Postgres (prod) and SQLite
         (tests) without depending on dialect-specific ``ON CONFLICT``.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Fast path: row already exists — reassign / touch last_seen_at.
         existing = (

@@ -5,7 +5,6 @@ from uuid import uuid4
 import pytest
 
 from app.db.models.user import KycLevel, User
-from app.db.models.wallet import Wallet
 from app.services.wallet_service import (
     KycCapExceeded,
     InsufficientBalance,

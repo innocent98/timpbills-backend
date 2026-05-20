@@ -2,22 +2,22 @@ from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
 from jose import JWTError
 from redis.asyncio import Redis
+from sqlalchemy.orm import Session
 
-from app.db.session import SessionLocal
-from app.services.auth_service import AuthService
-from app.services.token_store import RedisTokenStore, TokenStore
-from app.integrations.base import SmsProvider
-from app.integrations.email.base import EmailProvider
-from app.integrations.termii.fake import FakeTermiiClient
-from app.integrations.termii.client import TermiiClient
-from app.integrations.email.fake import FakeEmailClient
-from app.integrations.email.resend import ResendClient
 from app.core.config import settings
 from app.core.security import decode_token
 from app.db.models.user import User
+from app.db.session import SessionLocal
+from app.integrations.base import SmsProvider
+from app.integrations.email.base import EmailProvider
+from app.integrations.email.fake import FakeEmailClient
+from app.integrations.email.resend import ResendClient
+from app.integrations.termii.client import TermiiClient
+from app.integrations.termii.fake import FakeTermiiClient
+from app.services.auth_service import AuthService
+from app.services.token_store import RedisTokenStore, TokenStore
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
@@ -30,6 +30,7 @@ _fake_email_singleton = FakeEmailClient()
 # Singleton fake push client — tests inspect .sent; real FCM HTTP v1 is
 # a Sprint 4 follow-up (see app/integrations/push/factory.py).
 from app.integrations.push.factory import get_fake_singleton as _push_fake_singleton
+
 _fake_push_singleton = _push_fake_singleton()
 
 # Redis client singleton
@@ -215,8 +216,8 @@ def require_pin_token(
 
 
 # --- Added by B6 (Paystack provider) ---
-from app.integrations.paystack.base import PaymentProvider
 from app.integrations.paystack import factory as _paystack_factory
+from app.integrations.paystack.base import PaymentProvider
 
 
 def get_paystack_provider() -> PaymentProvider:
@@ -248,8 +249,8 @@ def get_transaction_service(db: Session = Depends(get_db)) -> TransactionService
 
 
 # --- Sprint 3 · B4+B6: VTPass provider + BillService ---
-from app.integrations.vtpass.base import BillProvider
 from app.integrations.vtpass import factory as _vtpass_factory
+from app.integrations.vtpass.base import BillProvider
 from app.services.bill_service import BillService
 
 

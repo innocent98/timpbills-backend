@@ -17,11 +17,10 @@ BillService.apply_provider_result. This test suite covers:
  • batch-freshness gate — bills newer than 30s are not picked up
 """
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from decimal import Decimal
 from unittest.mock import patch
 
-import pytest
 
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
@@ -101,7 +100,7 @@ def _seed_bill(
 
     # Back-date the tx so it passes the 30s cutoff.
     db.query(Transaction).filter(Transaction.id == tx.id).update(
-        {"created_at": datetime.now(timezone.utc) - timedelta(seconds=age_seconds)}
+        {"created_at": datetime.now(UTC) - timedelta(seconds=age_seconds)}
     )
     db.commit()
     db.refresh(tx)

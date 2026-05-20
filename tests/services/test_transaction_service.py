@@ -5,7 +5,6 @@ from uuid import uuid4
 import pytest
 
 from app.db.models._enums import TransactionStatus, TransactionType
-from app.db.models.transaction import Transaction
 from app.services.transaction_service import (
     InvalidStateTransition,
     TransactionService,
