@@ -78,6 +78,14 @@ COPY --chown=appuser:appuser ./app /app/app
 COPY --chown=appuser:appuser ./alembic /app/alembic
 COPY --chown=appuser:appuser ./alembic.ini /app/alembic.ini
 
+# Pre-create writable runtime dirs owned by appuser. /app itself is
+# root-owned (from the base image), so the non-root appuser can't create
+# subdirs at runtime — loguru's FileSink would crash on first write to
+# /app/logs/app.log. /app/secrets/ is the volume mount target for the
+# Firebase admin SDK JSON (see docker-compose.prod.yml).
+RUN mkdir -p /app/logs /app/secrets \
+ && chown -R appuser:appuser /app/logs /app/secrets
+
 USER appuser
 
 EXPOSE 8000

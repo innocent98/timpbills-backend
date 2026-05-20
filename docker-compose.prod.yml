@@ -27,6 +27,12 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     env_file: .env
+    volumes:
+      # Mount the Firebase admin SDK JSON from the host's deploy dir into
+      # the container at /app/secrets/. FCM_CREDENTIALS_PATH in .env must
+      # point at /app/secrets/timpbills-firebase-adminsdk.json (the
+      # in-container path), not the host path.
+      - ./timpbills-firebase-adminsdk.json:/app/secrets/timpbills-firebase-adminsdk.json:ro
     depends_on:
       db:
         condition: service_healthy
@@ -63,6 +69,8 @@ services:
       - info
       - --concurrency=${WORKER_CONCURRENCY:-2}
     env_file: .env
+    volumes:
+      - ./timpbills-firebase-adminsdk.json:/app/secrets/timpbills-firebase-adminsdk.json:ro
     depends_on:
       db:
         condition: service_healthy
@@ -96,6 +104,8 @@ services:
       - -l
       - info
     env_file: .env
+    volumes:
+      - ./timpbills-firebase-adminsdk.json:/app/secrets/timpbills-firebase-adminsdk.json:ro
     depends_on:
       db:
         condition: service_healthy
@@ -173,9 +183,13 @@ services:
     mem_limit: ${REDIS_MEM_LIMIT:-256m}
     cpus: ${REDIS_CPUS:-0.5}
     healthcheck:
+      # Compose interpolates ${REDIS_PASSWORD} from .env at parse time and
+      # bakes it into the command, so the healthcheck doesn't depend on the
+      # variable existing inside the container's env (redis:alpine doesn't
+      # auto-export it the way postgres:alpine does for POSTGRES_*).
       test:
         - CMD-SHELL
-        - "redis-cli -a $${REDIS_PASSWORD} ping | grep -q PONG"
+        - "redis-cli -a ${REDIS_PASSWORD} ping | grep -q PONG"
       interval: 10s
       timeout: 3s
       retries: 5
