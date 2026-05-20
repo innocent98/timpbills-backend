@@ -32,7 +32,7 @@ from app.integrations.vtpass.signature import (
     WebhookSecretNotConfigured,
     verify_vtpass_secret,
 )
-from app.services.bill_service import BillService, REFUNDABLE_ON_FAILURE
+from app.services.bill_service import REFUNDABLE_ON_FAILURE, BillService
 from app.services.notification_service import (
     NotificationEvent,
     build_wallet_funded_context,
@@ -41,7 +41,6 @@ from app.services.transaction_service import InvalidStateTransition, Transaction
 from app.services.wallet_service import KycCapExceeded, WalletService
 from app.utils.responses import success
 from app.workers.tasks.notification_tasks import dispatch_delay
-
 
 # Lifted to app.services.bill_service (S3C-M10) — imported above.
 # Local alias to keep the existing call sites tidy without a big rename.

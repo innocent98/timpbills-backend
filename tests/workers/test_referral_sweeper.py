@@ -12,11 +12,10 @@ Sprint 5b B2. Three buckets:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from decimal import Decimal
 from uuid import uuid4
 
-import pytest
 
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.app_setting import AppSetting
@@ -77,7 +76,7 @@ def _seed_tx(db, user: User, *, status=TransactionStatus.success) -> Transaction
 
 def _backdate_referral(db, referral: Referral, days: int) -> None:
     """Push created_at into the past so the sweeper considers the row."""
-    old = datetime.now(timezone.utc) - timedelta(days=days)
+    old = datetime.now(UTC) - timedelta(days=days)
     referral.created_at = old
     if referral.credited_at is not None:
         referral.credited_at = old
@@ -97,7 +96,7 @@ def test_sweeper_re_credits_pending_row_when_conditions_now_allow(db_session):
         referee_user_id=referee_a.id,
         code_used=referrer.referral_code,
         status=ReferralStatus.credited,
-        credited_at=datetime.now(timezone.utc) - timedelta(days=2),  # yesterday
+        credited_at=datetime.now(UTC) - timedelta(days=2),  # yesterday
         qualifying_tx_id=_seed_tx(db_session, referee_a).id,
     )
     db_session.add(referral_a)
@@ -201,7 +200,7 @@ def test_sweeper_credits_referee_cap_pending_after_kyc_upgrade(db_session):
         referee_user_id=referee.id,
         code_used=referrer.referral_code,
         status=ReferralStatus.referee_cap_pending,
-        attributed_at=datetime.now(timezone.utc) - timedelta(days=1),
+        attributed_at=datetime.now(UTC) - timedelta(days=1),
         qualifying_tx_id=tx.id,
     )
     db_session.add(referral)
@@ -231,7 +230,7 @@ def test_sweeper_leaves_referee_cap_pending_when_still_capped(db_session):
         referee_user_id=referee.id,
         code_used=referrer.referral_code,
         status=ReferralStatus.referee_cap_pending,
-        attributed_at=datetime.now(timezone.utc) - timedelta(days=1),
+        attributed_at=datetime.now(UTC) - timedelta(days=1),
         qualifying_tx_id=tx.id,
     )
     db_session.add(referral)
@@ -263,8 +262,8 @@ def test_sweeper_commits_clawback_after_7d_when_tx_still_refunded(db_session):
         referee_user_id=referee.id,
         code_used=referrer.referral_code,
         status=ReferralStatus.clawback_pending,
-        attributed_at=datetime.now(timezone.utc) - timedelta(days=8),
-        credited_at=datetime.now(timezone.utc) - timedelta(days=8),
+        attributed_at=datetime.now(UTC) - timedelta(days=8),
+        credited_at=datetime.now(UTC) - timedelta(days=8),
         qualifying_tx_id=tx.id,
     )
     db_session.add(referral)
@@ -300,8 +299,8 @@ def test_sweeper_reverts_clawback_pending_when_tx_no_longer_refunded(db_session)
         referee_user_id=referee.id,
         code_used=referrer.referral_code,
         status=ReferralStatus.clawback_pending,
-        attributed_at=datetime.now(timezone.utc) - timedelta(days=8),
-        credited_at=datetime.now(timezone.utc) - timedelta(days=8),
+        attributed_at=datetime.now(UTC) - timedelta(days=8),
+        credited_at=datetime.now(UTC) - timedelta(days=8),
         qualifying_tx_id=tx.id,
     )
     db_session.add(referral)
@@ -329,8 +328,8 @@ def test_sweeper_ignores_clawback_pending_inside_window(db_session):
         referee_user_id=referee.id,
         code_used=referrer.referral_code,
         status=ReferralStatus.clawback_pending,
-        attributed_at=datetime.now(timezone.utc) - timedelta(days=2),
-        credited_at=datetime.now(timezone.utc) - timedelta(days=2),
+        attributed_at=datetime.now(UTC) - timedelta(days=2),
+        credited_at=datetime.now(UTC) - timedelta(days=2),
         qualifying_tx_id=tx.id,
     )
     db_session.add(referral)

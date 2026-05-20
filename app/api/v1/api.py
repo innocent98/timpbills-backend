@@ -1,5 +1,16 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import admin, auth, bills, health, push_tokens, referrals, transactions, wallet, webhooks
+
+from app.api.v1.endpoints import (
+    admin,
+    auth,
+    bills,
+    health,
+    push_tokens,
+    referrals,
+    transactions,
+    wallet,
+    webhooks,
+)
 
 api_router = APIRouter()
 

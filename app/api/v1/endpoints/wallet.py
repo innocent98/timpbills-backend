@@ -23,7 +23,6 @@ from app.services.transaction_service import TransactionService
 from app.services.wallet_service import WalletService
 from app.utils.responses import success
 
-
 router = APIRouter(prefix="/wallet", tags=["wallet"])
 
 

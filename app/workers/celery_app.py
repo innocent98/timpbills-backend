@@ -5,7 +5,6 @@ from celery.schedules import crontab
 from app.core.config import settings
 from app.core.sentry_setup import setup_sentry
 
-
 # Worker process needs its own Sentry init; web + worker run as separate
 # processes so they don't share the SDK state.
 setup_sentry()

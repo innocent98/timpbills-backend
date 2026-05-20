@@ -1,7 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
 from jose import jwt
 from passlib.context import CryptContext
+
 from app.core.config import settings
 
 _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -27,8 +29,8 @@ def verify_pin(pin: str, hashed: str) -> bool:
 def create_access_token(*, subject: str, extra: dict[str, Any] | None = None, expires_in: timedelta = timedelta(minutes=20)) -> str:
     to_encode: dict[str, Any] = {
         "sub": subject,
-        "iat": datetime.now(tz=timezone.utc),
-        "exp": datetime.now(tz=timezone.utc) + expires_in,
+        "iat": datetime.now(tz=UTC),
+        "exp": datetime.now(tz=UTC) + expires_in,
     }
     if extra:
         to_encode.update(extra)
@@ -40,8 +42,8 @@ def create_refresh_token(*, subject: str, jti: str, expires_in: timedelta = time
         "sub": subject,
         "jti": jti,
         "typ": "refresh",
-        "iat": datetime.now(tz=timezone.utc),
-        "exp": datetime.now(tz=timezone.utc) + expires_in,
+        "iat": datetime.now(tz=UTC),
+        "exp": datetime.now(tz=UTC) + expires_in,
     }
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm="HS256")
 

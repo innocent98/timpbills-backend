@@ -42,7 +42,6 @@ from app.integrations.vtpass.schemas import (
     SmartcardValidation,
 )
 
-
 # VTPass response code buckets. Source:
 # https://vtpass.com/documentation/response-codes/
 #

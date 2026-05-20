@@ -46,14 +46,12 @@ import asyncio
 import datetime as _dt
 import json
 import threading
-from datetime import timezone
 from typing import Any
 
 import httpx
 
 from app.core.config import settings
 from app.core.logger import log
-
 
 # FCM HTTP v1 endpoint template. Project ID is substituted at send-time.
 _FCM_SEND_URL = (
@@ -279,7 +277,7 @@ class FCMPushClient:
         # the comparison — tz-aware vs tz-naive would raise TypeError.
         # If a future google-auth version makes `expiry` tz-aware, this
         # .replace() should be dropped.
-        now = _dt.datetime.now(timezone.utc).replace(tzinfo=None)
+        now = _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
         if expiry <= now + _dt.timedelta(seconds=_TOKEN_REFRESH_BUFFER_SECONDS):
             return True
         return False

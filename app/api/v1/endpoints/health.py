@@ -1,5 +1,6 @@
+from datetime import UTC, datetime
+
 from fastapi import APIRouter
-from datetime import datetime, timezone
 
 router = APIRouter()
 
@@ -8,5 +9,5 @@ router = APIRouter()
 def health_check():
     return {
         "status": "ok",
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "timestamp": datetime.now(UTC).isoformat()
     }

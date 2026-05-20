@@ -12,12 +12,12 @@ KycCapExceeded / InsufficientBalance, log-and-continue on transient
 provider errors, refund on permanent failure via apply_provider_result).
 """
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
 from app.core.logger import log
-from app.db.models._enums import TransactionStatus, TransactionType
+from app.db.models._enums import TransactionStatus
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
 from app.db.session import SessionLocal
@@ -27,7 +27,7 @@ from app.integrations.vtpass.base import (
     ProviderTemporaryFailure,
 )
 from app.integrations.vtpass.factory import select_vtpass_client
-from app.services.bill_service import BillService, REFUNDABLE_ON_FAILURE
+from app.services.bill_service import REFUNDABLE_ON_FAILURE, BillService
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import (
     InsufficientBalance,
@@ -35,7 +35,6 @@ from app.services.wallet_service import (
     WalletService,
 )
 from app.workers.celery_app import celery_app
-
 
 # Tx states that are already final — the webhook handler beat us to it,
 # or ops manually resolved. Skip them rather than InvalidStateTransition.
@@ -62,7 +61,7 @@ def reconcile_pending_payments() -> dict:
 async def _reconcile() -> dict:
     db = SessionLocal()
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=30)
+        cutoff = datetime.now(UTC) - timedelta(seconds=30)
         pending = (
             db.query(Payment, Transaction)
             .join(Transaction, Transaction.id == Payment.transaction_id)
@@ -87,7 +86,7 @@ async def _reconcile() -> dict:
         for payment, tx in pending:
             try:
                 v = await client.verify(reference=payment.provider_reference)
-            except (httpx.HTTPError, TimeoutError, asyncio.TimeoutError) as exc:
+            except (httpx.HTTPError, TimeoutError) as exc:
                 # Transient network issues — retry on the next tick.
                 # (S3C-H2) Previously this was bare `except Exception`,
                 # which swallowed programming errors (AttributeError
@@ -193,7 +192,7 @@ def reconcile_pending_bills() -> dict:
 async def _reconcile_bills() -> dict:
     db = SessionLocal()
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=30)
+        cutoff = datetime.now(UTC) - timedelta(seconds=30)
         pending_bills = (
             db.query(Transaction)
             .filter(

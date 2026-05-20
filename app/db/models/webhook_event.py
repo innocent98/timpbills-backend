@@ -1,7 +1,7 @@
 """Webhook events — raw body + dedupe on provider event id."""
 import uuid
 
-from sqlalchemy import Boolean, Column, JSON, String
+from sqlalchemy import JSON, Boolean, Column, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.db.base import Base

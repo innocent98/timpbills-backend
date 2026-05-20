@@ -1,6 +1,5 @@
 """Tests for phone OTP verification (on-demand Tier 1 upgrade)."""
 import pytest
-from datetime import datetime, timedelta
 from uuid import uuid4
 
 from app.services.auth_service import AuthService

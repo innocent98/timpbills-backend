@@ -5,7 +5,6 @@ credit attempt; the service caches them with a short TTL so the hot path
 doesn't hammer the DB. These tests pin both the type-casting contract and
 the cache behaviour.
 """
-import time
 from decimal import Decimal
 
 import pytest

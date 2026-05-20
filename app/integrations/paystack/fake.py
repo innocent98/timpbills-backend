@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from app.integrations.paystack.schemas import InitResponse, VerifyResponse, PaystackAuthorization
+from app.integrations.paystack.schemas import InitResponse, PaystackAuthorization, VerifyResponse
 
 
 @dataclass

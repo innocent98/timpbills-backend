@@ -21,6 +21,7 @@ from app.services.token_store import RedisTokenStore
 
 import tests.e2e.test_auth_full_flows as _e2e_mod
 from tests.e2e.test_auth_full_flows import _seed_logged_in_user
+from datetime import UTC
 
 _test_email_client = FakeEmailClient()
 
@@ -121,7 +122,7 @@ async def test_get_unknown_transaction_returns_404(client):
 
 async def _seed_mixed_transactions(client, headers, db_session):
     """Insert a mix of tx types so filter tests have something to filter."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from decimal import Decimal
     from uuid import uuid4 as _uuid
     from app.db.models.transaction import Transaction
@@ -130,7 +131,7 @@ async def _seed_mixed_transactions(client, headers, db_session):
 
     user_row = db_session.query(User).filter(User.email == "e@e.co").one()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = [
         (TransactionType.wallet_funding, TransactionStatus.success, now - timedelta(days=1)),
         (TransactionType.airtime,        TransactionStatus.success, now - timedelta(days=5)),
@@ -190,12 +191,12 @@ async def test_filter_by_status(client, db_session):
 
 @pytest.mark.asyncio
 async def test_filter_by_date_range(client, db_session):
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     _, headers = await _seed_logged_in_user(client)
     await _seed_mixed_transactions(client, headers, db_session)
 
     # Last week only — keeps the wallet_funding (day 1) and airtime (day 5).
-    date_from = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    date_from = (datetime.now(UTC) - timedelta(days=7)).isoformat()
     r = await client.get(
         "/api/v1/transactions",
         headers=headers,

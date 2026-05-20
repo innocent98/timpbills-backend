@@ -4,7 +4,6 @@ normalize to a clean domain type so downstream (BillService,
 tests, workers) doesn't have to know about their quirks."""
 from decimal import Decimal
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -74,7 +73,7 @@ class DataPlanVariation(BaseModel):
     variation_code: str      # "mtn-10mb-100" etc. — opaque id VTPass expects back
     name: str                # "100MB - Daily"
     price_ngn: Decimal
-    validity: Optional[str] = None   # e.g. "1 day" (not always present in response)
+    validity: str | None = None   # e.g. "1 day" (not always present in response)
 
 
 class DataPlanList(BaseModel):
@@ -134,7 +133,7 @@ class CablePlanVariation(BaseModel):
     variation_code: str      # "dstv-compact" etc. — opaque id VTPass expects back
     name: str                # "DStv Compact"
     price_ngn: Decimal = Field(ge=0)
-    validity: Optional[str] = None   # e.g. "1 month"
+    validity: str | None = None   # e.g. "1 month"
 
 
 class CablePlanList(BaseModel):
