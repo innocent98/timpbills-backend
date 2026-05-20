@@ -1,19 +1,9 @@
 # docker-compose.prod.yml — Timpbills production / staging stack.
 #
-# Image source: GHCR-pull. CI builds + tags by SHA and pushes to
-# ghcr.io/innocent98/timpbills-backend:<sha>. CD exports API_IMAGE and runs
-# `docker compose pull && docker compose up -d` on the VPS. This file
-# NEVER builds — no `build:` directive anywhere.
-#
-# Per-env switching is via COMPOSE_PROJECT_NAME. Staging and production share
-# a single VPS:
-#   prod:    COMPOSE_PROJECT_NAME=timpbills           API_PORT=8000
-#   staging: COMPOSE_PROJECT_NAME=timpbills-staging   API_PORT=8001
-# Different COMPOSE_PROJECT_NAME = different volume namespace = isolated DBs.
-#
-# Redis policy: `noeviction` (deliberate deviation from PRD §11's `allkeys-lru`).
-# Reason: idempotency sentinels MUST NOT be silently evicted under memory
-# pressure — see docs/DEPLOY_PLAN.md §2.8 (I-01).
+# Image: GHCR-pull only (never `build:`). CI pushes to
+# ghcr.io/innocent98/timpbills-backend:<sha>; CD runs `docker compose pull`.
+# Per-env switching via COMPOSE_PROJECT_NAME + API_PORT (set in env file).
+# Redis policy: noeviction (idempotency sentinels must not be evicted).
 
 services:
   api:
@@ -130,7 +120,6 @@ services:
   db:
     image: postgres:15-alpine
     container_name: ${COMPOSE_PROJECT_NAME:-timpbills}_db
-    # No `ports:` — internal-only. Tunnel via SSH for psql access.
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -168,7 +157,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ${COMPOSE_PROJECT_NAME:-timpbills}_redis
-    # No `ports:` — internal-only.
     command:
       - redis-server
       - --maxmemory
