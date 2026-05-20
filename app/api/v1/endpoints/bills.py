@@ -5,12 +5,10 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
 
 from app.api.deps import (
     get_bill_service,
     get_current_user,
-    get_db,
     get_idempotency_service,
     get_wallet_service,
     require_idempotency_key,
@@ -57,7 +55,6 @@ from app.services.bill_service import (
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
 from app.services.wallet_service import InsufficientBalance, WalletService
 from app.utils.responses import success
-
 
 router = APIRouter(prefix="/bills", tags=["bills"])
 

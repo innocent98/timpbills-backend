@@ -8,7 +8,6 @@ from app.integrations.vtpass.base import BillProvider
 from app.integrations.vtpass.client import VTPassClient
 from app.integrations.vtpass.fake import FakeVTPassClient
 
-
 _fake_singleton: FakeVTPassClient = FakeVTPassClient()
 
 

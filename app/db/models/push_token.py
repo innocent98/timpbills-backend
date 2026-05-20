@@ -7,7 +7,7 @@ row is removed outright when FCM reports the token as dead (unregistered,
 invalid-registration) via ``delete_by_fcm_token``.
 """
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import Column, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
@@ -31,5 +31,5 @@ class PushToken(Base, TimestampMixin):
     last_seen_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
     )

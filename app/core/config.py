@@ -1,8 +1,8 @@
 import json
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from pydantic import AnyHttpUrl, field_validator, EmailStr
+from pydantic import EmailStr, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -26,14 +26,14 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
 
     # CORS
-    BACKEND_CORS_ORIGINS: List[str] = [
+    BACKEND_CORS_ORIGINS: list[str] = [
         "http://localhost:3000",
         "http://localhost:8000",
     ]
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
-    def assemble_cors_origins(cls, v: str | List[str]) -> List[str] | str:
+    def assemble_cors_origins(cls, v: str | list[str]) -> list[str] | str:
         if isinstance(v, str) and not v.startswith("["):
             return [i.strip() for i in v.split(",")]
         elif isinstance(v, (list, str)):
@@ -51,22 +51,22 @@ class Settings(BaseSettings):
     # Email (optional)
     SMTP_TLS: bool = True
     SMTP_PORT: int = 587
-    SMTP_HOST: Optional[str] = None
-    SMTP_USER: Optional[str] = None
-    SMTP_PASSWORD: Optional[str] = None
-    EMAILS_FROM_EMAIL: Optional[EmailStr] = None
-    EMAILS_FROM_NAME: Optional[str] = None
+    SMTP_HOST: str | None = None
+    SMTP_USER: str | None = None
+    SMTP_PASSWORD: str | None = None
+    EMAILS_FROM_EMAIL: EmailStr | None = None
+    EMAILS_FROM_NAME: str | None = None
 
     # Termii SMS
-    TERMII_API_KEY: Optional[str] = None
-    TERMII_SENDER_ID: Optional[str] = "Timpbills"
+    TERMII_API_KEY: str | None = None
+    TERMII_SENDER_ID: str | None = "Timpbills"
     TERMII_BASE_URL: str = "https://api.ng.termii.com/api"
 
     # Paystack
-    PAYSTACK_SECRET_KEY: Optional[str] = None
-    PAYSTACK_PUBLIC_KEY: Optional[str] = None
+    PAYSTACK_SECRET_KEY: str | None = None
+    PAYSTACK_PUBLIC_KEY: str | None = None
     PAYSTACK_BASE_URL: str = "https://api.paystack.co"
-    PAYSTACK_WEBHOOK_URL: Optional[str] = None
+    PAYSTACK_WEBHOOK_URL: str | None = None
     # URL Paystack redirects the user's browser to after a successful payment.
     # Doesn't need to resolve — the in-app WebView intercepts the URL change
     # and navigates to the FundingStatusPage. If None, Paystack falls back to
@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     PAYSTACK_CARD_FEE_CAP_NAIRA: int = 2000
 
     # Resend Email
-    RESEND_API_KEY: Optional[str] = None
+    RESEND_API_KEY: str | None = None
     EMAIL_FROM_ADDRESS: str = "noreply@timpbills.com"
     EMAIL_FROM_NAME: str = "Timpbills"
 
@@ -94,9 +94,9 @@ class Settings(BaseSettings):
     # The three keys are obtained from the VTPass dashboard; the webhook
     # secret is a shared secret we choose and configure on both sides
     # (VTPass does not HMAC-sign webhook bodies).
-    VTPASS_API_KEY: Optional[str] = None
-    VTPASS_PUBLIC_KEY: Optional[str] = None
-    VTPASS_SECRET_KEY: Optional[str] = None
+    VTPASS_API_KEY: str | None = None
+    VTPASS_PUBLIC_KEY: str | None = None
+    VTPASS_SECRET_KEY: str | None = None
     # VTPass docs (verified 2026-04-24):
     #   sandbox → https://sandbox.vtpass.com  (POST /api/pay, /api/requery)
     #   live    → https://vtpass.com
@@ -105,19 +105,19 @@ class Settings(BaseSettings):
     # in `processing` with no operator signal. Override this per-env in
     # .env if you need staging to point elsewhere.
     VTPASS_BASE_URL: str = "https://sandbox.vtpass.com"
-    VTPASS_WEBHOOK_SECRET: Optional[str] = None
+    VTPASS_WEBHOOK_SECRET: str | None = None
 
     # ── Firebase Cloud Messaging (push notifications) ────────────────────
     # Either FCM_CREDENTIALS_PATH (service-account JSON file) OR
     # FCM_CREDENTIALS_JSON (inline base64/raw JSON) — one of them. When
     # both are unset the FakePushClient is used (tests + dev).
-    FCM_CREDENTIALS_PATH: Optional[str] = None
-    FCM_CREDENTIALS_JSON: Optional[str] = None
+    FCM_CREDENTIALS_PATH: str | None = None
+    FCM_CREDENTIALS_JSON: str | None = None
     FCM_PROJECT_ID: str = "timpbills"
 
     @field_validator("FCM_CREDENTIALS_JSON", mode="before")
     @classmethod
-    def validate_fcm_credentials_json(cls, v: Any) -> Optional[str]:
+    def validate_fcm_credentials_json(cls, v: Any) -> str | None:
         """Sprint 4 B25: fail fast on malformed FCM_CREDENTIALS_JSON.
 
         The FCM client lazy-loads `json.loads(self._credentials_json)`
@@ -166,11 +166,11 @@ class Settings(BaseSettings):
     # Per-DisCo overrides as a JSON dict parsed from env, e.g.
     #   ELECTRICITY_DISCO_CAPS='{"jos-electric": 50000}'
     # Values are in naira. Empty dict means "no overrides".
-    ELECTRICITY_DISCO_CAPS: Dict[str, Decimal] = {}
+    ELECTRICITY_DISCO_CAPS: dict[str, Decimal] = {}
 
     @field_validator("ELECTRICITY_DISCO_CAPS", mode="before")
     @classmethod
-    def parse_electricity_disco_caps(cls, v: Any) -> Dict[str, Decimal]:
+    def parse_electricity_disco_caps(cls, v: Any) -> dict[str, Decimal]:
         if v is None or v == "":
             return {}
         if isinstance(v, dict):
@@ -186,8 +186,8 @@ class Settings(BaseSettings):
         raise ValueError(f"ELECTRICITY_DISCO_CAPS must be a JSON object, got {type(v).__name__}")
 
     # Observability — Sentry (optional; no-op when DSN unset)
-    SENTRY_DSN: Optional[str] = None
-    SENTRY_ENVIRONMENT: Optional[str] = None  # defaults to ENVIRONMENT if unset
+    SENTRY_DSN: str | None = None
+    SENTRY_ENVIRONMENT: str | None = None  # defaults to ENVIRONMENT if unset
     SENTRY_TRACES_SAMPLE_RATE: float = 0.05
     SENTRY_PROFILES_SAMPLE_RATE: float = 0.0
 

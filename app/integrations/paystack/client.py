@@ -6,7 +6,7 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
-from app.integrations.paystack.schemas import InitResponse, VerifyResponse, PaystackAuthorization
+from app.integrations.paystack.schemas import InitResponse, PaystackAuthorization, VerifyResponse
 from app.integrations.paystack.signature import verify_paystack_signature
 
 

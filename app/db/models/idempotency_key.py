@@ -1,7 +1,7 @@
 """Idempotency keys — dedupes money-endpoint POSTs per user."""
 import uuid
 
-from sqlalchemy import Column, Integer, JSON, String
+from sqlalchemy import JSON, Column, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.db.base import Base

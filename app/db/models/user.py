@@ -1,5 +1,6 @@
-import uuid
 import enum
+import uuid
+
 from sqlalchemy import Boolean, Column, Enum, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 

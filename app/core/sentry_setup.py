@@ -17,7 +17,6 @@ from typing import Any
 
 from app.core.config import settings
 
-
 # Field names (case-insensitive substrings) that must never reach Sentry.
 # Matches both top-level keys and nested values inside request/response
 # payloads, as well as header names.
@@ -77,8 +76,8 @@ def setup_sentry() -> None:
     # crash on boot. (sentry-sdk IS in pyproject; this just keeps import
     # order tidy and makes the tests-without-DSN path fast.)
     import sentry_sdk
-    from sentry_sdk.integrations.fastapi import FastApiIntegration
     from sentry_sdk.integrations.celery import CeleryIntegration
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
     from sentry_sdk.integrations.starlette import StarletteIntegration
 
     sentry_sdk.init(

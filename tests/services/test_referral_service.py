@@ -25,7 +25,6 @@ from app.db.models.user import KycLevel, User
 from app.services.app_setting_service import AppSettingService
 from app.services.referral_service import (
     ReferralCreditOutcome,
-    ReferralCreditResult,
     ReferralService,
 )
 from app.services.wallet_service import WalletService

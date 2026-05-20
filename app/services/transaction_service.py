@@ -1,7 +1,6 @@
 """Transaction service — creates transactions, enforces state transitions,
 and writes an audit row for every transition."""
 from decimal import Decimal
-from typing import Iterable
 from uuid import UUID
 
 from sqlalchemy.orm import Session

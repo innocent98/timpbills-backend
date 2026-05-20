@@ -18,8 +18,6 @@ from app.api.deps import (
     get_token_store,
     get_email_provider,
     get_sms_provider,
-    _fake_sms_singleton,
-    _fake_email_singleton,
     reset_fake_sms,
     reset_fake_email,
 )

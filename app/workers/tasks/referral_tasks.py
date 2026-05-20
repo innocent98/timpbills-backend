@@ -22,7 +22,7 @@ durable.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -98,7 +98,7 @@ def _sweep_pending(
     """Re-run attempt_credit on pending rows that already have a qualifying
     tx attached and are at least _PENDING_MIN_AGE_DAYS old. A row without
     a qualifying_tx_id never met the threshold gate — no retry possible."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=_PENDING_MIN_AGE_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=_PENDING_MIN_AGE_DAYS)
     rows = (
         db.query(Referral)
         .filter(
@@ -178,7 +178,7 @@ def _sweep_referee_cap_pending(
             # bail rather than overwrite a more recent transition.
             continue
         locked.status = ReferralStatus.credited
-        locked.credited_at = datetime.now(timezone.utc)
+        locked.credited_at = datetime.now(UTC)
         db.commit()
         report["referee_retry_credited"] += 1
 
@@ -197,7 +197,7 @@ def _sweep_clawback_pending(
     to clawed_back. Otherwise the refund was reversed → restore to
     credited."""
     window_days = settings_svc.get_int("REFERRAL_CLAWBACK_WINDOW_DAYS", default=7)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+    cutoff = datetime.now(UTC) - timedelta(days=window_days)
     rows = (
         db.query(Referral)
         .filter(
@@ -270,6 +270,6 @@ def _sweep_clawback_pending(
         if locked is None or locked.status is not ReferralStatus.clawback_pending:
             continue
         locked.status = ReferralStatus.clawed_back
-        locked.clawed_back_at = datetime.now(timezone.utc)
+        locked.clawed_back_at = datetime.now(UTC)
         db.commit()
         report["clawed_back"] += 1

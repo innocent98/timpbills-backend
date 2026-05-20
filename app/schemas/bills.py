@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
 # Canonical NG network identifiers. Accepted both upper and lower cased;
 # BillService normalizes via `.lower()` for VTPass service IDs.
 Network = Literal[

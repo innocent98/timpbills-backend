@@ -35,10 +35,10 @@ out of scope for B2. Flagged in SPRINT_5B_B2_STATUS.md.
 from __future__ import annotations
 
 import enum
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Callable, Optional
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -78,7 +78,7 @@ class ReferralCreditResult:
     """Lightweight return value from ``attempt_credit``. ``referral_id``
     is None only for ``noop_no_referral``."""
     outcome: ReferralCreditOutcome
-    referral_id: Optional[UUID] = None
+    referral_id: UUID | None = None
 
 
 # ── Push side-effect contract ──────────────────────────────────────────
@@ -207,7 +207,7 @@ class ReferralService:
         # ── 5. All clear — transition + credit. ──────────────────────
         referrer_reward = self._settings.get_decimal("REFERRAL_REWARD_REFERRER_NAIRA")
         referee_reward = self._settings.get_decimal("REFERRAL_REWARD_REFEREE_NAIRA")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         row.status = ReferralStatus.attributed
         row.attributed_at = now
@@ -290,7 +290,7 @@ class ReferralService:
             return
         row.status = status
         if status is ReferralStatus.clawed_back:
-            row.clawed_back_at = datetime.now(timezone.utc)
+            row.clawed_back_at = datetime.now(UTC)
         self._db.commit()
 
     def void(self, *, referral_id: UUID, reason: str) -> None:
@@ -351,7 +351,7 @@ class ReferralService:
         cap = self._settings.get_int("REFERRAL_DAILY_CAP")
         if cap <= 0:
             return True
-        start_of_day = datetime.now(timezone.utc).replace(
+        start_of_day = datetime.now(UTC).replace(
             hour=0, minute=0, second=0, microsecond=0,
         )
         credited_today = (

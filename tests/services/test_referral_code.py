@@ -4,9 +4,7 @@ The helper is intentionally db-free — callers pass in a `code_exists`
 callable so we can exercise collision-retry behaviour without spinning up
 a session.
 """
-import re
 
-import pytest
 
 from app.services.referral_code import (
     _AMBIGUOUS_PATTERN,

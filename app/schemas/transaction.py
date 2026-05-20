@@ -1,6 +1,5 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
 
 from pydantic import BaseModel
 
@@ -23,9 +22,9 @@ class TransactionListResponse(BaseModel):
 
 class TransactionEventView(BaseModel):
     at: datetime
-    from_status: Optional[str] = None
+    from_status: str | None = None
     to_status: str
-    reason: Optional[str] = None
+    reason: str | None = None
     context: dict = {}
 
 

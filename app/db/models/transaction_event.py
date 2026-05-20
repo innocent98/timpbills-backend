@@ -1,7 +1,7 @@
 """Audit trail — one row per state transition on a Transaction."""
 import uuid
 
-from sqlalchemy import Column, Enum, ForeignKey, JSON, String
+from sqlalchemy import JSON, Column, Enum, ForeignKey, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.db.base import Base

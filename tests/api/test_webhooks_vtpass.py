@@ -14,7 +14,6 @@ shared-secret header. These tests cover:
 """
 import json
 from decimal import Decimal
-from uuid import uuid4
 
 import pytest
 import pytest_asyncio

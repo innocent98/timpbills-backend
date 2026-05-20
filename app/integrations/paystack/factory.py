@@ -9,7 +9,6 @@ from app.integrations.paystack.base import PaymentProvider
 from app.integrations.paystack.client import PaystackClient
 from app.integrations.paystack.fake import FakePaystackClient
 
-
 _fake_singleton: FakePaystackClient = FakePaystackClient()
 
 
