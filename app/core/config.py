@@ -185,6 +185,15 @@ class Settings(BaseSettings):
             return {k: Decimal(str(val)) for k, val in parsed.items()}
         raise ValueError(f"ELECTRICITY_DISCO_CAPS must be a JSON object, got {type(v).__name__}")
 
+    # ── Cloudinary (avatar uploads — Sprint 5c · Task 3.1) ───────────────
+    # All three required for live uploads; if any is missing the
+    # AvatarService skips configuration and any upload attempt raises
+    # AvatarUploadError up to the route, which returns 502. Tests patch
+    # cloudinary.uploader.upload directly so real creds are never needed.
+    CLOUDINARY_CLOUD_NAME: str | None = None
+    CLOUDINARY_API_KEY: str | None = None
+    CLOUDINARY_API_SECRET: str | None = None
+
     # Observability — Sentry (optional; no-op when DSN unset)
     SENTRY_DSN: str | None = None
     SENTRY_ENVIRONMENT: str | None = None  # defaults to ENVIRONMENT if unset
