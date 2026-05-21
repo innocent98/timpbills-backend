@@ -1,12 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status as http_status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_auth_service, get_current_user, get_db, get_pin_service
+from app.api.deps import (
+    get_auth_service,
+    get_current_token_claims,
+    get_current_user,
+    get_db,
+    get_pin_service,
+    get_token_revocation_service,
+    get_token_store,
+)
 from app.core.limiter import limiter
+from app.core.security import decode_token
 from app.db.models.user import User
 from app.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
+    LogoutRequest,
     RefreshRequest,
     RegisterRequest,
     ResetPasswordRequest,
@@ -15,6 +25,8 @@ from app.schemas.auth import (
     VerifyEmailOtpRequest,
     VerifyPhoneOtpRequest,
 )
+from app.services.token_revocation_service import TokenRevocationService
+from app.services.token_store import TokenStore
 from app.schemas.pin import VerifyPinRequest, VerifyPinResponse
 from app.schemas.user_update import GenderEnum, UserResponse, UserUpdateRequest
 from app.services.auth_service import AuthService
@@ -185,6 +197,50 @@ async def refresh(
     except ValueError as e:
         _raise(str(e))
     return success(res.model_dump(), request_id=getattr(request.state, "request_id", None))
+
+
+@router.post("/logout", status_code=http_status.HTTP_204_NO_CONTENT)
+async def logout(
+    request: Request,
+    body: LogoutRequest | None = Body(default=None),
+    claims: dict = Depends(get_current_token_claims),
+    revocation_svc: TokenRevocationService = Depends(get_token_revocation_service),
+    token_store: TokenStore = Depends(get_token_store),
+):
+    """Revoke the current access token (and optionally the refresh token).
+
+    Idempotent: calling logout twice with the same bearer succeeds —
+    the second call writes the same blocklist entry with the same TTL
+    floor. The route returns 204 either way.
+
+    The access token's jti is added to the JWT blocklist
+    (``revoked:jwt:{jti}``) for the remainder of its lifetime. If the
+    body carries a refresh token, its rotation entry is also dropped
+    from ``RedisTokenStore`` — the next /refresh attempt with that
+    token surfaces as the existing replay-detection branch and nukes
+    every session for the user.
+    """
+    jti = claims.get("jti")
+    exp = int(claims.get("exp", 0))
+    if jti and exp:
+        await revocation_svc.revoke(jti=jti, exp_unix_seconds=exp)
+
+    if body and body.refresh_token:
+        try:
+            refresh_payload = decode_token(body.refresh_token)
+        except Exception:  # noqa: BLE001 — silently ignore bad refresh tokens
+            refresh_payload = None
+        if (
+            refresh_payload
+            and refresh_payload.get("typ") == "refresh"
+            and refresh_payload.get("jti")
+            and refresh_payload.get("sub") == claims.get("sub")
+        ):
+            await token_store.revoke(
+                user_id=refresh_payload["sub"],
+                jti=refresh_payload["jti"],
+            )
+    return None
 
 
 @router.post("/pin/set")

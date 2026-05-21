@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from jose import jwt
 from passlib.context import CryptContext
@@ -27,8 +28,18 @@ def verify_pin(pin: str, hashed: str) -> bool:
 
 
 def create_access_token(*, subject: str, extra: dict[str, Any] | None = None, expires_in: timedelta = timedelta(minutes=20)) -> str:
+    """Issue an access token with a unique ``jti`` claim.
+
+    The ``jti`` is what the Sprint 5c logout blocklist keys off
+    (see ``TokenRevocationService``). Every access token gets a fresh
+    UUID — pin tokens included, since they also flow through
+    ``create_access_token``. ``extra`` may override ``jti`` for callers
+    that want to control it (none in tree today, but the door stays
+    open for tests that need a deterministic value).
+    """
     to_encode: dict[str, Any] = {
         "sub": subject,
+        "jti": uuid4().hex,
         "iat": datetime.now(tz=UTC),
         "exp": datetime.now(tz=UTC) + expires_in,
     }

@@ -4,6 +4,7 @@ from httpx import AsyncClient, ASGITransport
 from app.main import app
 from app.api.deps import (
     get_db,
+    get_redis,
     get_token_store,
     get_email_provider,
     _fake_sms_singleton,
@@ -34,11 +35,15 @@ async def client(db_session):
     def _get_token_store():
         return RedisTokenStore(redis=fake_redis)
 
+    def _get_redis():
+        return fake_redis
+
     def _get_email():
         return _test_email_client
 
     app.dependency_overrides[get_db] = _get_db
     app.dependency_overrides[get_token_store] = _get_token_store
+    app.dependency_overrides[get_redis] = _get_redis
     app.dependency_overrides[get_email_provider] = _get_email
     reset_fake_sms()
     reset_fake_email()

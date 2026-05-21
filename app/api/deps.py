@@ -95,10 +95,22 @@ def get_auth_service(
     return AuthService(db=db, sms=sms, email=email, token_store=token_store)
 
 
-def get_current_user(
+async def get_current_token_claims(
     token: str | None = Depends(oauth2_scheme),
-    db: Session = Depends(get_db),
-) -> User:
+    redis: Redis = Depends(get_redis),
+) -> dict:
+    """Decode the bearer token + enforce the JWT-jti blocklist.
+
+    Shared between ``get_current_user`` (the per-request auth gate) and
+    ``/auth/logout`` (which needs the raw claims to know which jti to
+    revoke). Centralising here means the blocklist check happens in
+    exactly one place — adding more revocation hooks later (e.g.
+    password reset → revoke all access tokens) only touches one site.
+
+    Refresh-typed tokens are rejected: refresh tokens have a separate
+    lifecycle and must hit ``/auth/refresh`` rather than any
+    bearer-protected endpoint.
+    """
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -116,6 +128,24 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "INVALID_TOKEN", "message": "Refresh token cannot be used as access token"},
         )
+    jti = payload.get("jti")
+    if jti:
+        # Lazy import — avoids circular import in test bootstrap.
+        from app.services.token_revocation_service import TokenRevocationService
+
+        svc = TokenRevocationService(redis=redis)
+        if await svc.is_revoked(jti):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "TOKEN_REVOKED", "message": "Token has been revoked"},
+            )
+    return payload
+
+
+async def get_current_user(
+    payload: dict = Depends(get_current_token_claims),
+    db: Session = Depends(get_db),
+) -> User:
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(
@@ -293,3 +323,13 @@ def get_avatar_service() -> AvatarService:
         api_key=settings.CLOUDINARY_API_KEY,
         api_secret=settings.CLOUDINARY_API_SECRET,
     )
+
+
+# --- Sprint 5c · Task 3.3: TokenRevocationService ---
+from app.services.token_revocation_service import TokenRevocationService
+
+
+def get_token_revocation_service(
+    redis: Redis = Depends(get_redis),
+) -> TokenRevocationService:
+    return TokenRevocationService(redis=redis)

@@ -115,6 +115,18 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LogoutRequest(BaseModel):
+    """Optional body for /auth/logout (Sprint 5c · Task 3.3).
+
+    The access token's jti is always revoked via the JWT blocklist.
+    When ``refresh_token`` is supplied, its rotation entry is also
+    deleted from the existing ``RedisTokenStore`` so the device's
+    session can't refresh itself back to life.
+    """
+
+    refresh_token: str | None = None
+
+
 class SetPinRequest(BaseModel):
     pin: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$")
 
