@@ -530,6 +530,32 @@ class AuthService:
         user.pin_hash = hash_pin(pin)
         self._db.commit()
 
+    async def change_pin(self, user_id: UUID, old_pin: str, new_pin: str) -> None:
+        """Rotate an existing PIN. Requires the current PIN to verify.
+
+        Raises:
+          PIN_NOT_SET  — user has no PIN yet; they should hit /auth/pin/set instead.
+          INVALID_PIN  — the supplied old_pin does not match the stored hash.
+          USER_NOT_FOUND — user row missing (defensive; shouldn't happen
+                           when called from an authenticated endpoint).
+
+        Unlike /auth/password/change, a PIN change does NOT revoke
+        access/refresh tokens: the PIN is a step-up factor on money
+        operations, not the session-establishing credential. Killing
+        sessions here would be a UX regression with no security gain —
+        the PIN itself only matters at money-op time, where the new
+        hash will be the one consulted.
+        """
+        user = self._db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+        if user.pin_hash is None:
+            raise ValueError("PIN_NOT_SET")
+        if not verify_pin(old_pin, user.pin_hash):
+            raise ValueError("INVALID_PIN")
+        user.pin_hash = hash_pin(new_pin)
+        self._db.commit()
+
     async def forgot_password(self, identifier: str) -> None:
         user = (
             self._db.query(User)

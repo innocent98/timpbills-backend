@@ -31,6 +31,7 @@ from app.services.token_revocation_service import TokenRevocationService
 from app.services.token_store import TokenStore
 from app.schemas.password_change import PasswordChangeRequest
 from app.schemas.pin import VerifyPinRequest, VerifyPinResponse
+from app.schemas.pin_change import PinChangeRequest
 from app.schemas.user_update import GenderEnum, UserResponse, UserUpdateRequest
 from app.services.auth_service import AuthService
 from app.services.pin_service import InvalidPin, PinLocked, PinNotSet, PinService
@@ -255,6 +256,27 @@ async def set_pin(
 ):
     try:
         await svc.set_pin(user_id=user.id, pin=req.pin)
+    except ValueError as e:
+        _raise(str(e))
+    return success({"ok": True}, request_id=getattr(request.state, "request_id", None))
+
+
+@router.post("/pin/change")
+async def change_pin(
+    request: Request,
+    req: PinChangeRequest,
+    svc: AuthService = Depends(get_auth_service),
+    user: User = Depends(get_current_user),
+):
+    """Rotate an existing PIN. Requires the current PIN to verify.
+
+    Distinct from /pin/set, which creates the first PIN on accounts where
+    pin_hash is NULL. /pin/change refuses to operate without an existing PIN.
+    Unlike /password/change, PIN rotation does NOT revoke sessions — see
+    AuthService.change_pin for the rationale.
+    """
+    try:
+        await svc.change_pin(user_id=user.id, old_pin=req.old_pin, new_pin=req.new_pin)
     except ValueError as e:
         _raise(str(e))
     return success({"ok": True}, request_id=getattr(request.state, "request_id", None))
