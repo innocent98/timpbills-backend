@@ -121,6 +121,13 @@ async def get_current_token_claims(
     Refresh-typed tokens are rejected: refresh tokens have a separate
     lifecycle and must hit ``/auth/refresh`` rather than any
     bearer-protected endpoint.
+
+    Note: the ``tokens_revoked_at`` "logged-out-everywhere" check lives
+    in ``get_current_user`` rather than here — it requires the User row
+    which is loaded only one level deeper. /auth/logout uses
+    ``get_current_token_claims`` (no user row needed) and is allowed
+    to succeed even with a revoked-everywhere token: the worst case is
+    a no-op revocation of an already-revoked jti.
     """
     if not token:
         raise HTTPException(
@@ -153,6 +160,42 @@ async def get_current_token_claims(
     return payload
 
 
+def _token_iat_predates_revocation(payload: dict, revoked_at) -> bool:
+    """Return True iff the JWT's ``iat`` is at-or-before the user's
+    ``tokens_revoked_at`` stamp.
+
+    Both values are normalised to integer unix-epoch seconds before
+    comparison. Python's datetime cmp would also work, but jose hands
+    us ``iat`` as either an int (newer jose) or a datetime (older
+    jose), so we normalise once and avoid the polymorphism.
+
+    The comparison is ``<=``, not ``<``: a token issued in the *same
+    wall-clock second* as the revocation stamp must be treated as
+    revoked. Otherwise a token minted in the same second as a password
+    change (e.g. by a clock-skewed mobile retry, or by a test like
+    ours where issue+change happen in microseconds) would slip
+    through with ``iat_unix == revoked_unix`` and ``iat < revoked``
+    being false."""
+    from datetime import UTC, datetime
+
+    if revoked_at is None:
+        return False
+    iat = payload.get("iat")
+    if iat is None:
+        # No iat claim — be defensive and reject so a token without
+        # provenance can't slip past a global revocation.
+        return True
+    if isinstance(iat, datetime):
+        iat_unix = int(iat.timestamp())
+    else:
+        iat_unix = int(iat)
+    revoked_at_aware = (
+        revoked_at if revoked_at.tzinfo is not None else revoked_at.replace(tzinfo=UTC)
+    )
+    revoked_unix = int(revoked_at_aware.timestamp())
+    return iat_unix <= revoked_unix
+
+
 async def get_current_user(
     payload: dict = Depends(get_current_token_claims),
     db: Session = Depends(get_db),
@@ -175,6 +218,16 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "USER_NOT_FOUND", "message": "User not found"},
+        )
+    # Task 4.2: enforce "log me out everywhere". If the user's
+    # ``tokens_revoked_at`` postdates this token's ``iat``, reject —
+    # whether or not the specific jti is in the blocklist. Catches
+    # tokens that were issued before a password change and whose
+    # access TTL hasn't yet expired on its own.
+    if _token_iat_predates_revocation(payload, user.tokens_revoked_at):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "TOKEN_REVOKED", "message": "Token has been revoked"},
         )
     return user
 

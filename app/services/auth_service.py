@@ -501,6 +501,24 @@ class AuthService:
         if not user:
             raise ValueError("USER_NOT_FOUND")
 
+        # Task 4.2: enforce "log me out everywhere" on refresh too.
+        # ``get_current_user`` checks this for access tokens; we mirror
+        # it here so an old refresh issued before a password change
+        # can't be exchanged for a fresh access pair.
+        # Note: uses ``<=`` rather than ``<`` so a same-second issue +
+        # change pair (which integer-truncates to the same epoch
+        # second) still revokes correctly. See the matching helper in
+        # ``app/api/deps.py``.
+        if user.tokens_revoked_at is not None:
+            iat = payload.get("iat")
+            if iat is not None:
+                # iat is unix seconds (int) when decoded by jose
+                revoked = user.tokens_revoked_at
+                if revoked.tzinfo is None:
+                    revoked = revoked.replace(tzinfo=UTC)
+                if int(iat) <= int(revoked.timestamp()):
+                    raise ValueError("INVALID_TOKEN")
+
         new_tokens, new_jti = _issue_token_pair(str(user.id))
         await self._tokens.save(user_id=str(user.id), jti=new_jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
         return new_tokens

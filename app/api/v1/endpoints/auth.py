@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status as http_status
 from sqlalchemy.orm import Session
 
@@ -11,7 +13,7 @@ from app.api.deps import (
     get_token_store,
 )
 from app.core.limiter import limiter
-from app.core.security import decode_token
+from app.core.security import decode_token, hash_password, verify_password
 from app.db.models.user import User
 from app.schemas.auth import (
     ForgotPasswordRequest,
@@ -27,6 +29,7 @@ from app.schemas.auth import (
 )
 from app.services.token_revocation_service import TokenRevocationService
 from app.services.token_store import TokenStore
+from app.schemas.password_change import PasswordChangeRequest
 from app.schemas.pin import VerifyPinRequest, VerifyPinResponse
 from app.schemas.user_update import GenderEnum, UserResponse, UserUpdateRequest
 from app.services.auth_service import AuthService
@@ -285,6 +288,58 @@ async def reset_password(
     except ValueError as e:
         _raise(str(e))
     return success({"ok": True}, request_id=getattr(request.state, "request_id", None))
+
+
+@router.post("/password/change", status_code=http_status.HTTP_204_NO_CONTENT)
+@limiter.limit("5/minute")
+async def change_password(
+    request: Request,
+    payload: PasswordChangeRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    token_store: TokenStore = Depends(get_token_store),
+):
+    """Change the authenticated user's password and revoke ALL sessions.
+
+    Flow:
+      1. Verify the supplied ``old_password`` matches the stored hash.
+         400 with INVALID_CREDENTIALS on mismatch — same code shape as
+         /auth/login uses, so mobile can reuse the same handler.
+      2. Re-hash ``new_password`` and write it back.
+      3. Stamp ``users.tokens_revoked_at = now()`` — every access token
+         issued before this instant is now rejected at the gate via
+         ``get_current_user``.
+      4. Revoke every refresh token in the rotation keyspace
+         (``RedisTokenStore.revoke_all``) so the user's existing devices
+         can't refresh themselves back to life.
+
+    Returns 204 — the caller's own current token is now revoked too, so
+    we deliberately don't echo any state back. The mobile flow is:
+    receive 204 → discard local tokens → re-login.
+
+    Rate-limited 5/min to avoid letting a stolen access token brute-force
+    the old password by repeatedly trying values.
+    """
+    if not verify_password(payload.old_password, user.password_hash):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_CREDENTIALS",
+                "message": "Current password is incorrect",
+            },
+        )
+
+    user.password_hash = hash_password(payload.new_password)
+    user.tokens_revoked_at = datetime.now(UTC)
+    db.add(user)
+    db.commit()
+
+    # Revoke every outstanding refresh token. The access-token side is
+    # covered by ``tokens_revoked_at`` — no per-jti scan needed because
+    # the gate consults ``user.tokens_revoked_at`` on every protected
+    # call.
+    await token_store.revoke_all(user_id=str(user.id))
+    return None
 
 
 # ---------------------------------------------------------------------------

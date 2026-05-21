@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, String, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -74,6 +74,14 @@ class User(TimestampMixin, Base):
     gender = Column(String(20), nullable=True)
     address = Column(Text, nullable=True)
     avatar_url = Column(String(512), nullable=True)
+
+    # Sprint 5c · Task 4.2: "log me out everywhere" stamp.
+    # When set, every access token whose ``iat`` claim predates this
+    # timestamp is rejected by the auth gate. Updated atomically by
+    # ``/auth/password/change`` so a stolen password can't outlive
+    # the user's discovery + remediation window.
+    # Migration 202605210900 added the column.
+    tokens_revoked_at = Column(DateTime(timezone=True), nullable=True)
 
     # 1:1 back-reference to NotificationPreference. `cascade="all,
     # delete-orphan"` mirrors the FK's ON DELETE CASCADE — deleting the
