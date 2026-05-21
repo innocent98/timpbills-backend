@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status as http_status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import status as http_status
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -27,14 +28,15 @@ from app.schemas.auth import (
     VerifyEmailOtpRequest,
     VerifyPhoneOtpRequest,
 )
-from app.services.token_revocation_service import TokenRevocationService
-from app.services.token_store import TokenStore
 from app.schemas.password_change import PasswordChangeRequest
+from app.schemas.phone_change import PhoneChangeConfirm, PhoneChangeRequest
 from app.schemas.pin import VerifyPinRequest, VerifyPinResponse
 from app.schemas.pin_change import PinChangeRequest
 from app.schemas.user_update import GenderEnum, UserResponse, UserUpdateRequest
 from app.services.auth_service import AuthService
 from app.services.pin_service import InvalidPin, PinLocked, PinNotSet, PinService
+from app.services.token_revocation_service import TokenRevocationService
+from app.services.token_store import TokenStore
 from app.utils.responses import success
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -85,6 +87,10 @@ _ERROR_MAP: dict[str, tuple[int, str]] = {
     "INVALID_PIN":        (401, "Invalid PIN"),
     "PIN_TOKEN_REQUIRED": (401, "X-Pin-Token header required"),
     "INVALID_PIN_TOKEN":  (401, "Invalid or expired PIN token"),
+    # Sprint 5c · Task 5.1 — phone change flow.
+    "PHONE_ALREADY_IN_USE": (409, "Phone already in use by another account"),
+    "INVALID_REQUEST":      (400, "Invalid or expired phone change request"),
+    "USER_MISMATCH":        (403, "Phone change request belongs to a different user"),
 }
 
 
@@ -170,6 +176,56 @@ async def verify_phone_otp(
     except ValueError as e:
         _raise(str(e))
     return success(res.model_dump(), request_id=getattr(request.state, "request_id", None))
+
+
+# ---------------------------------------------------------------------------
+# Phone change (Sprint 5c · Task 5.1)
+#
+# Distinct from /phone/send-otp + /phone/verify-otp above (which upgrade a
+# Tier 0 → Tier 1 by verifying the phone on file). This pair lets an
+# already-verified user rotate to a *different* phone number — OTP is
+# delivered to the NEW phone to prove control, and confirm revokes every
+# outstanding session.
+# ---------------------------------------------------------------------------
+
+@router.post("/phone/change-request")
+@limiter.limit("3/minute")
+async def request_phone_change_endpoint(
+    request: Request,
+    req: PhoneChangeRequest,
+    svc: AuthService = Depends(get_auth_service),
+    user: User = Depends(get_current_user),
+):
+    try:
+        request_id = await svc.request_phone_change(
+            user_id=user.id, new_phone=req.new_phone,
+        )
+    except ValueError as e:
+        _raise(str(e))
+    return success(
+        {"request_id": request_id},
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+
+@router.post("/phone/change-confirm")
+@limiter.limit("5/minute")
+async def confirm_phone_change_endpoint(
+    request: Request,
+    req: PhoneChangeConfirm,
+    svc: AuthService = Depends(get_auth_service),
+    user: User = Depends(get_current_user),
+):
+    try:
+        await svc.confirm_phone_change(
+            user_id=user.id, request_id=req.request_id, otp=req.otp,
+        )
+    except ValueError as e:
+        _raise(str(e))
+    return success(
+        {"ok": True},
+        request_id=getattr(request.state, "request_id", None),
+    )
 
 
 # ---------------------------------------------------------------------------

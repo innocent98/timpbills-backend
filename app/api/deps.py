@@ -103,6 +103,7 @@ def get_auth_service(
         email=email,
         token_store=token_store,
         revocation_svc=TokenRevocationService(redis=redis),
+        redis=redis,
     )
 
 

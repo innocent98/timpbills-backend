@@ -1,8 +1,13 @@
 import secrets
+import uuid as _uuid_mod
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
 
 from app.core.config import settings
 from app.core.logger import log
@@ -95,6 +100,7 @@ class AuthService:
         email: EmailProvider,
         token_store: TokenStore,
         revocation_svc: TokenRevocationService | None = None,
+        redis: "Redis | None" = None,
     ) -> None:
         self._db = db
         self._sms = sms
@@ -106,6 +112,12 @@ class AuthService:
         # the standard happy path). Production wiring in deps.py always
         # injects the real service.
         self._revocation_svc = revocation_svc
+        # Sprint 5c · Task 5.1: Redis is required only by the phone-change
+        # flow (short-lived OTP keyed by request_id). Older tests construct
+        # AuthService without redis; those flows do not exercise the phone
+        # change methods so we keep the param optional and raise a clear
+        # error if a flow that needs redis is invoked without one.
+        self._redis = redis
 
     async def register(self, req: RegisterRequest) -> RegisterResponse:
         existing = (
@@ -529,6 +541,154 @@ class AuthService:
             raise ValueError("USER_NOT_FOUND")
         user.pin_hash = hash_pin(pin)
         self._db.commit()
+
+    # ── Phone change (Sprint 5c · Task 5.1) ──────────────────────────────
+    #
+    # Two-step, OTP-on-the-NEW-phone flow:
+    #
+    #   1) request_phone_change → mint a fresh request_id + OTP, stash
+    #      the (user_id, new_phone, otp) triple in Redis under
+    #      ``phone_change:{request_id}`` with a 10-minute TTL, and SMS
+    #      the OTP to the *new* phone via Termii (same client as the
+    #      Tier 1 phone verification flow).
+    #   2) confirm_phone_change → look up the triple, enforce that the
+    #      authenticated user matches the one bound to the request, then
+    #      rewrite ``users.phone`` + ``is_phone_verified=True`` and revoke
+    #      every session (access via ``tokens_revoked_at`` stamp, refresh
+    #      via ``RedisTokenStore.revoke_all``).
+    #
+    # Why Redis instead of the OtpCode table that the Tier 1 flow uses:
+    # the OtpCode rows are keyed on (user_id, purpose=phone_verification)
+    # and would collide with the Tier 1 verification flow if we reused
+    # that purpose. The new-phone value also needs to be carried alongside
+    # the OTP across the two calls — OtpCode has a ``phone`` column but
+    # also has the existing semantics tied to it. A separate Redis bucket
+    # with a short TTL is cleaner and is the same pattern PIN tokens use.
+
+    PHONE_CHANGE_TTL_SECONDS = 600  # 10 minutes — matches mobile UX cap.
+    _PHONE_CHANGE_KEY_PREFIX = "phone_change:"
+
+    def _phone_change_key(self, request_id: str) -> str:
+        return f"{self._PHONE_CHANGE_KEY_PREFIX}{request_id}"
+
+    async def request_phone_change(self, user_id: UUID, new_phone: str) -> str:
+        """Mint a phone-change request and SMS an OTP to ``new_phone``.
+
+        Returns the opaque ``request_id`` the caller must echo back to
+        ``confirm_phone_change``.
+
+        Raises:
+          USER_NOT_FOUND      — defensive; auth gate should make this impossible.
+          PHONE_ALREADY_IN_USE — another active user row already owns this phone.
+        """
+        if self._redis is None:
+            # Defensive — production wiring always injects redis. If a
+            # test constructs AuthService without it and exercises this
+            # path, surface the omission immediately rather than at the
+            # cryptic ``await None.setex(...)`` line below.
+            raise RuntimeError("AuthService requires a redis client for phone change")
+
+        user = self._db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+
+        # Uniqueness guard. The DB-level unique index would also catch
+        # this at confirm time, but we want to fail loud here so the
+        # user does not waste an SMS cost / OTP attempt on a phone they
+        # cannot ever land on.
+        collision = (
+            self._db.query(User)
+            .filter(User.phone == new_phone, User.id != user_id)
+            .first()
+        )
+        if collision is not None:
+            raise ValueError("PHONE_ALREADY_IN_USE")
+
+        request_id = _uuid_mod.uuid4().hex
+        otp = f"{secrets.randbelow(1_000_000):06d}"
+        # Encode the triple as a pipe-separated payload — keys/values
+        # never contain a pipe (UUID hex, E.164 NG phone, 6-digit OTP),
+        # so split is unambiguous. Cheaper than JSON for a 3-field value.
+        payload = f"{user_id}|{new_phone}|{otp}"
+        await self._redis.setex(
+            self._phone_change_key(request_id),
+            self.PHONE_CHANGE_TTL_SECONDS,
+            payload,
+        )
+
+        # Send via Termii (sync wrapper around the async client method —
+        # mirrors send_phone_otp above).
+        await self._sms.send_otp(phone=new_phone, code=otp)
+        return request_id
+
+    async def confirm_phone_change(
+        self, user_id: UUID, request_id: str, otp: str
+    ) -> None:
+        """Apply a previously-requested phone change.
+
+        Verifies the OTP and the user-binding, then rewrites
+        ``users.phone`` + ``is_phone_verified``, stamps
+        ``tokens_revoked_at`` (so every outstanding access token gets
+        rejected at the gate), and nukes the refresh-token keyspace for
+        this user via ``RedisTokenStore.revoke_all``.
+
+        Raises:
+          INVALID_REQUEST — request_id unknown or expired.
+          USER_MISMATCH   — request_id was minted for a different user.
+          INVALID_OTP     — OTP did not match the stored value.
+          USER_NOT_FOUND  — defensive; auth gate should make this impossible.
+          PHONE_ALREADY_IN_USE — race: another user grabbed the phone
+                                 between request and confirm.
+        """
+        if self._redis is None:
+            raise RuntimeError("AuthService requires a redis client for phone change")
+
+        raw = await self._redis.get(self._phone_change_key(request_id))
+        if raw is None:
+            raise ValueError("INVALID_REQUEST")
+        # FakeRedis with decode_responses=True returns str; real Redis with
+        # decode_responses=True does the same. Be defensive about both.
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        try:
+            stored_user_id, new_phone, expected_otp = raw.split("|", 2)
+        except ValueError as exc:  # pragma: no cover — corrupted payload
+            raise ValueError("INVALID_REQUEST") from exc
+
+        if stored_user_id != str(user_id):
+            raise ValueError("USER_MISMATCH")
+        if otp != expected_otp:
+            raise ValueError("INVALID_OTP")
+
+        user = self._db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+
+        # Re-check uniqueness at apply time. Between request and confirm
+        # another user could in principle grab the phone (signup race);
+        # don't trample their row — let the unique index catch it but
+        # surface the friendly code.
+        collision = (
+            self._db.query(User)
+            .filter(User.phone == new_phone, User.id != user_id)
+            .first()
+        )
+        if collision is not None:
+            raise ValueError("PHONE_ALREADY_IN_USE")
+
+        user.phone = new_phone
+        user.is_phone_verified = True
+        user.tokens_revoked_at = datetime.now(UTC)
+        self._db.commit()
+
+        # Drop every outstanding refresh token. The access-token side is
+        # covered by ``tokens_revoked_at`` — same pattern as
+        # /auth/password/change.
+        await self._tokens.revoke_all(user_id=str(user.id))
+
+        # One-shot: a successful confirm consumes the request. Replay
+        # protection — a leaked request_id+OTP pair cannot be reused.
+        await self._redis.delete(self._phone_change_key(request_id))
 
     async def change_pin(self, user_id: UUID, old_pin: str, new_pin: str) -> None:
         """Rotate an existing PIN. Requires the current PIN to verify.
