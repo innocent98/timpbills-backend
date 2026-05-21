@@ -281,3 +281,15 @@ from app.services.push_tokens_service import PushTokensService
 
 def get_push_tokens_service(db: Session = Depends(get_db)) -> PushTokensService:
     return PushTokensService(db=db)
+
+
+# --- Sprint 5c · Task 3.2: AvatarService ---
+from app.services.avatar_service import AvatarService
+
+
+def get_avatar_service() -> AvatarService:
+    return AvatarService(
+        cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+        api_key=settings.CLOUDINARY_API_KEY,
+        api_secret=settings.CLOUDINARY_API_SECRET,
+    )
