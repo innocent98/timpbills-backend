@@ -33,6 +33,7 @@ from app.schemas.auth import (
 )
 from app.services.app_setting_service import AppSettingService
 from app.services.referral_code import generate_referral_code
+from app.services.token_revocation_service import TokenRevocationService
 from app.services.token_store import TokenStore
 
 _ACCESS_EXPIRE = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -93,11 +94,18 @@ class AuthService:
         sms: SmsProvider,
         email: EmailProvider,
         token_store: TokenStore,
+        revocation_svc: TokenRevocationService | None = None,
     ) -> None:
         self._db = db
         self._sms = sms
         self._email = email
         self._tokens: TokenStore = token_store
+        # Optional — older unit tests construct AuthService directly with
+        # only the four core deps. When None, the JWT-jti blocklist check
+        # in refresh() is skipped (rotation + RedisTokenStore still cover
+        # the standard happy path). Production wiring in deps.py always
+        # injects the real service.
+        self._revocation_svc = revocation_svc
 
     async def register(self, req: RegisterRequest) -> RegisterResponse:
         existing = (
@@ -457,6 +465,20 @@ class AuthService:
 
         old_jti = payload.get("jti")
         if not old_jti:
+            raise ValueError("INVALID_TOKEN")
+
+        # JWT-jti blocklist (Sprint 5c · Task 4.1).
+        #
+        # The rotation keyspace (RedisTokenStore) catches most revocation
+        # scenarios — logout, replay, rotate-out. But the blocklist
+        # (TokenRevocationService) is the future-proofing hook: anything
+        # that needs to kill a specific jti (a password-change flow that
+        # also revokes the active refresh, an admin "kill this token"
+        # action) can write the same keyspace the access-token gate
+        # already consults. If the refresh endpoint skipped this check,
+        # a blocklisted refresh could still mint a new pair. Closing
+        # that gap defensively here.
+        if self._revocation_svc and await self._revocation_svc.is_revoked(old_jti):
             raise ValueError("INVALID_TOKEN")
 
         if not await self._tokens.is_valid(user_id=user_id, jti=old_jti):

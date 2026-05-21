@@ -91,8 +91,19 @@ def get_auth_service(
     sms: SmsProvider = Depends(get_sms_provider),
     email: EmailProvider = Depends(get_email_provider),
     token_store: TokenStore = Depends(get_token_store),
+    redis: Redis = Depends(get_redis),
 ) -> AuthService:
-    return AuthService(db=db, sms=sms, email=email, token_store=token_store)
+    # Lazy import to avoid pulling redis-asyncio types at module-import
+    # time in callers that only need other helpers from this module.
+    from app.services.token_revocation_service import TokenRevocationService
+
+    return AuthService(
+        db=db,
+        sms=sms,
+        email=email,
+        token_store=token_store,
+        revocation_svc=TokenRevocationService(redis=redis),
+    )
 
 
 async def get_current_token_claims(
