@@ -59,24 +59,29 @@ def dispatch(
     from app.integrations.push.fake import FakePushClient  # noqa: PLC0415
     from app.services.push_tokens_service import PushTokensService  # noqa: PLC0415
 
-    db = None
+    # Sprint 5c · Task 5.2: dispatch now consults NotificationPreference
+    # to gate pushes + emails on the user's opt-in/out flags. That lookup
+    # needs a DB session — open one for *every* task, not only when the
+    # real FCM client is wired. FakePushClient + a SessionLocal is fine;
+    # the only cost is one extra connection-pool checkout for the prefs
+    # row + the PushTokensService no-op call (FakePushClient ignores tokens).
+    db = SessionLocal()
     pt_svc = None
     if not isinstance(push_client, FakePushClient):
-        db = SessionLocal()
         pt_svc = PushTokensService(db=db)
 
     try:
         svc = NotificationService(
             email_client=email_client, push_client=push_client,
             push_tokens_service=pt_svc,
+            db=db,
         )
         _run_async(svc.dispatch(
             user_id=user_id, user_email=user_email,
             event=evt, context=context,
         ))
     finally:
-        if db is not None:
-            db.close()
+        db.close()
 
 
 def dispatch_delay(

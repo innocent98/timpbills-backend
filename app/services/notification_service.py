@@ -33,6 +33,8 @@ from app.integrations.email.renderer import render_email
 from app.integrations.push.base import BasePushClient
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
     from app.services.push_tokens_service import PushTokensService
 
 
@@ -67,6 +69,119 @@ class NotificationEvent(str, Enum):
     referrer_signup_notified        = "referrer_signup_notified"
     referral_credited               = "referral_credited"
     welcome_bonus                   = "welcome_bonus"
+
+
+# ─── Notification categories (Sprint 5c · Task 5.2) ─────────────────────────
+#
+# Each NotificationEvent belongs to exactly one user-facing category. The
+# NotificationPreference row carries one boolean per category; dispatch
+# consults the user's row before fanning out to push. Categories are
+# *push-side* — email is independently gated by `email_notifications`.
+#
+# Why an explicit category enum (instead of inlining strings): the
+# NotificationPreference model already exposes these four columns. Mirroring
+# them as an enum here makes the mapping side a compile-time invariant
+# (mypy will complain if a column name drifts) and keeps the EVENT_CATEGORY
+# table self-documenting.
+
+
+class NotificationCategory(str, Enum):
+    transaction_alerts = "transaction_alerts"
+    referral_updates = "referral_updates"
+    promotions = "promotions"
+
+
+# Single source of truth for "which preference flag gates which event".
+# A NotificationEvent missing from this map would bypass user preferences
+# entirely — tests/services/test_notification_gating.py pins coverage so a
+# new event without a category entry breaks loudly at CI.
+EVENT_CATEGORY: dict[NotificationEvent, NotificationCategory] = {
+    NotificationEvent.bill_success:                NotificationCategory.transaction_alerts,
+    NotificationEvent.bill_failure_refund:         NotificationCategory.transaction_alerts,
+    NotificationEvent.wallet_funded:               NotificationCategory.transaction_alerts,
+    NotificationEvent.electricity_token_delivered: NotificationCategory.transaction_alerts,
+    NotificationEvent.cable_activated:             NotificationCategory.transaction_alerts,
+    NotificationEvent.refund_complete:             NotificationCategory.transaction_alerts,
+    NotificationEvent.referrer_signup_notified:    NotificationCategory.referral_updates,
+    NotificationEvent.referral_credited:           NotificationCategory.referral_updates,
+    NotificationEvent.welcome_bonus:               NotificationCategory.referral_updates,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedPrefs:
+    """Snapshot of a user's notification preferences as consulted by
+    dispatch. Either pulled from the user's row, or — when no row exists
+    yet (lazy-creation defaults) or the lookup fails — populated from the
+    documented spec §3.2 defaults: transactional + referral + email ON,
+    promotions OFF. Defaults are deliberately permissive on the
+    transactional channel so absence of a row never silently drops a
+    receipt."""
+
+    transaction_alerts:  bool = True
+    referral_updates:    bool = True
+    promotions:          bool = False
+    email_notifications: bool = True
+
+    def push_allowed(self, category: NotificationCategory) -> bool:
+        if category is NotificationCategory.transaction_alerts:
+            return self.transaction_alerts
+        if category is NotificationCategory.referral_updates:
+            return self.referral_updates
+        if category is NotificationCategory.promotions:
+            return self.promotions
+        return True  # pragma: no cover — exhaustive above
+
+    @property
+    def email_allowed(self) -> bool:
+        return self.email_notifications
+
+
+_DEFAULT_PREFS = _ResolvedPrefs()
+
+
+def _resolve_prefs(db: "Session | None", user_id: str) -> _ResolvedPrefs:
+    """Load the user's NotificationPreference row → _ResolvedPrefs.
+
+    Fallback chain:
+      * ``db is None``           → spec-default prefs (legacy callers).
+      * ``user_id`` not parseable → spec-default prefs.
+      * Row not found            → spec-default prefs (matches lazy-create
+                                   semantics: a user who has never opened
+                                   the screen behaves as the documented
+                                   default).
+      * Any other DB error       → spec-default prefs + warning log so
+                                   we never silently suppress a receipt
+                                   on a transient DB hiccup.
+    """
+    if db is None:
+        return _DEFAULT_PREFS
+    try:
+        user_uuid = UUID(user_id)
+    except (TypeError, ValueError):
+        return _DEFAULT_PREFS
+    # Local import to avoid pulling the SQLAlchemy model graph at module
+    # import time (the Celery worker boots this module on every task).
+    from app.db.models.notification_preference import (  # noqa: PLC0415
+        NotificationPreference,
+    )
+    try:
+        row = (
+            db.query(NotificationPreference)
+            .filter(NotificationPreference.user_id == user_uuid)
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("notify: prefs lookup failed user=%s err=%s", user_id, exc)
+        return _DEFAULT_PREFS
+    if row is None:
+        return _DEFAULT_PREFS
+    return _ResolvedPrefs(
+        transaction_alerts=bool(row.transaction_alerts),
+        referral_updates=bool(row.referral_updates),
+        promotions=bool(row.promotions),
+        email_notifications=bool(row.email_notifications),
+    )
 
 
 # Maps event → (email_template_name, push_title_template, push_body_key)
@@ -160,6 +275,7 @@ class NotificationService:
         email_client: EmailProvider,
         push_client: BasePushClient,
         push_tokens_service: "PushTokensService | None" = None,
+        db: "Session | None" = None,
     ) -> None:
         """If ``push_tokens_service`` is wired, ``_maybe_push`` runs in
         token-aware mode: look up all registered FCM tokens for the
@@ -167,10 +283,18 @@ class NotificationService:
         the FCM client. If omitted (Sprint 3 default + tests that
         predate push-tokens storage), falls back to a single
         ``push_client.send(user_id=..., fcm_token=None)`` call — the
-        FakePushClient is happy with that."""
+        FakePushClient is happy with that.
+
+        Sprint 5c · Task 5.2: ``db`` enables NotificationPreference-aware
+        gating. When wired, dispatch consults the user's preference row
+        (or spec defaults if no row exists) before each channel; when
+        ``None``, every event fires unconditionally. The Celery worker
+        always wires it; legacy unit tests construct without it and
+        retain the old default-on behaviour."""
         self._email = email_client
         self._push = push_client
         self._push_tokens = push_tokens_service
+        self._db = db
 
     async def dispatch(
         self,
@@ -181,13 +305,34 @@ class NotificationService:
         context: dict[str, Any],
     ) -> None:
         """Send the email + push for this event. Each channel failure
-        is caught and logged so neither blocks the other."""
-        await self._maybe_email(
-            user_email=user_email, event=event, context=context,
+        is caught and logged so neither blocks the other.
+
+        Per-event gating: ``EVENT_CATEGORY`` maps the event onto one of
+        the NotificationPreference push categories, then the user's row
+        is consulted. ``email_notifications`` independently gates the
+        email channel. Both lookups go through ``_resolve_prefs`` which
+        falls back to spec defaults on any miss/error so a transient DB
+        blip never silently drops a transactional push."""
+        prefs = _resolve_prefs(self._db, user_id)
+
+        if prefs.email_allowed:
+            await self._maybe_email(
+                user_email=user_email, event=event, context=context,
+            )
+
+        category = EVENT_CATEGORY.get(event)
+        # An event without a category mapping is a bug (the dedicated
+        # test_event_category_map_covers_every_event test catches this
+        # at CI). Be defensive at runtime: if it ever happens in prod,
+        # treat the event as transactional so the user still gets the
+        # message — silent suppression would be the worse failure mode.
+        push_allowed = (
+            prefs.push_allowed(category) if category is not None else True
         )
-        await self._maybe_push(
-            user_id=user_id, event=event, context=context,
-        )
+        if push_allowed:
+            await self._maybe_push(
+                user_id=user_id, event=event, context=context,
+            )
 
     async def _maybe_email(
         self, *, user_email: str, event: NotificationEvent, context: dict[str, Any]
