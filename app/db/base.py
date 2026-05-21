@@ -8,6 +8,7 @@ from app.db.mixins import TimestampMixin  # noqa: F401,E402
 from app.db.models import (  # noqa: F401,E402  # noqa: F401,E402  # noqa: F401,E402  # noqa: F401,E402
     app_setting,
     idempotency_key,
+    notification_preference,
     otp,
     payment,
     push_token,  # noqa: F401,E402

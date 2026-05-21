@@ -1,8 +1,9 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, Enum, ForeignKey, String
+from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 
 from app.db.base import Base
 from app.db.mixins import TimestampMixin
@@ -64,4 +65,22 @@ class User(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
+    )
+
+    # Sprint 5c: profile-extension columns. All nullable — these are
+    # optional, surfaced by the profile screen and edited via PATCH /me.
+    # Migration 202605201200 added the underlying columns.
+    date_of_birth = Column(Date, nullable=True)
+    gender = Column(String(20), nullable=True)
+    address = Column(Text, nullable=True)
+    avatar_url = Column(String(512), nullable=True)
+
+    # 1:1 back-reference to NotificationPreference. `cascade="all,
+    # delete-orphan"` mirrors the FK's ON DELETE CASCADE — deleting the
+    # user from the ORM also drops their preference row in the same flush.
+    notification_preference = relationship(
+        "NotificationPreference",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
     )
