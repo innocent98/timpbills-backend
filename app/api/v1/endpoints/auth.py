@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
 
-from app.api.deps import get_auth_service, get_current_user, get_pin_service
+from app.api.deps import get_auth_service, get_current_user, get_db, get_pin_service
 from app.core.limiter import limiter
 from app.db.models.user import User
 from app.schemas.auth import (
@@ -15,11 +16,38 @@ from app.schemas.auth import (
     VerifyPhoneOtpRequest,
 )
 from app.schemas.pin import VerifyPinRequest, VerifyPinResponse
+from app.schemas.user_update import GenderEnum, UserResponse, UserUpdateRequest
 from app.services.auth_service import AuthService
 from app.services.pin_service import InvalidPin, PinLocked, PinNotSet, PinService
 from app.utils.responses import success
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _build_me_response(user: User) -> UserResponse:
+    """Project a User row to the public /me shape.
+
+    Centralised so GET and PATCH /me cannot drift — both must surface
+    the same view of identity + verification + profile-extension fields.
+
+    NOTE on the field rename: the ORM column is ``is_phone_verified`` but
+    the response field is ``phone_verified`` (matches mobile's existing
+    contract). We keep the rename in this single place.
+    """
+    return UserResponse(
+        user_id=str(user.id),
+        email=user.email,
+        phone=user.phone,
+        full_name=user.full_name,
+        email_verified=user.email_verified,
+        phone_verified=user.is_phone_verified,
+        pin_set=user.pin_hash is not None,
+        kyc_level=user.kyc_level.value,
+        date_of_birth=user.date_of_birth,
+        gender=user.gender,
+        address=user.address,
+        avatar_url=user.avatar_url,
+    )
 
 _ERROR_MAP: dict[str, tuple[int, str]] = {
     "USER_ALREADY_EXISTS": (409, "User already exists"),
@@ -210,16 +238,42 @@ async def reset_password(
 @router.get("/me")
 async def me(request: Request, user: User = Depends(get_current_user)):
     return success(
-        {
-            "user_id": str(user.id),
-            "phone": user.phone,
-            "email": user.email,
-            "full_name": user.full_name,
-            "email_verified": user.email_verified,
-            "phone_verified": user.is_phone_verified,
-            "pin_set": user.pin_hash is not None,
-            "kyc_level": user.kyc_level.value,
-        },
+        _build_me_response(user).model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+
+@router.patch("/me")
+async def patch_me(
+    request: Request,
+    payload: UserUpdateRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Partially update the authenticated user's profile.
+
+    Only ``full_name`` / ``date_of_birth`` / ``gender`` / ``address`` are
+    editable here. Pydantic's ``extra="forbid"`` rejects ``email`` and
+    ``phone`` (which have dedicated verification flows) with 422 before
+    we reach this body. ``model_dump(exclude_unset=True)`` makes this a
+    true PATCH — keys the client did not send are left untouched.
+    """
+    update_dict = payload.model_dump(exclude_unset=True)
+
+    # GenderEnum serialises to the enum member by default; the DB column
+    # holds the raw string ("male"/"female"/...), so unwrap before assign.
+    if "gender" in update_dict and isinstance(update_dict["gender"], GenderEnum):
+        update_dict["gender"] = update_dict["gender"].value
+
+    for key, value in update_dict.items():
+        setattr(user, key, value)
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return success(
+        _build_me_response(user).model_dump(mode="json"),
         request_id=getattr(request.state, "request_id", None),
     )
 
