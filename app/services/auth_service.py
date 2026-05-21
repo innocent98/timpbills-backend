@@ -120,12 +120,34 @@ class AuthService:
         self._redis = redis
 
     async def register(self, req: RegisterRequest) -> RegisterResponse:
-        existing = (
-            self._db.query(User)
-            .filter((User.phone == req.phone) | (User.email == req.email))
-            .first()
+        # Sprint 5c · Task 6.1: re-registration block.
+        # We look up by phone and email *separately* (instead of a single
+        # OR clause) because we want to surface a different error code
+        # for each lane — PHONE_RECENTLY_DELETED vs EMAIL_RECENTLY_DELETED
+        # — so mobile can render a precise hint to the user. Phone is
+        # checked first because it's the harder identifier to change.
+        thirty_days_ago = datetime.now(UTC) - timedelta(days=30)
+
+        existing_phone = (
+            self._db.query(User).filter(User.phone == req.phone).first()
         )
-        if existing:
+        if existing_phone is not None:
+            if (
+                existing_phone.deleted_at is not None
+                and _ensure_aware_utc(existing_phone.deleted_at) > thirty_days_ago
+            ):
+                raise ValueError("PHONE_RECENTLY_DELETED")
+            raise ValueError("USER_ALREADY_EXISTS")
+
+        existing_email = (
+            self._db.query(User).filter(User.email == req.email).first()
+        )
+        if existing_email is not None:
+            if (
+                existing_email.deleted_at is not None
+                and _ensure_aware_utc(existing_email.deleted_at) > thirty_days_ago
+            ):
+                raise ValueError("EMAIL_RECENTLY_DELETED")
             raise ValueError("USER_ALREADY_EXISTS")
 
         # Eager referral-code generation (spec §5.1 + B1 decision #3):

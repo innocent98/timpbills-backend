@@ -91,6 +91,15 @@ _ERROR_MAP: dict[str, tuple[int, str]] = {
     "PHONE_ALREADY_IN_USE": (409, "Phone already in use by another account"),
     "INVALID_REQUEST":      (400, "Invalid or expired phone change request"),
     "USER_MISMATCH":        (403, "Phone change request belongs to a different user"),
+    # Sprint 5c · Task 6.1 — soft-delete re-register block.
+    "PHONE_RECENTLY_DELETED": (
+        409,
+        "This phone number was recently used by a deleted account. Try again after 30 days.",
+    ),
+    "EMAIL_RECENTLY_DELETED": (
+        409,
+        "This email was recently used by a deleted account. Try again after 30 days.",
+    ),
 }
 
 

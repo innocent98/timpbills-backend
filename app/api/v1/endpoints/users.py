@@ -14,10 +14,17 @@ read — acceptable because the row is one boolean tuple.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_avatar_service, get_current_user, get_db
+from app.api.deps import (
+    get_avatar_service,
+    get_current_user,
+    get_db,
+    get_token_store,
+)
 from app.db.models.notification_preference import NotificationPreference
 from app.db.models.user import User
 from app.schemas.notification_preference import (
@@ -25,6 +32,7 @@ from app.schemas.notification_preference import (
     NotificationPreferenceUpdate,
 )
 from app.services.avatar_service import AvatarService, AvatarUploadError
+from app.services.token_store import TokenStore
 from app.utils.responses import success
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -167,3 +175,49 @@ def delete_avatar(
         {"avatar_url": None},
         request_id=getattr(request.state, "request_id", None),
     )
+
+
+# ---------------------------------------------------------------------------
+# Soft-delete account (Sprint 5c · Task 6.1)
+# ---------------------------------------------------------------------------
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+async def soft_delete_me(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    token_store: TokenStore = Depends(get_token_store),
+):
+    """Soft-delete the authenticated user.
+
+    Flow:
+      1. Flip ``is_active=False`` — login + every authenticated endpoint
+         will refuse the user going forward.
+      2. Stamp ``deleted_at = now()`` — the /auth/register flow reads
+         this to block re-registration with the same phone or email
+         for 30 days.
+      3. Stamp ``tokens_revoked_at = now()`` — every outstanding access
+         token issued before this instant is rejected at the gate.
+      4. Revoke every refresh token in the rotation keyspace so existing
+         devices can't refresh themselves back to life.
+
+    Hard delete (full PII purge) is a Sprint 8 / compliance concern —
+    this endpoint only sets the tombstone. The row stays in the table
+    so that referrals / past transactions still link cleanly.
+
+    Returns 204 — the caller's own bearer is now revoked, so we don't
+    echo any state back. Mobile flow: receive 204 → discard local tokens
+    → bounce to the login screen.
+    """
+    now = datetime.now(UTC)
+    current_user.is_active = False
+    current_user.deleted_at = now
+    current_user.tokens_revoked_at = now
+    db.add(current_user)
+    db.commit()
+
+    # Drop every outstanding refresh token. Access-token side is covered
+    # by the ``tokens_revoked_at`` stamp + the ``is_active`` check in
+    # ``get_current_user`` — same belt-and-braces pattern as the
+    # password-change endpoint.
+    await token_store.revoke_all(user_id=str(current_user.id))
+    return None

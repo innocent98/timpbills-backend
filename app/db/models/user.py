@@ -83,6 +83,14 @@ class User(TimestampMixin, Base):
     # Migration 202605210900 added the column.
     tokens_revoked_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Sprint 5c · Task 6.1: soft-delete tombstone for DELETE /users/me.
+    # Set alongside ``is_active=False`` + ``tokens_revoked_at`` when the
+    # user self-deletes. The /auth/register flow consults this column to
+    # block re-registration with the same phone or email for 30 days.
+    # Hard delete (PII purge) is a Sprint 8 / compliance concern.
+    # Migration 202605220900 added the column.
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
     # 1:1 back-reference to NotificationPreference. `cascade="all,
     # delete-orphan"` mirrors the FK's ON DELETE CASCADE — deleting the
     # user from the ORM also drops their preference row in the same flush.

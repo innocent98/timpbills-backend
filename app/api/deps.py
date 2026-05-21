@@ -230,6 +230,17 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "TOKEN_REVOKED", "message": "Token has been revoked"},
         )
+    # Task 6.1: a soft-deleted (or otherwise deactivated) user must not
+    # be able to keep using a still-valid access token. The delete
+    # endpoint also stamps ``tokens_revoked_at`` so the previous branch
+    # catches the common case; this branch defends against a deactivated
+    # user whose ``tokens_revoked_at`` somehow wasn't stamped (e.g. an
+    # admin flips ``is_active`` directly in Sprint 8).
+    if user.is_active is False:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "ACCOUNT_DISABLED", "message": "Account is disabled"},
+        )
     return user
 
 
