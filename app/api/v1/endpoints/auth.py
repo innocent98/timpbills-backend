@@ -60,7 +60,7 @@ def _build_me_response(user: User) -> UserResponse:
         email_verified=user.email_verified,
         phone_verified=user.is_phone_verified,
         pin_set=user.pin_hash is not None,
-        kyc_level=user.kyc_level.value,
+        kyc_level=user.kyc_level.numeric,
         date_of_birth=user.date_of_birth,
         gender=user.gender,
         address=user.address,

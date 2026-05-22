@@ -224,6 +224,14 @@ jobs:
         env:
           E2E_BASE_URL: ${{ secrets.APP_URL }}
           E2E_TIMEOUT_SECONDS: '60'
+          # tests/conftest.py imports app.core.config at module load,
+          # which instantiates Settings() and validates required fields.
+          # E2E hits the deployed staging API (no local DB / superuser),
+          # so these are placeholders just to satisfy pydantic at import.
+          SECRET_KEY: e2e-staging-conftest-placeholder
+          DATABASE_URL: postgresql://unused:unused@localhost:5432/unused
+          FIRST_SUPERUSER_EMAIL: e2e@placeholder.test
+          FIRST_SUPERUSER_PASSWORD: unused-e2e
         run: |
           # Runs tests under tests/e2e marked with -m e2e.
           # If your project has no e2e suite, this job no-ops and production-deploy

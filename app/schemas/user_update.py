@@ -71,7 +71,10 @@ class UserResponse(BaseModel):
     email_verified: bool
     phone_verified: bool
     pin_set: bool
-    kyc_level: str
+    # Numeric tier (0/1/2) — see KycLevel.numeric for the enum→int
+    # mapping. Mobile's MeResponse declares this as ``int`` and the
+    # profile card switches on it.
+    kyc_level: int
     date_of_birth: dt.date | None = None
     gender: str | None = None
     address: str | None = None

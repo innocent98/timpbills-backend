@@ -31,6 +31,18 @@ class KycLevel(str, enum.Enum):
     tier_1 = "tier_1"
     tier_2 = "tier_2"
 
+    @property
+    def numeric(self) -> int:
+        """Tier as an integer (0/1/2) for the public API response.
+
+        The DB column stores the enum string, but mobile expects a
+        numeric tier so it can render labels (Tier 0/1/2/3) and gate
+        features by tier threshold via comparison.  The mobile DTO
+        already declares ``int kycLevel`` and switches on it — see
+        ``profile_account_card.dart``.
+        """
+        return int(self.value.rsplit("_", 1)[-1])
+
 
 class User(TimestampMixin, Base):
     __tablename__ = "users"

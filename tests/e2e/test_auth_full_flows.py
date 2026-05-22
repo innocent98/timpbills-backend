@@ -742,6 +742,6 @@ async def test_me_returns_current_user_state(client, db_session):
     assert data["email_verified"] is True
     assert data["phone_verified"] is False  # phone not verified yet
     assert data["pin_set"] is True
-    assert data["kyc_level"] == "tier_0"  # phone not verified → still tier_0
+    assert data["kyc_level"] == 0  # phone not verified → still tier_0
     assert data["full_name"] == "Test User"
     assert data["user_id"]  # non-empty UUID string
