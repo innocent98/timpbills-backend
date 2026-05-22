@@ -6,7 +6,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Some networks (notably Nigerian ISPs routing to Fastly) drop the path
+# from `deb.debian.org`'s HTTP→HTTPS 307, sending apt to the bare info
+# page instead of the actual mirror. Use HTTPS directly to bypass the
+# redirect. Trixie ships sources in deb822 format; bookworm in classic.
+RUN { [ -f /etc/apt/sources.list.d/debian.sources ] && sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources; \
+      [ -f /etc/apt/sources.list ] && sed -i 's|http://|https://|g' /etc/apt/sources.list; \
+      true; } && \
+    apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
