@@ -18,7 +18,7 @@ _E164_NG = re.compile(r"^\+234[789]\d{9}$")     # +234[789] prefix
 def normalize_to_e164(raw: str) -> str:
     if not raw or not isinstance(raw, str):
         raise InvalidPhoneFormat("phone must be a non-empty string")
-    s = raw.strip().replace(" ", "")
+    s = re.sub(r"\s+", "", raw.strip())
     if _E164_NG.match(s):
         return s
     if _INTL_NG.match(s):
