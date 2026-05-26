@@ -47,6 +47,59 @@ _REFRESH_EXPIRE = timedelta(days=30)
 REFRESH_TOKEN_TTL_SECONDS = int(_REFRESH_EXPIRE.total_seconds())
 
 
+class OtpCooldownActive(Exception):
+    """The most recent OTP for this (user, purpose) is younger than
+    ``OTP_RESEND_COOLDOWN_SECONDS``."""
+
+
+class OtpDailyCapExceeded(Exception):
+    """The user has already received ``OTP_RESEND_DAILY_CAP`` OTPs today
+    (UTC) across all purposes."""
+
+
+def _check_otp_cooldown(db, *, user_id, purpose) -> None:
+    """Raise if a resend would violate cooldown or daily cap.
+
+    Call from every OTP-emitting code path that could be triggered by a
+    user-controlled request: send_email_otp, send_phone_otp, register,
+    forgot_password, the inline /auth/login phone-OTP send.
+
+    Two independent gates:
+    - **Cooldown** — the latest OTP for this exact (user, purpose) pair
+      must be older than ``OTP_RESEND_COOLDOWN_SECONDS``. Defends against
+      a single user rapid-tap-spamming a single OTP purpose.
+    - **Daily cap** — the user must not have received more than
+      ``OTP_RESEND_DAILY_CAP`` OTPs today UTC across ALL purposes. Defends
+      against SMS-bombing a phone via cross-purpose rotation (register
+      → forgot-password → phone-verify → ...).
+    """
+    now = datetime.now(UTC)
+
+    # Cooldown — latest OTP for this purpose must be older than the window.
+    latest = (
+        db.query(OtpCode)
+        .filter(OtpCode.user_id == user_id, OtpCode.purpose == purpose)
+        .order_by(OtpCode.created_at.desc())
+        .first()
+    )
+    if latest is not None:
+        created = latest.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+        if (now - created).total_seconds() < settings.OTP_RESEND_COOLDOWN_SECONDS:
+            raise OtpCooldownActive()
+
+    # Daily cap — count OTPs (ANY purpose) for this user since UTC midnight.
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    count = (
+        db.query(OtpCode)
+        .filter(OtpCode.user_id == user_id, OtpCode.created_at >= midnight)
+        .count()
+    )
+    if count >= settings.OTP_RESEND_DAILY_CAP:
+        raise OtpDailyCapExceeded()
+
+
 def _ensure_aware_utc(dt: datetime) -> datetime:
     """Normalize a datetime to timezone-aware UTC.
 
