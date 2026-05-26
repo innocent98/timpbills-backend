@@ -91,11 +91,12 @@ async def test_list_data_plans_unknown_service_returns_empty():
 
 
 @pytest.mark.asyncio
-async def test_purchase_data_looks_up_price_from_catalog():
+async def test_purchase_data_delivers_at_requested_amount():
     fake = FakeVTPassClient()
     r = await fake.purchase_data(
         request_id="TMP-TEST-6", service_id="mtn-data",
         phone="08012345678", variation_code="mtn-1gb-monthly",
+        amount_ngn=Decimal("1000.00"),
     )
     assert r.status == BillDeliveryStatus.delivered
     assert r.requested_amount_ngn == Decimal("1000.00")
@@ -111,6 +112,7 @@ async def test_purchase_data_unknown_variation_fails():
     r = await fake.purchase_data(
         request_id="TMP-TEST-7", service_id="mtn-data",
         phone="08012345678", variation_code="bogus-plan",
+        amount_ngn=Decimal("1000.00"),
     )
     assert r.status == BillDeliveryStatus.failed
 

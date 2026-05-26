@@ -52,6 +52,7 @@ class BillProvider(Protocol):
         service_id: str,
         phone: str,
         variation_code: str,
+        amount_ngn: Decimal,
     ) -> BillPurchaseResponse: ...
 
     # ── Electricity ─────────────────────────────────────────────────────

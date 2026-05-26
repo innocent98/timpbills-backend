@@ -10,7 +10,12 @@ from uuid import UUID
 from redis.asyncio import Redis
 from sqlalchemy.orm import Session
 
-from app.core.security import create_access_token, verify_pin
+from app.core.security import (
+    create_access_token,
+    hash_pin_async,
+    pin_needs_rehash,
+    verify_pin_async,
+)
 from app.db.models.user import User
 
 PIN_TOKEN_TTL = timedelta(minutes=5)
@@ -56,7 +61,7 @@ class PinService:
         if user is None or user.pin_hash is None:
             raise PinNotSet()
 
-        if not verify_pin(pin, user.pin_hash):
+        if not await verify_pin_async(pin, user.pin_hash):
             attempts = await self._redis.incr(self._attempts_key(user_id))
             if attempts == 1:
                 await self._redis.expire(
@@ -69,6 +74,14 @@ class PinService:
             raise InvalidPin()
 
         await self._redis.delete(self._attempts_key(user_id))
+
+        # Transparent rehash: legacy bcrypt PIN → argon2id on next successful
+        # verify. Same pattern as the login password rehash. New users set PINs
+        # directly with argon2id; this branch only fires for existing users.
+        if pin_needs_rehash(user.pin_hash):
+            user.pin_hash = await hash_pin_async(pin)
+            self._db.commit()
+
         token = create_access_token(
             subject=str(user_id),
             extra={"scope": "money-ops"},

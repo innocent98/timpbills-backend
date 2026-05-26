@@ -1,54 +1,80 @@
 # syntax=docker/dockerfile:1.7
-# ---------------------------------------------------------------------------
-# Timpbills API — production image.
-#
-# Multi-stage:
-#   builder  — Poetry + build deps (curl, gcc, libpq-dev) → installs runtime
-#              wheels into /opt/venv. Discarded after copy.
-#   runtime  — slim base, libpq5 only (no compiler), non-root `appuser`,
-#              gunicorn entrypoint with WEB_CONCURRENCY tunable.
-#
-# Alpine intentionally avoided: musl forces source-compile of psycopg2 /
-# bcrypt / cryptography, producing larger and slower images.
-# ---------------------------------------------------------------------------
+# Timpbills API — single Dockerfile, multi-stage.
+# Targets:
+#   dev      uvicorn --reload, all deps (main + dev) baked in, root user.
+#            Selected by docker-compose.yml via `target: dev`.
+#   runtime  gunicorn, prod-only deps, non-root appuser. DEFAULT (last stage),
+#            so `docker build .` produces the prod image. Production compose
+#            pulls this from the registry — no inline build at deploy.
+# Alpine avoided: musl breaks psycopg2/bcrypt/cryptography wheels.
 
 ARG PYTHON_VERSION=3.11
+ARG POETRY_VERSION=2.2.1
 
-# ----- builder -------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim AS builder
 
+# ───── builder-base ────────────────────────────────────────────────────────
+# Shared layer: system build deps + Poetry + lockfile copy. Both dev and
+# builder-prod start from here so the Poetry install + lockfile resolution
+# layer is cached across both targets.
+FROM python:${PYTHON_VERSION}-slim AS builder-base
+
+ARG POETRY_VERSION
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    POETRY_VERSION=1.8.4 \
     POETRY_HOME="/opt/poetry" \
+    POETRY_NO_INTERACTION=1 \
     POETRY_VIRTUALENVS_CREATE=true \
     POETRY_VIRTUALENVS_IN_PROJECT=false \
-    POETRY_NO_INTERACTION=1 \
     VENV_PATH="/opt/venv"
 
-# Build-time deps. curl pulled here for the Poetry installer; libpq-dev for
-# psycopg2 (build-time only — runtime uses libpq5).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Some Nigerian ISPs (Fastly route) drop the path on deb.debian.org's
+# HTTP→HTTPS 307 — force HTTPS sources directly to bypass the redirect.
+RUN { [ -f /etc/apt/sources.list.d/debian.sources ] && sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources; \
+      [ -f /etc/apt/sources.list ] && sed -i 's|http://|https://|g' /etc/apt/sources.list; \
+      true; } \
+ && apt-get update && apt-get install -y --no-install-recommends \
         curl \
         build-essential \
         libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
 RUN curl -sSL https://install.python-poetry.org | python3 - --version "${POETRY_VERSION}" \
  && ln -s /opt/poetry/bin/poetry /usr/local/bin/poetry
 
 WORKDIR /app
 
-# Layer-cache: copy lockfiles first, install, then copy source.
 COPY pyproject.toml poetry.lock* ./
+
+
+# ───── dev ─────────────────────────────────────────────────────────────────
+# Hot-reload dev image. Installs all deps (main + dev) into /opt/venv and
+# keeps Poetry available so devs can `poetry add` inside the container.
+# App source is NOT baked in — docker-compose.yml bind-mounts ./app, ./alembic,
+# ./scripts, ./tests, ./pyproject.toml over /app at runtime.
+FROM builder-base AS dev
+
+RUN python -m venv "$VENV_PATH" \
+ && . "$VENV_PATH/bin/activate" \
+ && poetry install --no-interaction --no-ansi --no-root
+
+ENV PATH="/opt/venv/bin:$PATH"
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+
+# ───── builder-prod ────────────────────────────────────────────────────────
+# Separate from dev so prod can't accidentally inherit dev deps. Same Poetry,
+# same lockfile, different install group (--only main).
+FROM builder-base AS builder-prod
 
 RUN python -m venv "$VENV_PATH" \
  && . "$VENV_PATH/bin/activate" \
  && poetry install --no-interaction --no-ansi --only main --no-root
 
-# ----- runtime -------------------------------------------------------------
+
+# ───── runtime (default, last stage) ───────────────────────────────────────
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
 ARG GIT_SHA=unknown
@@ -60,18 +86,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     WEB_CONCURRENCY=4
 
 # Runtime-only system deps. libpq5 supplies the Postgres client lib that
-# psycopg2 dynamically links against. No compiler, no curl — keeps the
-# CVE surface and image size down.
+# psycopg2 dynamically links against. No compiler, no curl, no Poetry.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 1000 appuser \
-    && useradd  --system --uid 1000 --gid appuser --home-dir /app --no-create-home appuser
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 1000 appuser \
+ && useradd  --system --uid 1000 --gid appuser --home-dir /app --no-create-home appuser
 
 WORKDIR /app
 
-# Pull the prebuilt venv from the builder stage.
-COPY --from=builder /opt/venv /opt/venv
+# Prebuilt main-only venv from builder-prod.
+COPY --from=builder-prod /opt/venv /opt/venv
 
 # App code (only — tests, htmlcov, docs, .env stay out via .dockerignore).
 COPY --chown=appuser:appuser ./app /app/app

@@ -15,10 +15,11 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
-    hash_password,
-    hash_pin,
-    verify_password,
-    verify_pin,
+    hash_password_async,
+    hash_pin_async,
+    password_needs_rehash,
+    verify_password_async,
+    verify_pin_async,
 )
 from app.db.models.otp import OtpCode, OtpPurpose
 from app.db.models.referral import Referral, ReferralStatus
@@ -165,7 +166,7 @@ class AuthService:
             phone=req.phone,
             email=req.email,
             full_name=req.full_name,
-            password_hash=hash_password(req.password),
+            password_hash=await hash_password_async(req.password),
             kyc_level=KycLevel.tier_0,
             referral_code=new_code,
         )
@@ -184,7 +185,7 @@ class AuthService:
         otp = OtpCode(
             user_id=user.id,
             email=user.email,
-            code_hash=hash_pin(code),
+            code_hash=await hash_pin_async(code),
             purpose=OtpPurpose.email_verification,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
@@ -312,7 +313,7 @@ class AuthService:
         otp = OtpCode(
             user_id=user.id,
             email=user.email,
-            code_hash=hash_pin(code),
+            code_hash=await hash_pin_async(code),
             purpose=OtpPurpose.email_verification,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
@@ -345,7 +346,7 @@ class AuthService:
         if otp.attempts >= 3:
             raise ValueError("OTP_ATTEMPTS_EXCEEDED")
 
-        if not verify_pin(req.code, otp.code_hash):
+        if not await verify_pin_async(req.code, otp.code_hash):
             otp.attempts += 1
             self._db.commit()
             raise ValueError("INVALID_OTP")
@@ -375,7 +376,7 @@ class AuthService:
         otp = OtpCode(
             user_id=user.id,
             phone=user.phone,
-            code_hash=hash_pin(code),
+            code_hash=await hash_pin_async(code),
             purpose=OtpPurpose.phone_verification,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
@@ -409,7 +410,7 @@ class AuthService:
         if otp.attempts >= 3:
             raise ValueError("OTP_ATTEMPTS_EXCEEDED")
 
-        if not verify_pin(code, otp.code_hash):
+        if not await verify_pin_async(code, otp.code_hash):
             otp.attempts += 1
             self._db.commit()
             raise ValueError("INVALID_OTP")
@@ -452,7 +453,7 @@ class AuthService:
         if otp.attempts >= 3:
             raise ValueError("OTP_ATTEMPTS_EXCEEDED")
 
-        if not verify_pin(req.code, otp.code_hash):
+        if not await verify_pin_async(req.code, otp.code_hash):
             otp.attempts += 1
             self._db.commit()
             raise ValueError("INVALID_OTP")
@@ -472,13 +473,19 @@ class AuthService:
             .filter((User.email == req.identifier) | (User.phone == req.identifier))
             .first()
         )
-        if not user or not verify_password(req.password, user.password_hash):
+        if not user or not await verify_password_async(req.password, user.password_hash):
             raise ValueError("INVALID_CREDENTIALS")
 
         if not user.email_verified:
             raise ValueError("EMAIL_NOT_VERIFIED")
         if not user.is_active:
             raise ValueError("ACCOUNT_DISABLED")
+
+        # Transparent rehash: legacy bcrypt hash → argon2id on next successful
+        # login. New users go straight to argon2id at register.
+        if password_needs_rehash(user.password_hash):
+            user.password_hash = await hash_password_async(req.password)
+            self._db.commit()
 
         tokens, jti = _issue_token_pair(str(user.id))
         await self._tokens.save(user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
@@ -561,7 +568,7 @@ class AuthService:
         user = self._db.query(User).filter(User.id == user_id).first()
         if not user:
             raise ValueError("USER_NOT_FOUND")
-        user.pin_hash = hash_pin(pin)
+        user.pin_hash = await hash_pin_async(pin)
         self._db.commit()
 
     # ── Phone change (Sprint 5c · Task 5.1) ──────────────────────────────
@@ -733,9 +740,9 @@ class AuthService:
             raise ValueError("USER_NOT_FOUND")
         if user.pin_hash is None:
             raise ValueError("PIN_NOT_SET")
-        if not verify_pin(old_pin, user.pin_hash):
+        if not await verify_pin_async(old_pin, user.pin_hash):
             raise ValueError("INVALID_PIN")
-        user.pin_hash = hash_pin(new_pin)
+        user.pin_hash = await hash_pin_async(new_pin)
         self._db.commit()
 
     async def forgot_password(self, identifier: str) -> None:
@@ -752,7 +759,7 @@ class AuthService:
         otp = OtpCode(
             user_id=user.id,
             phone=user.phone,
-            code_hash=hash_pin(code),
+            code_hash=await hash_pin_async(code),
             purpose=OtpPurpose.password_reset,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
@@ -789,13 +796,13 @@ class AuthService:
         if otp.attempts >= 3:
             raise ValueError("OTP_ATTEMPTS_EXCEEDED")
 
-        if not verify_pin(code, otp.code_hash):
+        if not await verify_pin_async(code, otp.code_hash):
             otp.attempts += 1
             self._db.commit()
             raise ValueError("INVALID_OTP")
 
         otp.used_at = datetime.now(UTC)
-        user.password_hash = hash_password(new_password)
+        user.password_hash = await hash_password_async(new_password)
         self._db.commit()
 
         await self._tokens.revoke_all(user_id=str(user.id))

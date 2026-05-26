@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -7,9 +8,21 @@ from passlib.context import CryptContext
 
 from app.core.config import settings
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-_pin_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# argon2id is the primary scheme; bcrypt is kept on the list so legacy
+# hashes still verify. ``deprecated="auto"`` means ``needs_update`` returns
+# True for any non-argon2 hash, letting us transparently rehash on the
+# next successful verify.
+_pwd_ctx = CryptContext(
+    schemes=["argon2", "bcrypt"],
+    deprecated="auto",
+)
+_pin_ctx = CryptContext(
+    schemes=["argon2", "bcrypt"],
+    deprecated="auto",
+)
 
+
+# ── Sync API (kept for tests + non-async callers) ─────────────────────
 
 def hash_password(pw: str) -> str:
     return _pwd_ctx.hash(pw)
@@ -19,6 +32,10 @@ def verify_password(pw: str, hashed: str) -> bool:
     return _pwd_ctx.verify(pw, hashed)
 
 
+def password_needs_rehash(hashed: str) -> bool:
+    return _pwd_ctx.needs_update(hashed)
+
+
 def hash_pin(pin: str) -> str:
     return _pin_ctx.hash(pin)
 
@@ -26,6 +43,31 @@ def hash_pin(pin: str) -> str:
 def verify_pin(pin: str, hashed: str) -> bool:
     return _pin_ctx.verify(pin, hashed)
 
+
+def pin_needs_rehash(hashed: str) -> bool:
+    return _pin_ctx.needs_update(hashed)
+
+
+# ── Async API (offloads CPU work to a threadpool so the event loop
+# isn't blocked on hashing under concurrent requests) ─────────────────
+
+async def hash_password_async(pw: str) -> str:
+    return await asyncio.to_thread(_pwd_ctx.hash, pw)
+
+
+async def verify_password_async(pw: str, hashed: str) -> bool:
+    return await asyncio.to_thread(_pwd_ctx.verify, pw, hashed)
+
+
+async def hash_pin_async(pin: str) -> str:
+    return await asyncio.to_thread(_pin_ctx.hash, pin)
+
+
+async def verify_pin_async(pin: str, hashed: str) -> bool:
+    return await asyncio.to_thread(_pin_ctx.verify, pin, hashed)
+
+
+# ── JWT ───────────────────────────────────────────────────────────────
 
 def create_access_token(*, subject: str, extra: dict[str, Any] | None = None, expires_in: timedelta = timedelta(minutes=20)) -> str:
     """Issue an access token with a unique ``jti`` claim.

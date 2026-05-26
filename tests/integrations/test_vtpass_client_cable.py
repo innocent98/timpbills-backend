@@ -42,13 +42,7 @@ def _patch_async_client(*, post_return=None, get_return=None):
     inner = MagicMock()
     inner.post = AsyncMock(return_value=post_return)
     inner.get = AsyncMock(return_value=get_return)
-
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=inner)
-    ctx.__aexit__ = AsyncMock(return_value=None)
-
-    factory = MagicMock(return_value=ctx)
-    return patch("app.integrations.vtpass.client.httpx.AsyncClient", factory), inner
+    return patch("app.integrations.vtpass.client._http", return_value=inner), inner
 
 
 # ── validate_smartcard ─────────────────────────────────────────────────

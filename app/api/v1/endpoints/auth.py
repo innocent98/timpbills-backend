@@ -14,7 +14,7 @@ from app.api.deps import (
     get_token_store,
 )
 from app.core.limiter import limiter
-from app.core.security import decode_token, hash_password, verify_password
+from app.core.security import decode_token, hash_password_async, verify_password_async
 from app.db.models.user import User
 from app.schemas.auth import (
     ForgotPasswordRequest,
@@ -407,7 +407,7 @@ async def change_password(
     Rate-limited 5/min to avoid letting a stolen access token brute-force
     the old password by repeatedly trying values.
     """
-    if not verify_password(payload.old_password, user.password_hash):
+    if not await verify_password_async(payload.old_password, user.password_hash):
         raise HTTPException(
             status_code=400,
             detail={
@@ -416,7 +416,7 @@ async def change_password(
             },
         )
 
-    user.password_hash = hash_password(payload.new_password)
+    user.password_hash = await hash_password_async(payload.new_password)
     user.tokens_revoked_at = datetime.now(UTC)
     db.add(user)
     db.commit()

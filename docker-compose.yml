@@ -1,8 +1,9 @@
 services:
   api:
+    image: timpbills-backend:dev
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      target: dev
     container_name: timpbills_api
     ports:
       - "8000:8000"
@@ -34,9 +35,7 @@ services:
       start_period: 15s
 
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
+    image: timpbills-backend:dev
     command: celery -A app.workers.celery_app worker -l info
     container_name: timpbills_worker
     volumes:
@@ -47,14 +46,16 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-timpbills}:${POSTGRES_PASSWORD:-timpbills_dev}@db:5432/${POSTGRES_DB:-timpbills}
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      db: { condition: service_healthy }
-      redis: { condition: service_healthy }
+      api:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   beat:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
+    image: timpbills-backend:dev
     command: celery -A app.workers.celery_app beat -l info
     container_name: timpbills_beat
     volumes:
@@ -65,8 +66,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-timpbills}:${POSTGRES_PASSWORD:-timpbills_dev}@db:5432/${POSTGRES_DB:-timpbills}
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      db: { condition: service_healthy }
-      redis: { condition: service_healthy }
+      api:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   db:
