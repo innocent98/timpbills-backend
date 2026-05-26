@@ -93,6 +93,31 @@ class EmailVerifiedResponse(BaseModel):
     tokens: AuthTokens | None = None
 
 
+# --- Phone verification (signup + existing-user migration; unauthenticated) ---
+#
+# B10: distinct from VerifyPhoneOtpRequest below, which is the body for the
+# *authenticated* /auth/phone/verify-otp endpoint (in-session Tier 1 upgrade).
+# This pair is consumed by the unauth /auth/phone/verify endpoint that mirrors
+# /auth/email/verify and emits the same next_action / pin_setup_token shape.
+
+class PhoneVerifyRequest(BaseModel):
+    phone: str
+    code: str = Field(min_length=6, max_length=6)
+
+
+class PhoneVerifiedResponse(BaseModel):
+    email_verified: bool
+    phone_verified: bool
+    pin_set: bool
+    next_action: Literal[
+        "email_verification_required",
+        "pin_setup_required",
+        "tokens_issued",
+    ]
+    pin_setup_token: str | None = None
+    tokens: AuthTokens | None = None
+
+
 # --- Phone verification (on-demand upgrade) ---
 
 class SendPhoneOtpRequest(BaseModel):

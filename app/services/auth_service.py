@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
+    from app.schemas.auth import PhoneVerifiedResponse
+
 from app.core.config import settings
 from app.core.logger import log
 from app.core.security import (
@@ -468,6 +470,89 @@ class AuthService:
             user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS,
         )
         return EmailVerifiedResponse(
+            email_verified=True,
+            phone_verified=True,
+            pin_set=True,
+            next_action="tokens_issued",
+            tokens=tokens,
+        )
+
+    async def verify_phone_otp_unauthed(
+        self, *, phone: str, code: str,
+    ) -> "PhoneVerifiedResponse":
+        """Public phone verification used during signup + existing-user migration.
+
+        Distinct from ``verify_phone_otp`` (authed) which targets the
+        tier_1 upgrade flow within an active session. This unauth variant
+        mirrors ``verify_email_otp``'s next_action shape — emits a scoped
+        ``pin_setup_token`` when email is verified but the PIN is not yet
+        set; issues a full token pair when all three gates pass.
+        """
+        from app.core.security import create_pin_setup_token
+        from app.schemas.auth import PhoneVerifiedResponse
+        from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
+
+        try:
+            phone = normalize_to_e164(phone)
+        except InvalidPhoneFormat:
+            raise ValueError("INVALID_PHONE_FORMAT")
+
+        user = self._db.query(User).filter(User.phone == phone).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+
+        otp = (
+            self._db.query(OtpCode)
+            .filter(
+                OtpCode.user_id == user.id,
+                OtpCode.purpose == OtpPurpose.phone_verification,
+                OtpCode.used_at.is_(None),
+            )
+            .order_by(OtpCode.created_at.desc())
+            .first()
+        )
+        if not otp:
+            raise ValueError("NO_ACTIVE_OTP")
+        if _is_expired(otp.expires_at):
+            raise ValueError("OTP_EXPIRED")
+        if otp.attempts >= 3:
+            raise ValueError("OTP_ATTEMPTS_EXCEEDED")
+        if not await verify_pin_async(code, otp.code_hash):
+            otp.attempts += 1
+            self._db.commit()
+            raise ValueError("INVALID_OTP")
+
+        otp.used_at = datetime.now(UTC)
+        user.is_phone_verified = True
+        user.kyc_level = KycLevel.tier_1
+        self._db.commit()
+
+        # B10: symmetric routing to /email/verify (B9).
+        #   - email not verified  → bounce mobile to the email-OTP screen.
+        #   - email verified, no PIN → emit scoped pin_setup_token so the
+        #     /auth/pin/set endpoint (post-B11) accepts the unauth caller.
+        #   - email verified + PIN set (existing-user migration) → all
+        #     three gates pass; issue the regular token pair.
+        if not user.email_verified:
+            return PhoneVerifiedResponse(
+                email_verified=False,
+                phone_verified=True,
+                pin_set=user.pin_hash is not None,
+                next_action="email_verification_required",
+            )
+        if user.pin_hash is None:
+            return PhoneVerifiedResponse(
+                email_verified=True,
+                phone_verified=True,
+                pin_set=False,
+                next_action="pin_setup_required",
+                pin_setup_token=create_pin_setup_token(user_id=str(user.id)),
+            )
+        tokens, jti = _issue_token_pair(str(user.id))
+        await self._tokens.save(
+            user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS,
+        )
+        return PhoneVerifiedResponse(
             email_verified=True,
             phone_verified=True,
             pin_set=True,

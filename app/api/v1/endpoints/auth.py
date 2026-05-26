@@ -20,6 +20,7 @@ from app.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
+    PhoneVerifyRequest,
     RefreshRequest,
     RegisterRequest,
     ResetPasswordRequest,
@@ -153,6 +154,38 @@ async def resend_email_otp(
     except ValueError as e:
         _raise(str(e))
     return success({"ok": True}, request_id=getattr(request.state, "request_id", None))
+
+
+# ---------------------------------------------------------------------------
+# Phone verification — signup + existing-user migration (UNAUTHENTICATED)
+#
+# B10: distinct from /phone/verify-otp below, which is the authenticated
+# in-session Tier 1 upgrade flow for an already-logged-in user. This route
+# mirrors /auth/email/verify: it's how a freshly-registered (or migrating)
+# user finishes the phone gate before any tokens exist, and it returns the
+# same next_action / pin_setup_token shape as /email/verify.
+# ---------------------------------------------------------------------------
+
+@router.post("/phone/verify")
+@limiter.limit("5/minute")
+async def verify_phone_otp_signup(
+    request: Request,
+    req: PhoneVerifyRequest,
+    svc: AuthService = Depends(get_auth_service),
+):
+    """Signup + migration phone verification (no auth required).
+
+    Distinct from /phone/verify-otp which is authenticated and is part
+    of the in-session tier_1 upgrade flow for an already-logged-in user.
+    """
+    try:
+        res = await svc.verify_phone_otp_unauthed(phone=req.phone, code=req.code)
+    except ValueError as e:
+        _raise(str(e))
+    return success(
+        res.model_dump(),
+        request_id=getattr(request.state, "request_id", None),
+    )
 
 
 # ---------------------------------------------------------------------------
