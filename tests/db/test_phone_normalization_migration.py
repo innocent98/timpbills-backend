@@ -7,7 +7,7 @@ isolated in-memory SQLite engine that's been pre-seeded with a minimal
 unit tests don't run against a real Postgres, they validate the
 migration's contract via SQLAlchemy's dialect-agnostic ``MigrationContext``.
 
-Three behaviours are pinned:
+Four behaviours are pinned:
 1. Non-E.164 phones (``08...``, ``234...``) are rewritten in place.
 2. Rows already in E.164 (``+234...``) are untouched (idempotence at
    the SQL filter level).
