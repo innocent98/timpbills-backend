@@ -200,10 +200,12 @@ async def test_full_new_user_journey(client, db_session):
     assert r.json()["data"]["email"] == email
     assert r.json()["data"]["phone"] == phone
 
-    # Email should have been sent
+    # B8: register now sends BOTH email and phone OTPs.
     assert len(_e2e_email_client.sent) == 1
     email_code = _e2e_email_client.sent[-1].code_or_body
     assert len(email_code) == 6 and email_code.isdigit()
+    assert len(_e2e_sms_client.sent) == 1
+    register_sms_count = 1
 
     # DB: user exists, not verified yet
     user = db_session.query(User).filter(User.email == email).first()
@@ -237,10 +239,11 @@ async def test_full_new_user_journey(client, db_session):
     db_session.refresh(user)
     assert user.pin_hash is not None
 
-    # Step 4: Send phone OTP
+    # Step 4: Send phone OTP — fresh send for the authenticated upgrade
+    # flow (in addition to the one already emitted at register time).
     r4 = await client.post("/api/v1/auth/phone/send-otp", headers=auth)
     assert r4.status_code == 200, r4.text
-    assert len(_e2e_sms_client.sent) == 1
+    assert len(_e2e_sms_client.sent) == register_sms_count + 1
     sms_code = _e2e_sms_client.sent[-1].code_or_message
     assert len(sms_code) == 6 and sms_code.isdigit()
 

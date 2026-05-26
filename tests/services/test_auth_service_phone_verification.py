@@ -25,14 +25,17 @@ async def _register_and_verify_email(db_session, phone="+2348011111111", email="
 
 @pytest.mark.asyncio
 async def test_send_phone_otp_happy_path(db_session):
+    """B8 update: register now sends a phone OTP too, so the explicit
+    send_phone_otp call below is the second SMS, not the first."""
     svc, sms, em = await _register_and_verify_email(db_session)
     user = db_session.query(User).filter_by(phone="+2348011111111").one()
+    register_sms_count = len(sms.sent)
 
     await svc.send_phone_otp(user_id=user.id)
 
-    assert len(sms.sent) == 1
-    assert sms.sent[0].phone == "+2348011111111"
-    assert len(sms.sent[0].code_or_message) == 6
+    assert len(sms.sent) == register_sms_count + 1
+    assert sms.sent[-1].phone == "+2348011111111"
+    assert len(sms.sent[-1].code_or_message) == 6
 
 
 @pytest.mark.asyncio
@@ -41,7 +44,9 @@ async def test_verify_phone_otp_upgrades_tier(db_session):
     user = db_session.query(User).filter_by(phone="+2348011111111").one()
 
     await svc.send_phone_otp(user_id=user.id)
-    code = sms.sent[0].code_or_message
+    # The newest OTP — the one just emitted by send_phone_otp — is what
+    # verify_phone_otp will consume (it orders by created_at DESC).
+    code = sms.sent[-1].code_or_message
 
     res = await svc.verify_phone_otp(user_id=user.id, code=code)
 
@@ -56,6 +61,9 @@ async def test_verify_phone_otp_upgrades_tier(db_session):
 
 @pytest.mark.asyncio
 async def test_verify_phone_otp_wrong_code(db_session):
+    """B8 update: register now persists a phone_verification OTP too, so
+    the table holds *two* rows after send_phone_otp. The attempts counter
+    we care about is on the newest row (the one verify_phone_otp picked)."""
     svc, sms, em = await _register_and_verify_email(db_session)
     user = db_session.query(User).filter_by(phone="+2348011111111").one()
 
@@ -64,12 +72,14 @@ async def test_verify_phone_otp_wrong_code(db_session):
     with pytest.raises(ValueError, match="INVALID_OTP"):
         await svc.verify_phone_otp(user_id=user.id, code="000000")
 
-    otp = (
+    latest = (
         db_session.query(OtpCode)
         .filter_by(purpose=OtpPurpose.phone_verification)
-        .one()
+        .order_by(OtpCode.created_at.desc())
+        .first()
     )
-    assert otp.attempts == 1
+    assert latest is not None
+    assert latest.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -78,7 +88,8 @@ async def test_send_phone_otp_already_verified(db_session):
     user = db_session.query(User).filter_by(phone="+2348011111111").one()
 
     await svc.send_phone_otp(user_id=user.id)
-    code = sms.sent[0].code_or_message
+    # Newest OTP — same reason as test_verify_phone_otp_upgrades_tier.
+    code = sms.sent[-1].code_or_message
     await svc.verify_phone_otp(user_id=user.id, code=code)
 
     with pytest.raises(ValueError, match="PHONE_ALREADY_VERIFIED"):

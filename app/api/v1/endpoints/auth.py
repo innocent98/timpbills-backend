@@ -70,6 +70,7 @@ def _build_me_response(user: User) -> UserResponse:
 _ERROR_MAP: dict[str, tuple[int, str]] = {
     "USER_ALREADY_EXISTS": (409, "User already exists"),
     "USER_NOT_FOUND": (404, "User not found"),
+    "INVALID_PHONE_FORMAT": (400, "Invalid phone number format"),
     "NO_ACTIVE_OTP": (400, "No active OTP"),
     "OTP_EXPIRED": (410, "OTP expired"),
     "OTP_ATTEMPTS_EXCEEDED": (429, "Too many attempts"),

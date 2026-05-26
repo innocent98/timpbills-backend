@@ -1,12 +1,15 @@
 import re
+from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
-
-_NIGERIAN_PHONE_RE = re.compile(r"^(\+234|0)[789][01]\d{8}$")
 
 
 class RegisterRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=80)
+    # B8: format checked at the service layer via ``normalize_to_e164``
+    # so a bad phone surfaces as 400 INVALID_PHONE_FORMAT, not a generic
+    # 422 VALIDATION_ERROR. The previous regex-based field_validator was
+    # removed deliberately.
     phone: str
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
@@ -14,13 +17,6 @@ class RegisterRequest(BaseModel):
     # codes are non-fatal — the user is registered regardless. See
     # spec §5.2 and the auth_service.register flow.
     referral_code: str | None = Field(default=None, max_length=8)
-
-    @field_validator("phone")
-    @classmethod
-    def validate_phone(cls, v: str) -> str:
-        if not _NIGERIAN_PHONE_RE.match(v):
-            raise ValueError("Invalid Nigerian phone number")
-        return v
 
     @field_validator("password")
     @classmethod
@@ -52,6 +48,9 @@ class RegisterResponse(BaseModel):
     # killswitch off, referrer inactive, etc.). Lets mobile surface a
     # soft-fail SnackBar when a code was sent but silently dropped.
     referred_by: bool = False
+    # B8: phone-only-auth — register no longer issues tokens. Mobile
+    # routes off ``next_action`` to the verify-email-and-phone step.
+    next_action: Literal["verify_email_and_phone"] = "verify_email_and_phone"
 
 
 class VerifyOtpRequest(BaseModel):

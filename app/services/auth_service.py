@@ -174,16 +174,31 @@ class AuthService:
         self._redis = redis
 
     async def register(self, req: RegisterRequest) -> RegisterResponse:
-        # Sprint 5c · Task 6.1: re-registration block.
-        # We look up by phone and email *separately* (instead of a single
-        # OR clause) because we want to surface a different error code
-        # for each lane — PHONE_RECENTLY_DELETED vs EMAIL_RECENTLY_DELETED
-        # — so mobile can render a precise hint to the user. Phone is
-        # checked first because it's the harder identifier to change.
+        """Phase A: register the user and emit BOTH email and phone OTPs.
+
+        No tokens issued — they come after both verifications + pin/set
+        under the phone-only-auth plan (B8 → B9 → B10 → B11).
+
+        Sprint 5c · Task 6.1 re-registration block still applies: phone
+        and email are checked *separately* (instead of a single OR clause)
+        so mobile can render a precise hint — PHONE_RECENTLY_DELETED vs
+        EMAIL_RECENTLY_DELETED. Phone is checked first because it's the
+        harder identifier to change.
+        """
+        # B8: normalise the phone to E.164 BEFORE the uniqueness check so
+        # ``08012345678`` and ``+2348012345678`` collide as expected. A
+        # malformed phone surfaces as 400 INVALID_PHONE_FORMAT at the
+        # endpoint (mapped from this ValueError).
+        from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
+        try:
+            phone = normalize_to_e164(req.phone)
+        except InvalidPhoneFormat:
+            raise ValueError("INVALID_PHONE_FORMAT")
+
         thirty_days_ago = datetime.now(UTC) - timedelta(days=30)
 
         existing_phone = (
-            self._db.query(User).filter(User.phone == req.phone).first()
+            self._db.query(User).filter(User.phone == phone).first()
         )
         if existing_phone is not None:
             if (
@@ -216,7 +231,7 @@ class AuthService:
         )
 
         user = User(
-            phone=req.phone,
+            phone=phone,
             email=req.email,
             full_name=req.full_name,
             password_hash=await hash_password_async(req.password),
@@ -234,23 +249,36 @@ class AuthService:
             referee=user, raw_code=req.referral_code,
         )
 
-        code = f"{secrets.randbelow(1_000_000):06d}"
-        otp = OtpCode(
+        # Two OTPs: email + phone. Both first-sends so no cooldown check
+        # (the cooldown helper exists for resend paths, not the initial
+        # register emission).
+        email_code = f"{secrets.randbelow(1_000_000):06d}"
+        phone_code = f"{secrets.randbelow(1_000_000):06d}"
+        self._db.add(OtpCode(
             user_id=user.id,
             email=user.email,
-            code_hash=await hash_pin_async(code),
+            code_hash=await hash_pin_async(email_code),
             purpose=OtpPurpose.email_verification,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        )
-        self._db.add(otp)
+        ))
+        self._db.add(OtpCode(
+            user_id=user.id,
+            phone=user.phone,
+            code_hash=await hash_pin_async(phone_code),
+            purpose=OtpPurpose.phone_verification,
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ))
         self._db.commit()
 
-        await self._email.send_otp(to=user.email, code=code)
+        await self._email.send_otp(to=user.email, code=email_code)
+        await self._sms.send_otp(phone=user.phone, code=phone_code)
+
         return RegisterResponse(
             user_id=str(user.id),
             email=user.email,
             phone=user.phone,
             referred_by=referred_by,
+            next_action="verify_email_and_phone",
         )
 
     # ── Referral attribution (Sprint 5b/B3) ──────────────────────────────
