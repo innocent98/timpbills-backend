@@ -10,7 +10,7 @@ from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
     ("07012345678", "+2347012345678"),
     ("09012345678", "+2349012345678"),
     ("  08012345678  ", "+2348012345678"),
-    ("0801 2345678", "+2348012345678"),
+    ("0801 2345678", "+2348012345678"),  # NBSP (U+00A0) — would fail with old replace(" ","")
 ])
 def test_normalize_valid(raw, expected):
     assert normalize_to_e164(raw) == expected
