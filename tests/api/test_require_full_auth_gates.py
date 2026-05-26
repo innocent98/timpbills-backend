@@ -38,7 +38,7 @@ def test_rejects_when_email_unverified_strict(monkeypatch):
         require_full_auth_gates(user=u)
     assert exc_info.value.status_code == 403
     assert exc_info.value.detail["code"] == "VERIFICATION_REQUIRED"
-    assert exc_info.value.detail["which"] == "email"
+    assert exc_info.value.detail["details"]["which"] == "email"
 
 
 def test_rejects_when_phone_unverified_strict(monkeypatch):
@@ -46,7 +46,7 @@ def test_rejects_when_phone_unverified_strict(monkeypatch):
     u = _make_user(phone_verified=False)
     with pytest.raises(HTTPException) as exc_info:
         require_full_auth_gates(user=u)
-    assert exc_info.value.detail["which"] == "phone"
+    assert exc_info.value.detail["details"]["which"] == "phone"
 
 
 def test_rejects_when_pin_missing_strict(monkeypatch):
@@ -54,7 +54,7 @@ def test_rejects_when_pin_missing_strict(monkeypatch):
     u = _make_user(pin_hash=None)
     with pytest.raises(HTTPException) as exc_info:
         require_full_auth_gates(user=u)
-    assert exc_info.value.detail["which"] == "pin_setup"
+    assert exc_info.value.detail["details"]["which"] == "pin_setup"
 
 
 def test_email_takes_priority_when_multiple_gates_fail(monkeypatch):
@@ -64,7 +64,7 @@ def test_email_takes_priority_when_multiple_gates_fail(monkeypatch):
     u = _make_user(email_verified=False, phone_verified=False, pin_hash=None)
     with pytest.raises(HTTPException) as exc_info:
         require_full_auth_gates(user=u)
-    assert exc_info.value.detail["which"] == "email"
+    assert exc_info.value.detail["details"]["which"] == "email"
 
 
 def test_phone_takes_priority_over_pin_when_email_ok(monkeypatch):
@@ -73,7 +73,7 @@ def test_phone_takes_priority_over_pin_when_email_ok(monkeypatch):
     u = _make_user(email_verified=True, phone_verified=False, pin_hash=None)
     with pytest.raises(HTTPException) as exc_info:
         require_full_auth_gates(user=u)
-    assert exc_info.value.detail["which"] == "phone"
+    assert exc_info.value.detail["details"]["which"] == "phone"
 
 
 def test_soft_mode_passes_with_warning(monkeypatch, caplog):

@@ -8,9 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.deps import (
     get_bill_service,
-    get_current_user,
     get_idempotency_service,
     get_wallet_service,
+    require_full_auth_gates,
     require_idempotency_key,
     require_pin_token,
 )
@@ -129,7 +129,7 @@ _CABLE_SUPPORTED_IDS = {"dstv", "gotv", "startimes"}
 @router.get("/airtime/networks", response_model=None)
 async def list_airtime_networks(
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     bill_svc: BillService = Depends(get_bill_service),
 ):
     """Dynamic network list — names + logos + min/max amounts come from
@@ -166,7 +166,7 @@ async def purchase_airtime(
     request: Request,
     body: AirtimePurchaseRequest,
     idem_key: str = Depends(require_idempotency_key),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     _pin_token: str = Depends(require_pin_token),
     bill_svc: BillService = Depends(get_bill_service),
     idem: IdempotencyService = Depends(get_idempotency_service),
@@ -256,7 +256,7 @@ async def purchase_airtime(
 async def validate_meter(
     request: Request,
     body: MeterValidationRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     bill_svc: BillService = Depends(get_bill_service),
 ):
     """Meter-number lookup against a DisCo. Not money-moving — no
@@ -310,7 +310,7 @@ async def purchase_electricity(
     request: Request,
     body: ElectricityPurchaseRequest,
     idem_key: str = Depends(require_idempotency_key),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     _pin_token: str = Depends(require_pin_token),
     bill_svc: BillService = Depends(get_bill_service),
     idem: IdempotencyService = Depends(get_idempotency_service),
@@ -442,7 +442,7 @@ async def purchase_electricity(
 @router.get("/cable/providers", response_model=None)
 async def list_cable_providers(
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     bill_svc: BillService = Depends(get_bill_service),
 ):
     """Dynamic cable provider list — fetched from VTPass then filtered
@@ -472,7 +472,7 @@ async def list_cable_providers(
 @router.get("/electricity/discos", response_model=None)
 async def list_electricity_discos(
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     bill_svc: BillService = Depends(get_bill_service),
 ):
     """NEW in Sprint 5 audit — enumerate the NG DisCos VTPass supports.
@@ -504,7 +504,7 @@ async def list_electricity_discos(
 async def validate_smartcard(
     request: Request,
     body: SmartcardValidationRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     bill_svc: BillService = Depends(get_bill_service),
 ):
     """Smartcard lookup against a cable provider. Not money-moving — no
@@ -562,7 +562,7 @@ async def list_cable_plans(
     request: Request,
     provider: str,
     mode: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     bill_svc: BillService = Depends(get_bill_service),
 ):
     """Return the cable bouquet catalog. `mode` is renew|change; both
@@ -600,7 +600,7 @@ async def purchase_cable(
     request: Request,
     body: CablePurchaseRequest,
     idem_key: str = Depends(require_idempotency_key),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     _pin_token: str = Depends(require_pin_token),
     bill_svc: BillService = Depends(get_bill_service),
     idem: IdempotencyService = Depends(get_idempotency_service),
@@ -714,7 +714,7 @@ async def purchase_cable(
 async def list_data_plans(
     request: Request,
     network: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     bill_svc: BillService = Depends(get_bill_service),
 ):
     plans = await bill_svc.list_data_plans(network=network)
@@ -742,7 +742,7 @@ async def purchase_data(
     request: Request,
     body: DataPurchaseRequest,
     idem_key: str = Depends(require_idempotency_key),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     _pin_token: str = Depends(require_pin_token),
     bill_svc: BillService = Depends(get_bill_service),
     idem: IdempotencyService = Depends(get_idempotency_service),

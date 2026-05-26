@@ -3,7 +3,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_db, require_full_auth_gates
 from app.core.limiter import limiter, per_user_or_ip
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.transaction import Transaction
@@ -56,7 +56,7 @@ def _parse_statuses(values: list[str] | None) -> list[TransactionStatus] | None:
 @limiter.limit("60/minute", key_func=per_user_or_ip)
 async def list_transactions(
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     db: Session = Depends(get_db),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -104,7 +104,7 @@ async def list_transactions(
 async def get_transaction(
     reference: str,
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     db: Session = Depends(get_db),
 ):
     t = (
@@ -128,7 +128,7 @@ async def get_transaction(
 async def get_transaction_events(
     reference: str,
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     db: Session = Depends(get_db),
 ):
     tx = (

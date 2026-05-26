@@ -436,12 +436,18 @@ def require_full_auth_gates(user: User = Depends(get_current_user)) -> User:
         return user
 
     if settings.AUTH_STRICT_GATES:
+        # ``which`` lives under ``details`` so the global error-handler
+        # surfaces it on the wire. The handler in
+        # ``app/middleware/error_handler.py`` projects ``detail`` to
+        # ``{code, message, details}`` — anything outside those three
+        # keys is dropped. Mobile reads ``error.details.which`` to route
+        # to the right screen (email-verify / phone-verify / set-pin).
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "code": "VERIFICATION_REQUIRED",
                 "message": f"{missing} verification required",
-                "which": missing,
+                "details": {"which": missing},
             },
         )
     log.warning(

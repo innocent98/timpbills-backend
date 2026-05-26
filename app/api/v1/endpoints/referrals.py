@@ -26,7 +26,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_db, require_full_auth_gates
 from app.core.limiter import limiter, per_user_or_ip
 from app.db.models.referral import Referral, ReferralStatus
 from app.db.models.user import User
@@ -156,7 +156,7 @@ def _compute_stats(db: Session, referrer_id) -> ReferralStats:
 @limiter.limit("60/minute", key_func=per_user_or_ip)
 async def get_referral_overview(
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     db: Session = Depends(get_db),
 ):
     settings_svc = AppSettingService(db=db, ttl_seconds=0)
@@ -233,7 +233,7 @@ async def get_referral_overview(
 @limiter.limit("60/minute", key_func=per_user_or_ip)
 async def list_referrals(
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     db: Session = Depends(get_db),
     limit: int = Query(default=20, ge=1, le=50),
     offset: int = Query(default=0, ge=0),

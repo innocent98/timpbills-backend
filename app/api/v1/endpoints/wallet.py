@@ -3,11 +3,11 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.deps import (
-    get_current_user,
     get_idempotency_service,
     get_paystack_provider,
     get_transaction_service,
     get_wallet_service,
+    require_full_auth_gates,
     require_idempotency_key,
     require_pin_token,
 )
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/wallet", tags=["wallet"])
 @limiter.limit("30/minute", key_func=per_user_or_ip)
 async def get_wallet(
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     svc: WalletService = Depends(get_wallet_service),
 ):
     w = svc.get_or_create(user_id=user.id)
@@ -69,7 +69,7 @@ async def fund_wallet(
     request: Request,
     body: FundWalletRequest,
     idem_key: str = Depends(require_idempotency_key),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_full_auth_gates),
     pin_token: str = Depends(require_pin_token),
     tx_svc: TransactionService = Depends(get_transaction_service),
     wallet_svc: WalletService = Depends(get_wallet_service),
