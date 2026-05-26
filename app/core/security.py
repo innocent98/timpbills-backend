@@ -103,3 +103,39 @@ def create_refresh_token(*, subject: str, jti: str, expires_in: timedelta = time
 
 def decode_token(token: str) -> dict[str, Any]:
     return jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+
+
+class InvalidPinSetupToken(ValueError):
+    """Raised when a pin_setup token fails validation."""
+
+
+def create_pin_setup_token(
+    *,
+    user_id: str,
+    expires_in: timedelta = timedelta(minutes=10),
+) -> str:
+    """Issue a short-lived scoped JWT that only /auth/pin/set will accept.
+
+    Carries claim ``scope: pin_setup`` plus a fresh ``jti`` for one-time
+    use (the endpoint blocklists the jti on consumption).
+    """
+    to_encode = {
+        "sub": user_id,
+        "scope": "pin_setup",
+        "jti": uuid4().hex,
+        "iat": datetime.now(tz=UTC),
+        "exp": datetime.now(tz=UTC) + expires_in,
+    }
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm="HS256")
+
+
+def verify_pin_setup_token(token: str) -> dict[str, Any]:
+    """Decode + validate a pin_setup token. Raises InvalidPinSetupToken
+    on any failure (signature, expiry, wrong scope)."""
+    try:
+        claims = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+    except Exception as exc:  # jose.JWTError, expired, malformed, etc.
+        raise InvalidPinSetupToken(f"invalid token: {exc}") from exc
+    if claims.get("scope") != "pin_setup":
+        raise InvalidPinSetupToken("wrong scope")
+    return claims
