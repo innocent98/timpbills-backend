@@ -198,6 +198,26 @@ class SetPinFirstTimeResponse(BaseModel):
     tokens: AuthTokens
 
 
+# B13: /auth/pin-login — cold-start PIN authentication.
+#
+# Mobile boots without a fresh access token (e.g. after a kill+relaunch
+# past the access TTL) but still holds the persisted refresh token. It
+# asks the user for the 4-digit PIN and trades {refresh_token, pin} for
+# a brand-new access+refresh pair. Reuses PinService's lockout machinery
+# so brute-force attempts share the counter with /auth/pin/verify.
+class PinLoginRequest(BaseModel):
+    refresh_token: str
+    pin: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$")
+
+
+class PinLoginResponse(BaseModel):
+    tokens: AuthTokens
+    # pin_set is always True on this branch (no PIN → no login at all),
+    # but we surface it explicitly so mobile's routing code can treat the
+    # response identically to /auth/email/verify and /auth/login.
+    pin_set: bool = True
+
+
 class ForgotPasswordRequest(BaseModel):
     identifier: str
 

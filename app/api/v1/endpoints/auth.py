@@ -17,10 +17,13 @@ from app.core.limiter import limiter
 from app.core.security import decode_token, hash_password_async, verify_password_async
 from app.db.models.user import User
 from app.schemas.auth import (
+    AuthTokens,
     ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     PhoneVerifyRequest,
+    PinLoginRequest,
+    PinLoginResponse,
     RefreshRequest,
     RegisterRequest,
     ResetPasswordRequest,
@@ -35,7 +38,15 @@ from app.schemas.pin import VerifyPinRequest, VerifyPinResponse
 from app.schemas.pin_change import PinChangeRequest
 from app.schemas.user_update import GenderEnum, UserResponse, UserUpdateRequest
 from app.services.auth_service import AuthService
-from app.services.pin_service import InvalidPin, PinLocked, PinNotSet, PinService
+from app.services.pin_service import (
+    AccountDisabled,
+    InvalidPin,
+    InvalidPinLoginToken,
+    PinLocked,
+    PinNotSet,
+    PinService,
+    UserNotFound,
+)
 from app.services.token_revocation_service import TokenRevocationService
 from app.services.token_store import TokenStore
 from app.utils.responses import success
@@ -89,6 +100,8 @@ _ERROR_MAP: dict[str, tuple[int, str]] = {
     "INVALID_PIN":        (401, "Invalid PIN"),
     "PIN_TOKEN_REQUIRED": (401, "X-Pin-Token header required"),
     "INVALID_PIN_TOKEN":  (401, "Invalid or expired PIN token"),
+    # B13: /auth/pin-login kill switch.
+    "PIN_LOGIN_DISABLED": (503, "PIN-based login is temporarily disabled"),
     # B11: /auth/pin/set scoped-token contract.
     "INVALID_PIN_SETUP_TOKEN": (401, "Invalid or expired pin_setup token"),
     "GATES_NOT_MET":           (400, "Email or phone verification not complete"),
@@ -304,6 +317,64 @@ async def refresh(
     except ValueError as e:
         _raise(str(e))
     return success(res.model_dump(), request_id=getattr(request.state, "request_id", None))
+
+
+# ---------------------------------------------------------------------------
+# B13: cold-start PIN login.
+#
+# Mobile boots without a fresh access token but still holds the persisted
+# refresh. It asks the user for their PIN and trades {refresh_token, pin}
+# for a brand-new access+refresh pair.  Replay defence is identical to
+# /auth/refresh (an already-rotated jti nukes every session).
+# ---------------------------------------------------------------------------
+
+@router.post("/pin-login")
+@limiter.limit("10/minute")
+async def pin_login(
+    request: Request,
+    req: PinLoginRequest,
+    svc: PinService = Depends(get_pin_service),
+    token_store: TokenStore = Depends(get_token_store),
+):
+    """Cold-start PIN login. Takes {refresh_token, pin} → fresh access+refresh.
+
+    Reuses PinService lockout (5 wrong attempts → 30-minute freeze), and the
+    refresh-rotation / replay-detection contract from /auth/refresh.
+    """
+    from app.core.config import settings
+    if not settings.AUTH_PIN_LOGIN_ENABLED:
+        _raise("PIN_LOGIN_DISABLED")
+
+    try:
+        access, refresh_tok = await svc.pin_login(
+            refresh_token=req.refresh_token,
+            pin=req.pin,
+            token_store=token_store,
+        )
+    except InvalidPinLoginToken:
+        _raise("INVALID_TOKEN")
+    except UserNotFound:
+        _raise("USER_NOT_FOUND")
+    except AccountDisabled:
+        _raise("ACCOUNT_DISABLED")
+    except PinNotSet:
+        _raise("PIN_NOT_SET")
+    except PinLocked:
+        _raise("PIN_LOCKED")
+    except InvalidPin:
+        _raise("INVALID_PIN")
+
+    expires_in = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    return success(
+        PinLoginResponse(
+            tokens=AuthTokens(
+                access_token=access,
+                refresh_token=refresh_tok,
+                expires_in=expires_in,
+            ),
+        ).model_dump(),
+        request_id=getattr(request.state, "request_id", None),
+    )
 
 
 @router.post("/logout", status_code=http_status.HTTP_204_NO_CONTENT)
