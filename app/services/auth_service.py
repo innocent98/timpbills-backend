@@ -665,16 +665,37 @@ class AuthService:
         return VerifyOtpResponse(tokens=tokens, pin_set=user.pin_hash is not None)
 
     async def login(self, req: LoginRequest) -> LoginResponse:
-        user = (
-            self._db.query(User)
-            .filter((User.email == req.identifier) | (User.phone == req.identifier))
-            .first()
-        )
+        """B12: phone-only credentials, ``next_action`` routing, inline phone OTP send.
+
+        Replaces the old (email|phone) identifier + always-tokens shape.
+        Used by both fresh sign-ups (after register + verify) and the
+        existing-user migration path where a tier_1 account predates the
+        phone-only-auth contract and still needs to prove ownership of
+        the phone before tokens are minted.
+
+        Gate evaluation order: email → phone → pin. The first unverified
+        gate decides ``next_action``; the response mirrors what
+        /auth/email/verify and /auth/phone/verify already emit so mobile
+        can reuse the same router.
+
+        When the phone gate is the first unverified one, we ALSO send a
+        fresh phone OTP inline (subject to the cooldown helper) so the
+        mobile client can transition straight to the OTP entry screen
+        without an extra round-trip. If the cooldown / daily-cap helper
+        blocks the send, ``phone_otp_sent=False`` is returned and mobile
+        shows the existing-OTP countdown UI instead.
+        """
+        from app.core.security import create_pin_setup_token
+        from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
+
+        try:
+            phone = normalize_to_e164(req.phone)
+        except InvalidPhoneFormat:
+            raise ValueError("INVALID_PHONE_FORMAT")
+
+        user = self._db.query(User).filter(User.phone == phone).first()
         if not user or not await verify_password_async(req.password, user.password_hash):
             raise ValueError("INVALID_CREDENTIALS")
-
-        if not user.email_verified:
-            raise ValueError("EMAIL_NOT_VERIFIED")
         if not user.is_active:
             raise ValueError("ACCOUNT_DISABLED")
 
@@ -684,9 +705,64 @@ class AuthService:
             user.password_hash = await hash_password_async(req.password)
             self._db.commit()
 
+        # Gate evaluation: email → phone → pin.
+        if not user.email_verified:
+            return LoginResponse(
+                next_action="email_verification_required",
+                pin_set=user.pin_hash is not None,
+            )
+
+        if not user.is_phone_verified:
+            # Inline OTP send — keyed on the same cooldown / daily-cap
+            # helper every other OTP-emitting path uses, so a rapid-tap
+            # caller can't bypass the resend window by hitting /login
+            # repeatedly. Blocks of either kind are swallowed and
+            # reflected via ``phone_otp_sent=False`` — mobile then shows
+            # the existing-OTP countdown instead of a "we just sent it"
+            # toast.
+            phone_otp_sent = False
+            try:
+                _check_otp_cooldown(
+                    self._db,
+                    user_id=user.id,
+                    purpose=OtpPurpose.phone_verification,
+                )
+                code = f"{secrets.randbelow(1_000_000):06d}"
+                self._db.add(OtpCode(
+                    user_id=user.id, phone=user.phone,
+                    code_hash=await hash_pin_async(code),
+                    purpose=OtpPurpose.phone_verification,
+                    expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                ))
+                self._db.commit()
+                await self._sms.send_otp(phone=user.phone, code=code)
+                phone_otp_sent = True
+            except (OtpCooldownActive, OtpDailyCapExceeded):
+                pass
+            return LoginResponse(
+                next_action="phone_verification_required",
+                pin_set=user.pin_hash is not None,
+                phone_otp_sent=phone_otp_sent,
+            )
+
+        if user.pin_hash is None:
+            return LoginResponse(
+                next_action="pin_setup_required",
+                pin_set=False,
+                pin_setup_token=create_pin_setup_token(user_id=str(user.id)),
+            )
+
         tokens, jti = _issue_token_pair(str(user.id))
-        await self._tokens.save(user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
-        return LoginResponse(tokens=tokens, pin_set=user.pin_hash is not None)
+        await self._tokens.save(
+            user_id=str(user.id),
+            jti=jti,
+            ttl_seconds=REFRESH_TOKEN_TTL_SECONDS,
+        )
+        return LoginResponse(
+            next_action="tokens_issued",
+            pin_set=True,
+            tokens=tokens,
+        )
 
     async def refresh(self, refresh_token: str) -> AuthTokens:
         try:

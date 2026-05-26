@@ -296,10 +296,10 @@ async def test_login_then_refresh_rotation(client):
         client, email="refresh@test.co", phone="+2348011111102"
     )
 
-    # Login to get a fresh token pair (device 1)
+    # Login to get a fresh token pair (device 1) — B12: phone field.
     r_login = await client.post(
         "/api/v1/auth/login",
-        json={"identifier": "refresh@test.co", "password": "Secret1!"},
+        json={"phone": "+2348011111102", "password": "Secret1!"},
     )
     assert r_login.status_code == 200, r_login.text
     tokens1 = r_login.json()["data"]["tokens"]
@@ -307,7 +307,7 @@ async def test_login_then_refresh_rotation(client):
     # Also login from a second "device"
     r_login2 = await client.post(
         "/api/v1/auth/login",
-        json={"identifier": "refresh@test.co", "password": "Secret1!"},
+        json={"phone": "+2348011111102", "password": "Secret1!"},
     )
     assert r_login2.status_code == 200, r_login2.text
     tokens2 = r_login2.json()["data"]["tokens"]
@@ -357,16 +357,17 @@ async def test_password_reset_revokes_sessions(client):
 
     await _seed_logged_in_user(client, email=email, phone=phone, password=old_password)
 
-    # Login device 1
+    # Login device 1 — B12: phone-only field.
     r1 = await client.post(
-        "/api/v1/auth/login", json={"identifier": email, "password": old_password}
+        "/api/v1/auth/login", json={"phone": phone, "password": old_password}
     )
     assert r1.status_code == 200
     tokens_d1 = r1.json()["data"]["tokens"]
 
-    # Login device 2
+    # Login device 2 (same phone — a single account; two refresh tokens
+    # simulate two devices on the same account).
     r2 = await client.post(
-        "/api/v1/auth/login", json={"identifier": phone, "password": old_password}
+        "/api/v1/auth/login", json={"phone": phone, "password": old_password}
     )
     assert r2.status_code == 200
     tokens_d2 = r2.json()["data"]["tokens"]
@@ -401,15 +402,15 @@ async def test_password_reset_revokes_sessions(client):
     )
     assert r_d2.status_code == 401, r_d2.text
 
-    # Login with NEW password → 200
+    # Login with NEW password → 200 (B12: phone-only field).
     r_new_login = await client.post(
-        "/api/v1/auth/login", json={"identifier": email, "password": new_password}
+        "/api/v1/auth/login", json={"phone": phone, "password": new_password}
     )
     assert r_new_login.status_code == 200, r_new_login.text
 
     # Login with OLD password → 401
     r_old_login = await client.post(
-        "/api/v1/auth/login", json={"identifier": email, "password": old_password}
+        "/api/v1/auth/login", json={"phone": phone, "password": old_password}
     )
     assert r_old_login.status_code == 401, r_old_login.text
     assert r_old_login.json()["error"]["code"] == "INVALID_CREDENTIALS"
@@ -643,8 +644,9 @@ async def test_register_rate_limit_exceeded(rate_limited_client):
 
 @pytest.mark.asyncio
 async def test_login_rate_limit_exceeded(rate_limited_client):
-    """6th /login call with bad creds should return 429 (limit 5/min)."""
-    payload = {"identifier": "nobody@example.com", "password": "WrongPass1!"}
+    """6th /login call with bad creds should return 429 (limit 5/min).
+    B12: phone field — uses a never-registered NG phone so password fails."""
+    payload = {"phone": "+2348099999988", "password": "WrongPass1!"}
     last = None
     for _ in range(6):
         last = await rate_limited_client.post("/api/v1/auth/login", json=payload)

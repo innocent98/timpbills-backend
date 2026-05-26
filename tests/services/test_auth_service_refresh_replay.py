@@ -45,8 +45,8 @@ async def test_replay_of_revoked_token_nukes_all_sessions(db_session, token_stor
     _stamp_migration_path(db_session, email="replay@e.co")
     code = em.sent[-1].code_or_body
     res = await svc.verify_email_otp(VerifyEmailOtpRequest(email="replay@e.co", code=code))
-    # Simulate another device logging in
-    res2 = await svc.login(LoginRequest(identifier="replay@e.co", password="Secret1!"))
+    # Simulate another device logging in (B12: phone-only field).
+    res2 = await svc.login(LoginRequest(phone="+2348099999002", password="Secret1!"))
 
     # Both tokens are valid right now. Rotate the first.
     await svc.refresh(res.tokens.refresh_token)

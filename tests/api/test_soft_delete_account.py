@@ -173,7 +173,7 @@ async def test_login_fails_after_soft_delete(client):
 
     bad = await client.post(
         "/api/v1/auth/login",
-        json={"identifier": "sd4@test.co", "password": "Secret1!"},
+        json={"phone": "+2348077777704", "password": "Secret1!"},
     )
     assert bad.status_code == 403, bad.text
     assert bad.json()["error"]["code"] == "ACCOUNT_DISABLED"

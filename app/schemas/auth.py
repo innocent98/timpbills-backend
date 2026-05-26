@@ -133,13 +133,35 @@ class VerifyPhoneOtpRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    identifier: str
+    # B12: phone-only login. Format is validated at the service layer via
+    # ``normalize_to_e164`` so a bad value surfaces as 400
+    # INVALID_PHONE_FORMAT rather than a generic 422 VALIDATION_ERROR.
+    # The old ``identifier`` field (email|phone) is removed deliberately.
+    phone: str
     password: str
 
 
 class LoginResponse(BaseModel):
-    tokens: AuthTokens
+    """B12: shape mirrors the post-verify response — mobile reuses the
+    same router that consumes /auth/email/verify and /auth/phone/verify.
+
+    Gate evaluation order is email → phone → pin; ``next_action`` reports
+    the first unverified gate. Tokens / pin_setup_token are populated
+    only on the branch they apply to; ``phone_otp_sent`` is populated
+    only on the phone-verification branch and reports whether the inline
+    OTP dispatch succeeded (False when blocked by cooldown / daily cap).
+    """
+
+    next_action: Literal[
+        "tokens_issued",
+        "email_verification_required",
+        "phone_verification_required",
+        "pin_setup_required",
+    ]
     pin_set: bool
+    tokens: AuthTokens | None = None
+    pin_setup_token: str | None = None
+    phone_otp_sent: bool | None = None
 
 
 class RefreshRequest(BaseModel):

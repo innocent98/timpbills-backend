@@ -130,17 +130,17 @@ async def test_change_password_actually_updates_password(client):
     )
     assert r.status_code == 204
 
-    # Old password fails
+    # Old password fails (B12: phone-only login field).
     bad = await client.post(
         "/api/v1/auth/login",
-        json={"identifier": "pc2@test.co", "password": "Secret1!"},
+        json={"phone": "+2348088888802", "password": "Secret1!"},
     )
     assert bad.status_code == 401, bad.text
 
     # New password works
     good = await client.post(
         "/api/v1/auth/login",
-        json={"identifier": "pc2@test.co", "password": "Newpass2!"},
+        json={"phone": "+2348088888802", "password": "Newpass2!"},
     )
     assert good.status_code == 200, good.text
 

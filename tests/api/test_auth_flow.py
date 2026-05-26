@@ -247,8 +247,8 @@ async def rate_limited_client(db_session):
 
 @pytest.mark.asyncio
 async def test_login_rate_limited(rate_limited_client):
-    """6th login attempt with bad creds should return 429."""
-    payload = {"identifier": "nobody@example.com", "password": "WrongPass1!"}
+    """6th login attempt with bad creds should return 429 (B12: phone field)."""
+    payload = {"phone": "+2348099999900", "password": "WrongPass1!"}
     last_response = None
     for _ in range(6):
         last_response = await rate_limited_client.post("/api/v1/auth/login", json=payload)
@@ -256,8 +256,9 @@ async def test_login_rate_limited(rate_limited_client):
 
 
 @pytest.mark.asyncio
-async def test_login_rejects_unverified_email(client):
-    """Register → skip email verify → login → expect 403 EMAIL_NOT_VERIFIED."""
+async def test_login_unverified_email_returns_email_action(client):
+    """B12: register → skip email verify → login → 200 with
+    next_action=email_verification_required (no longer 403)."""
     await client.post(
         "/api/v1/auth/register",
         json={
@@ -267,13 +268,14 @@ async def test_login_rejects_unverified_email(client):
             "password": "Secret1!",
         },
     )
-    # Do NOT verify email — attempt login immediately
     r = await client.post(
         "/api/v1/auth/login",
-        json={"identifier": "unverified@flow.co", "password": "Secret1!"},
+        json={"phone": "+2348022222230", "password": "Secret1!"},
     )
-    assert r.status_code == 403, r.text
-    assert r.json()["error"]["code"] == "EMAIL_NOT_VERIFIED"
+    assert r.status_code == 200, r.text
+    body = r.json()["data"]
+    assert body["next_action"] == "email_verification_required"
+    assert body.get("tokens") is None
 
 
 @pytest.mark.asyncio
@@ -333,7 +335,7 @@ async def test_login_rejects_inactive_user(db_session):
 
             r = await c.post(
                 "/api/v1/auth/login",
-                json={"identifier": "inactive@flow.co", "password": "Secret1!"},
+                json={"phone": "+2348022222231", "password": "Secret1!"},
             )
             assert r.status_code == 403, r.text
             assert r.json()["error"]["code"] == "ACCOUNT_DISABLED"
