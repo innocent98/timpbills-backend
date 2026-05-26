@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
 from fastapi import status as http_status
 from sqlalchemy.orm import Session
 
@@ -25,7 +25,7 @@ from app.schemas.auth import (
     RegisterRequest,
     ResetPasswordRequest,
     SendEmailOtpRequest,
-    SetPinRequest,
+    SetPinFirstTimeRequest,
     VerifyEmailOtpRequest,
     VerifyPhoneOtpRequest,
 )
@@ -89,6 +89,10 @@ _ERROR_MAP: dict[str, tuple[int, str]] = {
     "INVALID_PIN":        (401, "Invalid PIN"),
     "PIN_TOKEN_REQUIRED": (401, "X-Pin-Token header required"),
     "INVALID_PIN_TOKEN":  (401, "Invalid or expired PIN token"),
+    # B11: /auth/pin/set scoped-token contract.
+    "INVALID_PIN_SETUP_TOKEN": (401, "Invalid or expired pin_setup token"),
+    "GATES_NOT_MET":           (400, "Email or phone verification not complete"),
+    "PIN_ALREADY_SET":         (409, "PIN already set; use /pin/change instead"),
     # Sprint 5c · Task 5.1 — phone change flow.
     "PHONE_ALREADY_IN_USE": (409, "Phone already in use by another account"),
     "INVALID_REQUEST":      (400, "Invalid or expired phone change request"),
@@ -347,17 +351,35 @@ async def logout(
 
 
 @router.post("/pin/set")
+@limiter.limit("3/minute")
 async def set_pin(
     request: Request,
-    req: SetPinRequest,
+    req: SetPinFirstTimeRequest,
+    x_pin_setup_token: str = Header(..., alias="X-Pin-Setup-Token"),
     svc: AuthService = Depends(get_auth_service),
-    user: User = Depends(get_current_user),
+    revocation_svc: TokenRevocationService = Depends(get_token_revocation_service),
 ):
+    """First-time PIN setup. Requires a scoped pin_setup token issued by
+    /auth/email/verify, /auth/phone/verify, or /auth/login. One-time use:
+    the scoped token's jti is blocklisted on success.
+
+    Distinct from /pin/change (which requires bearer auth + the current
+    PIN). This endpoint is the only path that turns a freshly-verified
+    account into a logged-in session: success mints a full access+refresh
+    pair under the same shape as /auth/login.
+    """
     try:
-        await svc.set_pin(user_id=user.id, pin=req.pin)
+        res = await svc.set_pin_first_time(
+            scoped_token=x_pin_setup_token,
+            pin=req.pin,
+            revocation_svc=revocation_svc,
+        )
     except ValueError as e:
         _raise(str(e))
-    return success({"ok": True}, request_id=getattr(request.state, "request_id", None))
+    return success(
+        res.model_dump(),
+        request_id=getattr(request.state, "request_id", None),
+    )
 
 
 @router.post("/pin/change")

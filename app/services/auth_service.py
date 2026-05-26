@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
-    from app.schemas.auth import PhoneVerifiedResponse
+    from app.schemas.auth import PhoneVerifiedResponse, SetPinFirstTimeResponse
 
 from app.core.config import settings
 from app.core.logger import log
@@ -767,6 +767,68 @@ class AuthService:
             raise ValueError("USER_NOT_FOUND")
         user.pin_hash = await hash_pin_async(pin)
         self._db.commit()
+
+    async def set_pin_first_time(
+        self,
+        *,
+        scoped_token: str,
+        pin: str,
+        revocation_svc: "TokenRevocationService",
+    ) -> "SetPinFirstTimeResponse":
+        """Consume a scoped pin_setup token, set the PIN, issue full tokens.
+
+        One-time use: the scoped token's jti is added to the
+        TokenRevocationService blocklist on success so the same token
+        cannot be replayed.
+
+        Defense-in-depth: even when the token is valid, we re-check
+        both verification gates (email + phone) before accepting the
+        PIN. A token minted before a state mutation (admin clearing
+        a verification flag, race conditions) must not bypass them.
+        """
+        from app.core.security import (
+            InvalidPinSetupToken,
+            verify_pin_setup_token,
+        )
+        from app.schemas.auth import SetPinFirstTimeResponse
+
+        try:
+            claims = verify_pin_setup_token(scoped_token)
+        except InvalidPinSetupToken:
+            raise ValueError("INVALID_PIN_SETUP_TOKEN")
+
+        jti = claims.get("jti")
+        if not jti:
+            raise ValueError("INVALID_PIN_SETUP_TOKEN")
+        if await revocation_svc.is_revoked(jti):
+            raise ValueError("INVALID_PIN_SETUP_TOKEN")
+
+        try:
+            user_uuid = UUID(claims["sub"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("INVALID_PIN_SETUP_TOKEN")
+        user = self._db.query(User).filter(User.id == user_uuid).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+        if not (user.email_verified and user.is_phone_verified):
+            raise ValueError("GATES_NOT_MET")
+        if user.pin_hash is not None:
+            raise ValueError("PIN_ALREADY_SET")
+
+        user.pin_hash = await hash_pin_async(pin)
+        self._db.commit()
+
+        # One-time use: blocklist the jti for the remainder of its TTL.
+        exp = int(claims.get("exp", 0))
+        await revocation_svc.revoke(jti=jti, exp_unix_seconds=exp)
+
+        tokens, refresh_jti = _issue_token_pair(str(user.id))
+        await self._tokens.save(
+            user_id=str(user.id),
+            jti=refresh_jti,
+            ttl_seconds=REFRESH_TOKEN_TTL_SECONDS,
+        )
+        return SetPinFirstTimeResponse(pin_set=True, tokens=tokens)
 
     # ── Phone change (Sprint 5c · Task 5.1) ──────────────────────────────
     #

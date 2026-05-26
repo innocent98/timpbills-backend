@@ -162,6 +162,20 @@ class SetPinRequest(BaseModel):
     pin: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$")
 
 
+# B11: distinct request/response for the rewritten /auth/pin/set, which
+# is gated by an ``X-Pin-Setup-Token`` header (scoped JWT issued by
+# /auth/email/verify, /auth/phone/verify, or /auth/login) instead of
+# a bearer access token. The token is consumed one-time: the endpoint
+# blocklists its jti on success, then mints a full access+refresh pair.
+class SetPinFirstTimeRequest(BaseModel):
+    pin: str = Field(min_length=4, max_length=4, pattern=r"^\d{4}$")
+
+
+class SetPinFirstTimeResponse(BaseModel):
+    pin_set: bool
+    tokens: AuthTokens
+
+
 class ForgotPasswordRequest(BaseModel):
     identifier: str
 
