@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from jose import jwt
+from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from app.core.config import settings
@@ -134,7 +134,7 @@ def verify_pin_setup_token(token: str) -> dict[str, Any]:
     on any failure (signature, expiry, wrong scope)."""
     try:
         claims = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-    except Exception as exc:  # jose.JWTError, expired, malformed, etc.
+    except JWTError as exc:
         raise InvalidPinSetupToken(f"invalid token: {exc}") from exc
     if claims.get("scope") != "pin_setup":
         raise InvalidPinSetupToken("wrong scope")
