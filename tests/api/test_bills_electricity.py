@@ -472,13 +472,21 @@ async def test_electricity_purchase_logs_warning_when_phone_unverified(
     email + push) but the SMS path is silently misrouted. Endpoint
     logs a WARNING so ops can investigate the pattern.
 
-    _seed_logged_in_user creates users with is_phone_verified=False
-    (phone OTP step not run), which is exactly the target scenario.
+    B9 update: _seed_logged_in_user now takes the migration branch
+    (pre-stamps is_phone_verified=True so /email/verify yields tokens),
+    so we must explicitly UNVERIFY the phone after the seed to recreate
+    the target scenario.
 
     App uses loguru, not stdlib logging, so we monkeypatch `log.warning`
     directly to capture calls rather than using pytest's caplog.
     """
     _, headers = await _seed_logged_in_user(client)
+
+    # Reverse the migration pre-stamp's phone-verified flag.
+    user_row = db_session.query(User).filter(User.email == "e@e.co").one()
+    user_row.is_phone_verified = False
+    db_session.commit()
+
     _fund_wallet_directly(db_session, amount=Decimal("5000.00"))
     pin = await _pin_token(client, headers)
 

@@ -81,9 +81,16 @@ class VerifyEmailOtpRequest(BaseModel):
 
 
 class EmailVerifiedResponse(BaseModel):
-    tokens: AuthTokens
-    pin_set: bool
+    email_verified: bool
     phone_verified: bool
+    pin_set: bool
+    next_action: Literal[
+        "phone_verification_required",
+        "pin_setup_required",
+        "tokens_issued",
+    ]
+    pin_setup_token: str | None = None
+    tokens: AuthTokens | None = None
 
 
 # --- Phone verification (on-demand upgrade) ---

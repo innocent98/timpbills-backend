@@ -89,6 +89,10 @@ async def _seed_user(
     )
     assert r.status_code == 201, r.text
     user_id = r.json()["data"]["user_id"]
+
+    from tests._b9_seed import stamp_for_email_verify_tokens
+    stamp_for_email_verify_tokens(email=email)
+
     code = _test_email_client.sent[-1].code_or_body
     r2 = await client.post(
         "/api/v1/auth/email/verify", json={"email": email, "code": code}

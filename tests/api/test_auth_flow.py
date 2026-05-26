@@ -84,9 +84,14 @@ async def test_register_then_verify_email_happy_path(client):
     )
     assert r2.status_code == 200, r2.text
     body2 = r2.json()
-    assert body2["data"]["pin_set"] is False
+    # B9: fresh registration's first /email/verify call routes mobile
+    # to the phone-OTP screen with no tokens yet.
+    assert body2["data"]["email_verified"] is True
     assert body2["data"]["phone_verified"] is False
-    assert body2["data"]["tokens"]["access_token"]
+    assert body2["data"]["pin_set"] is False
+    assert body2["data"]["next_action"] == "phone_verification_required"
+    assert body2["data"].get("tokens") is None
+    assert body2["data"].get("pin_setup_token") is None
 
 
 @pytest.mark.asyncio
@@ -143,27 +148,52 @@ async def test_email_resend_endpoint(client):
 
 @pytest.mark.asyncio
 async def test_phone_upgrade_flow(client):
-    """Full phone upgrade: register → email verify → send phone OTP → verify phone OTP."""
+    """Full phone upgrade: register → email verify (migration path) →
+    re-trigger phone verification flow against the authenticated
+    /phone/send-otp + /phone/verify-otp endpoints.
+
+    B9: a fresh registration's /email/verify does NOT issue tokens
+    (no PIN, no phone-verified gate yet). We take the migration branch
+    here by pre-stamping phone-verified + PIN — the authenticated
+    /phone/verify-otp endpoint still has to behave correctly when
+    invoked again."""
+    email = "upgrade@test.co"
     # Register
     await client.post(
         "/api/v1/auth/register",
         json={
             "full_name": "Upgrade User",
             "phone": "+2348022222226",
-            "email": "upgrade@test.co",
+            "email": email,
             "password": "Secret1!",
         },
     )
+
+    from tests._b9_seed import stamp_for_email_verify_tokens
+    stamp_for_email_verify_tokens(email=email)
+
     email_code = _test_email_client.sent[-1].code_or_body
 
-    # Verify email → get tokens
+    # Verify email → get tokens (migration branch)
     r_ev = await client.post(
-        "/api/v1/auth/email/verify", json={"email": "upgrade@test.co", "code": email_code}
+        "/api/v1/auth/email/verify", json={"email": email, "code": email_code}
     )
     assert r_ev.status_code == 200, r_ev.text
     access_token = r_ev.json()["data"]["tokens"]["access_token"]
 
     headers = {"Authorization": f"Bearer {access_token}"}
+
+    # The migration pre-stamp marked phone as verified; flip it back so
+    # the on-demand /phone/send-otp + /phone/verify-otp paths exercise
+    # their intended state transitions. kyc_level was never promoted so
+    # it's already tier_0.
+    from app.api.deps import get_db
+    from app.db.models.user import User
+    from app.main import app as _app
+    db = next(_app.dependency_overrides[get_db]())
+    user = db.query(User).filter(User.email == email).first()
+    user.is_phone_verified = False
+    db.commit()
 
     # Send phone OTP (authenticated)
     r_send = await client.post("/api/v1/auth/phone/send-otp", headers=headers)
@@ -326,6 +356,10 @@ async def test_refresh_token_not_accepted_as_access(client):
             "password": "Secret1!",
         },
     )
+    # B9: migration-branch pre-stamp so /email/verify returns tokens.
+    from tests._b9_seed import stamp_for_email_verify_tokens
+    stamp_for_email_verify_tokens(email="tokentype@flow.co")
+
     # Verify email to get tokens
     code = _test_email_client.sent[-1].code_or_body
     r_ev = await client.post(

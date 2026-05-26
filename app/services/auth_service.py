@@ -436,12 +436,43 @@ class AuthService:
         user.email_verified = True
         self._db.commit()
 
+        # B9: route the response on remaining gates.
+        #   - phone not verified  → mobile bounces to the phone-OTP screen
+        #   - phone verified, no PIN → emit a scoped pin_setup_token so the
+        #     /auth/pin/set endpoint accepts it (mobile is not yet
+        #     authenticated; we cannot issue access tokens until the PIN
+        #     is set).
+        #   - phone verified + PIN already set (existing-user migration
+        #     path) → all three gates pass; issue the regular token pair.
+        if not user.is_phone_verified:
+            return EmailVerifiedResponse(
+                email_verified=True,
+                phone_verified=False,
+                pin_set=user.pin_hash is not None,
+                next_action="phone_verification_required",
+            )
+
+        if user.pin_hash is None:
+            from app.core.security import create_pin_setup_token
+            token = create_pin_setup_token(user_id=str(user.id))
+            return EmailVerifiedResponse(
+                email_verified=True,
+                phone_verified=True,
+                pin_set=False,
+                next_action="pin_setup_required",
+                pin_setup_token=token,
+            )
+
         tokens, jti = _issue_token_pair(str(user.id))
-        await self._tokens.save(user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS)
+        await self._tokens.save(
+            user_id=str(user.id), jti=jti, ttl_seconds=REFRESH_TOKEN_TTL_SECONDS,
+        )
         return EmailVerifiedResponse(
+            email_verified=True,
+            phone_verified=True,
+            pin_set=True,
+            next_action="tokens_issued",
             tokens=tokens,
-            pin_set=user.pin_hash is not None,
-            phone_verified=user.is_phone_verified,
         )
 
     async def send_phone_otp(self, user_id: UUID) -> None:

@@ -68,7 +68,10 @@ async def client(db_session):
 
 
 async def _seed_user_with_pin(client: AsyncClient, *, email: str, phone: str, pin: str = "1234") -> dict:
-    """Register → verify email → set PIN → return auth headers."""
+    """Register → verify email (migration path, PIN pre-stamped) → return
+    auth headers. B9: /email/verify only issues tokens when all three
+    gates pass; the helper pre-stamps phone-verified + PIN so the
+    migration branch fires and yields tokens."""
     r = await client.post(
         "/api/v1/auth/register",
         json={
@@ -80,6 +83,9 @@ async def _seed_user_with_pin(client: AsyncClient, *, email: str, phone: str, pi
     )
     assert r.status_code == 201, r.text
 
+    from tests._b9_seed import stamp_for_email_verify_tokens
+    stamp_for_email_verify_tokens(email=email, pin=pin)
+
     code = _test_email_client.sent[-1].code_or_body
     r2 = await client.post(
         "/api/v1/auth/email/verify",
@@ -87,15 +93,18 @@ async def _seed_user_with_pin(client: AsyncClient, *, email: str, phone: str, pi
     )
     assert r2.status_code == 200, r2.text
     tokens = r2.json()["data"]["tokens"]
-    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
-
-    r3 = await client.post("/api/v1/auth/pin/set", json={"pin": pin}, headers=headers)
-    assert r3.status_code == 200, r3.text
-    return headers
+    return {"Authorization": f"Bearer {tokens['access_token']}"}
 
 
 async def _seed_user_no_pin(client: AsyncClient, *, email: str, phone: str) -> dict:
-    """Register + email-verify, but DO NOT set a PIN."""
+    """Register + email-verify, but result in a user state with NO PIN.
+
+    B9 workaround: /email/verify won't issue auth tokens unless PIN is
+    set. So we pre-stamp PIN + phone-verified to take the migration
+    branch, then clear ``pin_hash`` in the DB AFTER tokens are issued.
+    The user ends up authenticated with no PIN — exactly what the
+    /pin/change tests need to exercise the PIN_NOT_SET error path.
+    """
     r = await client.post(
         "/api/v1/auth/register",
         json={
@@ -106,6 +115,10 @@ async def _seed_user_no_pin(client: AsyncClient, *, email: str, phone: str) -> d
         },
     )
     assert r.status_code == 201, r.text
+
+    from tests._b9_seed import stamp_for_email_verify_tokens
+    stamp_for_email_verify_tokens(email=email)
+
     code = _test_email_client.sent[-1].code_or_body
     r2 = await client.post(
         "/api/v1/auth/email/verify",
@@ -113,6 +126,16 @@ async def _seed_user_no_pin(client: AsyncClient, *, email: str, phone: str) -> d
     )
     assert r2.status_code == 200, r2.text
     tokens = r2.json()["data"]["tokens"]
+
+    # Now clear the PIN so callers see the "no-PIN" state.
+    from app.api.deps import get_db
+    from app.db.models.user import User
+    from app.main import app as _app
+    db = next(_app.dependency_overrides[get_db]())
+    user = db.query(User).filter(User.email == email).first()
+    user.pin_hash = None
+    db.commit()
+
     return {"Authorization": f"Bearer {tokens['access_token']}"}
 
 

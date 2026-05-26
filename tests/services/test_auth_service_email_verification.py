@@ -23,6 +23,9 @@ async def _register(svc: AuthService, email_client: FakeEmailClient, phone="+234
 
 @pytest.mark.asyncio
 async def test_verify_email_otp_happy_path(db_session):
+    """B9: a fresh registration's /verify_email_otp returns the
+    ``phone_verification_required`` branch — email_verified flips but
+    no tokens are issued yet (phone gate not passed)."""
     sms = FakeTermiiClient()
     email = FakeEmailClient()
     svc = AuthService(db=db_session, sms=sms, email=email, token_store=NullTokenStore())
@@ -32,14 +35,15 @@ async def test_verify_email_otp_happy_path(db_session):
     req = VerifyEmailOtpRequest(email="user@test.co", code=code)
     res = await svc.verify_email_otp(req)
 
-    assert res.tokens.access_token
-    assert res.tokens.refresh_token
-    assert res.pin_set is False
+    assert res.email_verified is True
     assert res.phone_verified is False
+    assert res.pin_set is False
+    assert res.next_action == "phone_verification_required"
+    assert res.tokens is None
+    assert res.pin_setup_token is None
 
     user = db_session.query(User).filter_by(email="user@test.co").one()
     assert user.email_verified is True
-    # kyc_level stays tier_0 after email verification (phone upgrade needed for tier_1)
     assert user.kyc_level == KycLevel.tier_0
     assert user.is_phone_verified is False
 

@@ -134,6 +134,20 @@ async def rate_limited_client(db_session):
 # Helper: seed a user all the way to email-verified + pin-set
 # ---------------------------------------------------------------------------
 
+def _resolve_test_db():
+    """Resolve the test DB session that the active ``client`` fixture
+    bound via ``app.dependency_overrides[get_db]``. Helpers run *inside*
+    a test, so an override is guaranteed to be installed."""
+    override = app.dependency_overrides.get(get_db)
+    if override is None:  # pragma: no cover — guards against fixture drift
+        raise RuntimeError("_seed_logged_in_user requires the client fixture")
+    gen = override()
+    try:
+        return next(gen)
+    except StopIteration as exc:  # pragma: no cover
+        raise RuntimeError("get_db override yielded nothing") from exc
+
+
 async def _seed_logged_in_user(
     client: AsyncClient,
     *,
@@ -143,10 +157,20 @@ async def _seed_logged_in_user(
     pin: str = "8527",
 ) -> tuple[dict, dict]:
     """
-    Register → verify email → set pin.
+    Register → flip phone-verified + PIN in the DB (existing-user
+    migration path) → verify email → receive full tokens.
+
+    B9 changed ``/auth/email/verify``: a fresh registration no longer
+    yields tokens — only the *migration* branch does (email last gate,
+    phone already verified, PIN already set). Pre-stamping the row
+    keeps the helper's contract (returns ``(tokens, auth_headers)``)
+    without depending on B10 (/phone/verify unauth) or B11 (rewritten
+    /pin/set) which are still pending.
 
     Returns (tokens_dict, auth_headers).
     """
+    from app.core.security import hash_pin
+
     r = await client.post(
         "/api/v1/auth/register",
         json={
@@ -158,17 +182,28 @@ async def _seed_logged_in_user(
     )
     assert r.status_code == 201, f"register failed: {r.text}"
 
+    # Migration-path pre-stamp: phone verified + PIN set so that the
+    # /email/verify call below takes the ``tokens_issued`` branch.
+    # We intentionally leave ``kyc_level`` at tier_0 — many downstream
+    # tests assume the ₦50,000 cap and the new helper must not silently
+    # promote them. (Real flow promotes tier_1 inside verify_phone_otp.)
+    db = _resolve_test_db()
+    user = db.query(User).filter(User.email == email).first()
+    assert user is not None, "register did not persist user"
+    user.is_phone_verified = True
+    user.pin_hash = hash_pin(pin)
+    db.commit()
+
     code = _e2e_email_client.sent[-1].code_or_body
     r2 = await client.post(
         "/api/v1/auth/email/verify", json={"email": email, "code": code}
     )
     assert r2.status_code == 200, f"email verify failed: {r2.text}"
-    tokens = r2.json()["data"]["tokens"]
+    data = r2.json()["data"]
+    assert data["next_action"] == "tokens_issued", data
+    tokens = data["tokens"]
 
     auth = {"Authorization": f"Bearer {tokens['access_token']}"}
-    r3 = await client.post("/api/v1/auth/pin/set", json={"pin": pin}, headers=auth)
-    assert r3.status_code == 200, f"pin/set failed: {r3.text}"
-
     return tokens, auth
 
 
@@ -215,52 +250,37 @@ async def test_full_new_user_journey(client, db_session):
     assert user.pin_hash is None
     assert user.kyc_level == KycLevel.tier_0
 
-    # Step 2: Verify email
+    # Step 2: Verify email — B9 contract.  Fresh registration, phone
+    # still unverified → response signals ``phone_verification_required``
+    # and emits NO tokens / pin_setup_token. Mobile bounces to the
+    # phone-OTP screen.
     r2 = await client.post(
         "/api/v1/auth/email/verify", json={"email": email, "code": email_code}
     )
     assert r2.status_code == 200, r2.text
     data2 = r2.json()["data"]
-    assert data2["pin_set"] is False
+    assert data2["email_verified"] is True
     assert data2["phone_verified"] is False
-    assert data2["tokens"]["access_token"]
+    assert data2["pin_set"] is False
+    assert data2["next_action"] == "phone_verification_required"
+    assert data2.get("tokens") is None
+    assert data2.get("pin_setup_token") is None
 
     # DB: email now verified
     db_session.refresh(user)
     assert user.email_verified is True
 
-    access_token = data2["tokens"]["access_token"]
-    auth = {"Authorization": f"Bearer {access_token}"}
-
-    # Step 3: Set PIN
-    r3 = await client.post("/api/v1/auth/pin/set", json={"pin": "8527"}, headers=auth)
-    assert r3.status_code == 200, r3.text
-
-    db_session.refresh(user)
-    assert user.pin_hash is not None
-
-    # Step 4: Send phone OTP — fresh send for the authenticated upgrade
-    # flow (in addition to the one already emitted at register time).
-    r4 = await client.post("/api/v1/auth/phone/send-otp", headers=auth)
-    assert r4.status_code == 200, r4.text
-    assert len(_e2e_sms_client.sent) == register_sms_count + 1
-    sms_code = _e2e_sms_client.sent[-1].code_or_message
-    assert len(sms_code) == 6 and sms_code.isdigit()
-
-    # Step 5: Verify phone OTP
-    r5 = await client.post(
-        "/api/v1/auth/phone/verify-otp", json={"code": sms_code}, headers=auth
-    )
-    assert r5.status_code == 200, r5.text
-    data5 = r5.json()["data"]
-    assert data5["tokens"]["access_token"]
-
-    # DB: final state — all verified, tier_1
-    db_session.refresh(user)
-    assert user.email_verified is True
-    assert user.is_phone_verified is True
-    assert user.kyc_level == KycLevel.tier_1
-    assert user.pin_hash is not None
+    # NOTE: B10 (/phone/verify unauthenticated) + B11 (rewritten /pin/set
+    # scoped-token) are still pending. The rest of the journey — phone
+    # OTP → PIN setup → full tokens — exercises those flows once they
+    # land. For now we stop after asserting the phone_verification_required
+    # branch, which is the new contract B9 introduced.
+    assert user.is_phone_verified is False
+    assert user.pin_hash is None
+    assert user.kyc_level == KycLevel.tier_0
+    # Quiet linter — register_sms_count is part of the original step-5
+    # block that will be reintroduced after B10/B11.
+    _ = register_sms_count
 
 
 # ===========================================================================
@@ -511,12 +531,17 @@ async def test_email_otp_resend(client):
     assert r_old.status_code == 400, r_old.text
     assert r_old.json()["error"]["code"] == "INVALID_OTP"
 
-    # New code succeeds
+    # New code succeeds — B9: fresh user verifying email returns
+    # ``phone_verification_required`` (no tokens yet) since phone is
+    # still unverified. The body still confirms email_verified=True.
     r_new = await client.post(
         "/api/v1/auth/email/verify", json={"email": email, "code": new_code}
     )
     assert r_new.status_code == 200, r_new.text
-    assert r_new.json()["data"]["tokens"]["access_token"]
+    data = r_new.json()["data"]
+    assert data["email_verified"] is True
+    assert data["next_action"] == "phone_verification_required"
+    assert data.get("tokens") is None
 
 
 # ===========================================================================
@@ -743,8 +768,12 @@ async def test_me_returns_current_user_state(client, db_session):
     assert data["email"] == email
     assert data["phone"] == phone
     assert data["email_verified"] is True
-    assert data["phone_verified"] is False  # phone not verified yet
+    # B9: _seed_logged_in_user takes the migration path — phone is
+    # pre-stamped verified and PIN pre-stamped set so /email/verify
+    # returns tokens. kyc_level deliberately stays tier_0 (no automatic
+    # promotion in the helper); real promotion happens in verify_phone_otp.
+    assert data["phone_verified"] is True
     assert data["pin_set"] is True
-    assert data["kyc_level"] == 0  # phone not verified → still tier_0
+    assert data["kyc_level"] == 0
     assert data["full_name"] == "Test User"
     assert data["user_id"]  # non-empty UUID string
