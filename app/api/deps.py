@@ -7,6 +7,7 @@ from redis.asyncio import Redis
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.logger import log
 from app.core.security import decode_token
 from app.db.models.user import User
 from app.db.session import SessionLocal
@@ -409,3 +410,42 @@ def get_token_revocation_service(
     redis: Redis = Depends(get_redis),
 ) -> TokenRevocationService:
     return TokenRevocationService(redis=redis)
+
+
+# --- Sprint 5d · B7: phone-only-auth gate enforcement ---
+def require_full_auth_gates(user: User = Depends(get_current_user)) -> User:
+    """Reject (403) any protected endpoint when the user has not yet passed
+    all three auth gates: email_verified, is_phone_verified, pin_hash set.
+
+    Soft mode (``AUTH_STRICT_GATES = False``): logs a warning + lets the
+    request through. Use during the rollout window while mobile catches
+    up to the new flows.
+    Strict mode (``AUTH_STRICT_GATES = True``): hard reject with a
+    ``VERIFICATION_REQUIRED`` 403 carrying ``which`` to tell mobile
+    which gate failed.
+    """
+    missing: str | None = None
+    if not user.email_verified:
+        missing = "email"
+    elif not user.is_phone_verified:
+        missing = "phone"
+    elif user.pin_hash is None:
+        missing = "pin_setup"
+
+    if missing is None:
+        return user
+
+    if settings.AUTH_STRICT_GATES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "VERIFICATION_REQUIRED",
+                "message": f"{missing} verification required",
+                "which": missing,
+            },
+        )
+    log.warning(
+        "auth_gates: user %s missing %s but soft mode active — request allowed",
+        user.id, missing,
+    )
+    return user
