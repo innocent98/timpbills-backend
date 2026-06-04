@@ -15,10 +15,11 @@ in `X-CSRF-Token`).
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api._filters import parse_enum_or_400
 from app.api.deps import (
     get_bill_service,
     get_db,
@@ -181,23 +182,31 @@ async def admin_list_transactions(
     request: Request,
     admin: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-    limit: int = 20, offset: int = 0,
-    type: str | None = None, status: str | None = None,
-    date_from: str | None = None, date_to: str | None = None,
-    user_id: str | None = None, q: str | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    date_from: datetime | None = Query(
+        default=None, description="Inclusive lower bound (ISO 8601)"
+    ),
+    date_to: datetime | None = Query(
+        default=None, description="Exclusive upper bound (ISO 8601)"
+    ),
+    user_id: str | None = Query(default=None),
+    q: str | None = Query(default=None),
 ):
     """Filterable, paginated transaction list for the ops dashboard.
 
-    ``limit`` is clamped to 1..100 so a runaway client can't pull the
-    whole table in one page. ``date_from``/``date_to`` are ISO-8601.
+    ``limit`` is bounded 1..100 (422 on violation) so a runaway client
+    can't pull the whole table in one page. ``date_from`` is inclusive,
+    ``date_to`` exclusive. Bad ``type``/``status`` values are a 400
+    ``INVALID_FILTER`` (client error), never a 500.
     """
-    limit = max(1, min(limit, 100))
-    offset = max(0, offset)
-    df = datetime.fromisoformat(date_from) if date_from else None
-    dt = datetime.fromisoformat(date_to) if date_to else None
+    type_enum = parse_enum_or_400(TransactionType, type, field="type")
+    status_enum = parse_enum_or_400(TransactionStatus, status, field="status")
     data = AdminService(db=db).list_transactions(
-        limit=limit, offset=offset, type_=type, status=status,
-        date_from=df, date_to=dt, user_id=user_id, q=q,
+        limit=limit, offset=offset, type_=type_enum, status=status_enum,
+        date_from=date_from, date_to=date_to, user_id=user_id, q=q,
     )
     return success(data, request_id=getattr(request.state, "request_id", None))
 

@@ -106,8 +106,8 @@ class AdminService:
         }
 
     def list_transactions(
-        self, *, limit: int, offset: int, type_: str | None = None,
-        status: str | None = None, date_from: datetime | None = None,
+        self, *, limit: int, offset: int, type_: TransactionType | None = None,
+        status: TransactionStatus | None = None, date_from: datetime | None = None,
         date_to: datetime | None = None, user_id: str | None = None,
         q: str | None = None,
     ) -> dict:
@@ -116,19 +116,23 @@ class AdminService:
         Joins User so each row carries the customer name without an N+1
         per-row lookup. Newest-first. ``total`` is the pre-pagination
         count so the dashboard can render page controls.
+
+        ``type_``/``status`` are already-parsed enum members (the endpoint
+        validates the raw query strings into 400s); ``date_from`` is
+        inclusive, ``date_to`` exclusive.
         """
         query = (
             self._db.query(Transaction, User)
             .join(User, User.id == Transaction.user_id)
         )
         if type_:
-            query = query.filter(Transaction.type == TransactionType(type_))
+            query = query.filter(Transaction.type == type_)
         if status:
-            query = query.filter(Transaction.status == TransactionStatus(status))
+            query = query.filter(Transaction.status == status)
         if date_from:
             query = query.filter(Transaction.created_at >= date_from)
         if date_to:
-            query = query.filter(Transaction.created_at <= date_to)
+            query = query.filter(Transaction.created_at < date_to)
         if user_id:
             query = query.filter(Transaction.user_id == user_id)
         if q:

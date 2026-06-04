@@ -55,6 +55,86 @@ async def test_transactions_list_filters_by_status(admin_ctx, login_admin):
 
 
 @pytest.mark.asyncio
+async def test_transactions_q_filters_by_customer_name(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    await login_admin()
+    ada = _seed_user(db, full_name="Ada Customer", email="ada@x.com", phone="+2348030000001")
+    bola = _seed_user(db, full_name="Bola Seller", email="bola@x.com", phone="+2348030000002")
+    _seed_tx(db, ada.id, type_=TransactionType.airtime, status=TransactionStatus.success, amount="1000")
+    _seed_tx(db, bola.id, type_=TransactionType.data, status=TransactionStatus.success, amount="500")
+
+    r = await client.get("/api/v1/admin/transactions?q=Ada")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["total"] == 1
+    assert all(i["customer_name"] == "Ada Customer" for i in data["items"])
+
+
+@pytest.mark.asyncio
+async def test_transactions_q_filters_by_reference_fragment(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    await login_admin()
+    u = _seed_user(db)
+    tx = _seed_tx(db, u.id, type_=TransactionType.airtime, status=TransactionStatus.success, amount="1000")
+    _seed_user(db, full_name="Other", email="other@x.com", phone="+2348030000099")
+
+    fragment = tx.reference[-6:]
+    r = await client.get(f"/api/v1/admin/transactions?q={fragment}")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["total"] == 1
+    assert data["items"][0]["reference"] == tx.reference
+
+
+@pytest.mark.asyncio
+async def test_transactions_pagination_and_total(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    await login_admin()
+    u = _seed_user(db)
+    for _ in range(3):
+        _seed_tx(db, u.id, type_=TransactionType.airtime, status=TransactionStatus.success, amount="100")
+
+    r1 = await client.get("/api/v1/admin/transactions?limit=2&offset=0")
+    assert r1.status_code == 200
+    d1 = r1.json()["data"]
+    assert d1["total"] == 3
+    assert len(d1["items"]) == 2
+
+    r2 = await client.get("/api/v1/admin/transactions?limit=2&offset=2")
+    assert r2.status_code == 200
+    d2 = r2.json()["data"]
+    assert d2["total"] == 3
+    assert len(d2["items"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_transactions_invalid_status_filter_400(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    await login_admin()
+    r = await client.get("/api/v1/admin/transactions?status=bogus")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_FILTER"
+
+
+@pytest.mark.asyncio
+async def test_transactions_invalid_type_filter_400(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    await login_admin()
+    r = await client.get("/api/v1/admin/transactions?type=bogus")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_FILTER"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, 500])
+async def test_transactions_invalid_limit_422(admin_ctx, login_admin, limit):
+    client, db, _redis = admin_ctx
+    await login_admin()
+    r = await client.get(f"/api/v1/admin/transactions?limit={limit}")
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_transaction_detail_returns_events_and_user(admin_ctx, login_admin):
     client, db, _redis = admin_ctx
     await login_admin()
