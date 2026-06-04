@@ -30,6 +30,7 @@ from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.admin_user import AdminUser
 from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
+from app.db.models.user import KycLevel
 from app.services.admin_service import AdminService
 from app.services.bill_service import BillService
 from app.utils.responses import success
@@ -225,5 +226,48 @@ async def admin_transaction_detail(
         raise HTTPException(
             status_code=404,
             detail={"code": "TRANSACTION_NOT_FOUND", "message": "Transaction not found"},
+        )
+    return success(data, request_id=getattr(request.state, "request_id", None))
+
+
+@router.get("/users", response_model=None)
+async def admin_list_users(
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    q: str | None = Query(default=None),
+    tier: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+):
+    """Filterable, paginated user list for the admin dashboard.
+
+    ``q`` matches name/email/phone. ``tier`` is a KYC-level enum filter
+    (bad value → 400 ``INVALID_FILTER``). ``status`` is a free-text
+    active/deleted filter handled in the service. Full PII returned —
+    trusted surface.
+    """
+    tier_enum = parse_enum_or_400(KycLevel, tier, field="tier")
+    data = AdminService(db=db).list_users(
+        limit=limit, offset=offset, q=q, tier=tier_enum, status=status
+    )
+    return success(data, request_id=getattr(request.state, "request_id", None))
+
+
+@router.get("/users/{user_id}", response_model=None)
+async def admin_user_detail(
+    user_id: str,
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Full profile payload for one user — profile + wallet + referral +
+    recent transactions. 404 ``USER_NOT_FOUND`` on unknown or non-UUID id."""
+    data = AdminService(db=db).get_user_detail(user_id=user_id)
+    if data is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "USER_NOT_FOUND", "message": "User not found"},
         )
     return success(data, request_id=getattr(request.state, "request_id", None))

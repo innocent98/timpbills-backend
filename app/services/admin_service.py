@@ -11,7 +11,8 @@ from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment
 from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
-from app.db.models.user import User
+from app.db.models.user import KycLevel, User
+from app.db.models.wallet import Wallet
 
 _SUCCESS = TransactionStatus.success
 _AWAITING = (TransactionStatus.refund_pending, TransactionStatus.refund_failed)
@@ -214,5 +215,96 @@ class AdminService:
                     "created_at": e.created_at.isoformat(),
                 }
                 for e in events
+            ],
+        }
+
+    def list_users(
+        self, *, limit: int, offset: int, q: str | None = None,
+        tier: KycLevel | None = None, status: str | None = None,
+    ) -> dict:
+        """Filterable, paginated user list for the admin dashboard.
+
+        Outer-joins Wallet so each row carries the balance without an N+1
+        per-row lookup (a user may have no wallet row yet). ``q`` matches
+        name/email/phone (ILIKE). ``status`` is a free-text active/deleted
+        filter, not an enum. Newest-first; ``total`` is the pre-pagination
+        count. PII (email/phone) is returned in FULL — trusted surface.
+        """
+        query = self._db.query(User, Wallet).outerjoin(Wallet, Wallet.user_id == User.id)
+        if q:
+            like = f"%{q}%"
+            query = query.filter(
+                User.full_name.ilike(like) | User.email.ilike(like) | User.phone.ilike(like)
+            )
+        if tier is not None:
+            query = query.filter(User.kyc_level == tier)
+        if status == "active":
+            query = query.filter(User.is_active.is_(True), User.deleted_at.is_(None))
+        elif status == "deleted":
+            query = query.filter(User.deleted_at.isnot(None))
+        total = query.count()
+        rows = query.order_by(User.created_at.desc()).limit(limit).offset(offset).all()
+        items = [
+            {
+                "id": str(u.id),
+                "full_name": u.full_name,
+                "email": u.email,
+                "phone": u.phone,
+                "kyc_tier": u.kyc_level.numeric,
+                "wallet_balance": f"{(w.balance if w else 0):.2f}",
+                "status": "deleted" if u.deleted_at else ("active" if u.is_active else "disabled"),
+                "created_at": u.created_at.isoformat(),
+            }
+            for u, w in rows
+        ]
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    def get_user_detail(self, *, user_id: str) -> dict | None:
+        """Full profile payload for one user — profile + wallet + referral
+        + the 10 most-recent transactions.
+
+        Returns None when the id is unknown OR not a valid UUID so the
+        endpoint maps both to a clean 404 (never a 500). PII is returned in
+        FULL — admin is a trusted surface.
+        """
+        import uuid
+
+        try:
+            uid = uuid.UUID(user_id)
+        except (TypeError, ValueError):
+            return None
+        u = self._db.query(User).filter(User.id == uid).first()
+        if u is None:
+            return None
+        w = self._db.query(Wallet).filter(Wallet.user_id == uid).first()
+        recent = (
+            self._db.query(Transaction)
+            .filter(Transaction.user_id == uid)
+            .order_by(Transaction.created_at.desc())
+            .limit(10).all()
+        )
+        referred_count = (
+            self._db.query(User).filter(User.referred_by_user_id == uid).count()
+        )
+        return {
+            "id": str(u.id),
+            "full_name": u.full_name,
+            "email": u.email,
+            "phone": u.phone,
+            "kyc_tier": u.kyc_level.numeric,
+            "email_verified": u.email_verified,
+            "phone_verified": u.is_phone_verified,
+            "status": "deleted" if u.deleted_at else ("active" if u.is_active else "disabled"),
+            "created_at": u.created_at.isoformat(),
+            "wallet_balance": f"{(w.balance if w else 0):.2f}",
+            "wallet_cap": f"{(w.balance_cap if w else 0):.2f}",
+            "referral": {"code": u.referral_code, "referred_count": referred_count},
+            "recent_transactions": [
+                {
+                    "reference": t.reference, "type": t.type.value,
+                    "status": t.status.value, "amount": f"{t.amount:.2f}",
+                    "created_at": t.created_at.isoformat(),
+                }
+                for t in recent
             ],
         }
