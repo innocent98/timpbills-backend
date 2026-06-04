@@ -175,6 +175,52 @@ class AuthService:
         # error if a flow that needs redis is invoked without one.
         self._redis = redis
 
+    async def _send_otp_sms(
+        self, *, phone: str, code: str, user_id: UUID | None,
+    ) -> None:
+        """Send an OTP SMS via the SMS provider and audit-log the send.
+
+        Single funnel for every OTP-SMS site (register, send_phone_otp,
+        the inline /login phone OTP, request_phone_change, forgot_password)
+        so the notification_logs audit row is written in exactly one place.
+
+        Best-effort logging: the audit write is wrapped so a logging failure
+        can never break OTP delivery. The actual ``send_otp`` call is NOT
+        caught here — callers depend on its existing raise/return behaviour
+        (e.g. nothing currently catches it, and we must not change that).
+        The Termii ``send_otp`` returns None (no provider reference), so the
+        sent row carries no provider_reference.
+        """
+        from app.db.models.notification_log import NotificationChannel
+        from app.services.notification_log_service import NotificationLogService
+
+        log_row = None
+        try:
+            log_row = NotificationLogService(db=self._db).record_pending(
+                user_id=user_id, event="otp",
+                channel=NotificationChannel.sms, provider="termii",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auth: otp log record_pending failed err=%s", exc)
+
+        try:
+            await self._sms.send_otp(phone=phone, code=code)
+        except Exception as exc:
+            if log_row is not None:
+                try:
+                    NotificationLogService(db=self._db).mark_failed(
+                        log_row, error=str(exc),
+                    )
+                except Exception as log_exc:  # noqa: BLE001
+                    log.warning("auth: otp log mark_failed failed err=%s", log_exc)
+            raise
+
+        if log_row is not None:
+            try:
+                NotificationLogService(db=self._db).mark_sent(log_row)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("auth: otp log mark_sent failed err=%s", exc)
+
     async def register(self, req: RegisterRequest) -> RegisterResponse:
         """Phase A: register the user and emit BOTH email and phone OTPs.
 
@@ -273,7 +319,7 @@ class AuthService:
         self._db.commit()
 
         await self._email.send_otp(to=user.email, code=email_code)
-        await self._sms.send_otp(phone=user.phone, code=phone_code)
+        await self._send_otp_sms(phone=user.phone, code=phone_code, user_id=user.id)
 
         return RegisterResponse(
             user_id=str(user.id),
@@ -580,7 +626,7 @@ class AuthService:
         self._db.add(otp)
         self._db.commit()
 
-        await self._sms.send_otp(phone=user.phone, code=code)
+        await self._send_otp_sms(phone=user.phone, code=code, user_id=user.id)
 
     async def verify_phone_otp(self, user_id: UUID, code: str) -> VerifyOtpResponse:
         """Verify phone OTP for an authenticated user and upgrade to Tier 1."""
@@ -735,7 +781,9 @@ class AuthService:
                     expires_at=datetime.now(UTC) + timedelta(minutes=5),
                 ))
                 self._db.commit()
-                await self._sms.send_otp(phone=user.phone, code=code)
+                await self._send_otp_sms(
+                    phone=user.phone, code=code, user_id=user.id,
+                )
                 phone_otp_sent = True
             except (OtpCooldownActive, OtpDailyCapExceeded):
                 pass
@@ -982,7 +1030,7 @@ class AuthService:
 
         # Send via Termii (sync wrapper around the async client method —
         # mirrors send_phone_otp above).
-        await self._sms.send_otp(phone=new_phone, code=otp)
+        await self._send_otp_sms(phone=new_phone, code=otp, user_id=user.id)
         return request_id
 
     async def confirm_phone_change(
@@ -1101,7 +1149,7 @@ class AuthService:
         self._db.add(otp)
         self._db.commit()
 
-        await self._sms.send_otp(phone=user.phone, code=code)
+        await self._send_otp_sms(phone=user.phone, code=code, user_id=user.id)
 
     async def reset_password(self, identifier: str, code: str, new_password: str) -> None:
         user = (

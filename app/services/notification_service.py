@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from app.core.logger import log
+from app.db.models.notification_log import NotificationChannel, NotificationLog
 from app.integrations.email.base import EmailProvider
 from app.integrations.email.renderer import render_email
 from app.integrations.push.base import BasePushClient
@@ -317,7 +318,7 @@ class NotificationService:
 
         if prefs.email_allowed:
             await self._maybe_email(
-                user_email=user_email, event=event, context=context,
+                user_id=user_id, user_email=user_email, event=event, context=context,
             )
 
         category = EVENT_CATEGORY.get(event)
@@ -334,8 +335,73 @@ class NotificationService:
                 user_id=user_id, event=event, context=context,
             )
 
+    # ── Best-effort audit logging (Task 13) ──────────────────────────────
+    #
+    # Every channel send records a notification_logs row: pending → sent /
+    # failed. The writes are wrapped so a logging failure can NEVER break
+    # the underlying send — an audit-trail hiccup must not cost a user their
+    # receipt or token. When ``self._db`` is None (legacy unit tests that
+    # construct the service without a session) logging is skipped entirely.
+
+    def _log_pending(
+        self,
+        *,
+        user_id: str | None,
+        event: NotificationEvent,
+        channel: NotificationChannel,
+        provider: str,
+    ) -> NotificationLog | None:
+        if self._db is None:
+            return None
+        try:
+            uid: UUID | None = None
+            if user_id:
+                try:
+                    uid = UUID(user_id)
+                except (TypeError, ValueError):
+                    uid = None
+            from app.services.notification_log_service import (  # noqa: PLC0415
+                NotificationLogService,
+            )
+            return NotificationLogService(db=self._db).record_pending(
+                user_id=uid, event=event.value, channel=channel, provider=provider,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "notify: log record_pending failed event=%s channel=%s err=%s",
+                event.value, channel.value, exc,
+            )
+            return None
+
+    def _log_sent(self, row: NotificationLog | None) -> None:
+        if self._db is None or row is None:
+            return
+        try:
+            from app.services.notification_log_service import (  # noqa: PLC0415
+                NotificationLogService,
+            )
+            NotificationLogService(db=self._db).mark_sent(row)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("notify: log mark_sent failed err=%s", exc)
+
+    def _log_failed(self, row: NotificationLog | None, *, error: str) -> None:
+        if self._db is None or row is None:
+            return
+        try:
+            from app.services.notification_log_service import (  # noqa: PLC0415
+                NotificationLogService,
+            )
+            NotificationLogService(db=self._db).mark_failed(row, error=error)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("notify: log mark_failed failed err=%s", exc)
+
     async def _maybe_email(
-        self, *, user_email: str, event: NotificationEvent, context: dict[str, Any]
+        self,
+        *,
+        user_id: str,
+        user_email: str,
+        event: NotificationEvent,
+        context: dict[str, Any],
     ) -> None:
         if not user_email:
             return
@@ -351,15 +417,22 @@ class NotificationService:
             )
             return
         subject = _email_subject(event, context)
+        log_row = self._log_pending(
+            user_id=user_id, event=event,
+            channel=NotificationChannel.email, provider="resend",
+        )
         try:
             await self._email.send_text(
                 to=user_email, subject=subject, html=html, text=text,
             )
         except Exception as exc:
+            self._log_failed(log_row, error=str(exc))
             log.warning(
                 "notify: email send failed event=%s to=%s err=%s",
                 event.value, user_email, exc,
             )
+        else:
+            self._log_sent(log_row)
 
     async def _maybe_push(
         self, *, user_id: str, event: NotificationEvent, context: dict[str, Any]
@@ -372,6 +445,14 @@ class NotificationService:
             "reference": str(context.get("reference", "")),
         }
 
+        # One push audit row per dispatch (not per device): pending before
+        # the send(s), sent if ≥1 device succeeds, failed if every device
+        # fails (or the legacy single send raises).
+        log_row = self._log_pending(
+            user_id=user_id, event=event,
+            channel=NotificationChannel.push, provider="fcm",
+        )
+
         if self._push_tokens is None:
             # Legacy mode (Sprint 3 default + tests that predate
             # push-tokens storage) — one call per user, no fcm_token.
@@ -380,10 +461,13 @@ class NotificationService:
                     user_id=user_id, title=copy.title, body=copy.body, data=data,
                 )
             except Exception as exc:
+                self._log_failed(log_row, error=str(exc))
                 log.warning(
                     "notify: push send failed event=%s user=%s err=%s",
                     event.value, user_id, exc,
                 )
+            else:
+                self._log_sent(log_row)
             return
 
         # Token-aware mode — real FCM. Fan out one send per registered
@@ -391,18 +475,25 @@ class NotificationService:
         try:
             tokens = self._push_tokens.list_for_user(user_id=UUID(user_id))
         except Exception as exc:
+            self._log_failed(log_row, error=str(exc))
             log.warning(
                 "notify: push device lookup failed event=%s user=%s err=%s",
                 event.value, user_id, exc,
             )
             return
         if not tokens:
+            # No devices to send to — nothing was delivered. Record the
+            # dispatch as failed so the audit trail reflects that the push
+            # never reached the user (rather than leaving a dangling pending).
+            self._log_failed(log_row, error="no registered devices")
             return
 
         # Imported lazily so the legacy Sprint 3 tests (which never
         # exercise FCM) don't pay the google-auth import cost.
         from app.integrations.push.fcm import DeadFCMToken  # noqa: PLC0415
 
+        any_sent = False
+        last_error: str | None = None
         for row in tokens:
             try:
                 await self._push.send(
@@ -410,7 +501,8 @@ class NotificationService:
                     fcm_token=row.fcm_token,
                     title=copy.title, body=copy.body, data=data,
                 )
-            except DeadFCMToken:
+            except DeadFCMToken as exc:
+                last_error = str(exc) or "dead fcm token"
                 try:
                     self._push_tokens.delete_by_fcm_token(fcm_token=row.fcm_token)
                 except Exception as exc:
@@ -419,10 +511,18 @@ class NotificationService:
                         user_id, exc,
                     )
             except Exception as exc:
+                last_error = str(exc)
                 log.warning(
                     "notify: push send failed event=%s user=%s err=%s",
                     event.value, user_id, exc,
                 )
+            else:
+                any_sent = True
+
+        if any_sent:
+            self._log_sent(log_row)
+        else:
+            self._log_failed(log_row, error=last_error or "all device sends failed")
 
 
 def _email_subject(event: NotificationEvent, ctx: dict[str, Any]) -> str:
