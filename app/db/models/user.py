@@ -57,10 +57,6 @@ class User(TimestampMixin, Base):
     email_verified = Column(Boolean, nullable=False, default=False, server_default="false")
     is_phone_verified = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
-    # Single-bit admin flag — see alembic 202604281200 for rationale
-    # (vs a separate admin_users join table). Defaults False so every
-    # non-admin user just has it unset.
-    is_admin = Column(Boolean, nullable=False, default=False, server_default="false")
 
     # Sprint 5b: referral system. `referral_code` is the system-generated
     # 6-char invite code (immutable per user). `referred_by_user_id` is
