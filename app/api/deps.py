@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
 from redis.asyncio import Redis
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.logger import log
 from app.core.security import decode_token
+from app.db.models.admin_user import AdminUser
 from app.db.models.user import User
 from app.db.session import SessionLocal
 from app.integrations.base import SmsProvider
@@ -17,6 +18,7 @@ from app.integrations.email.fake import FakeEmailClient
 from app.integrations.email.resend import ResendClient
 from app.integrations.termii.client import TermiiClient
 from app.integrations.termii.fake import FakeTermiiClient
+from app.services.admin_session_store import AdminSessionStore
 from app.services.auth_service import AuthService
 from app.services.token_store import RedisTokenStore, TokenStore
 
@@ -245,24 +247,70 @@ async def get_current_user(
     return user
 
 
-def require_admin(user: User = Depends(get_current_user)) -> User:
-    """Authorize an admin-only endpoint.
+def get_admin_session_store(redis: Redis = Depends(get_redis)) -> AdminSessionStore:
+    return AdminSessionStore(
+        redis=redis, ttl_seconds=settings.ADMIN_SESSION_TTL_SECONDS
+    )
 
-    Builds on top of `get_current_user` (so the JWT auth + token-type
-    checks still run) and additionally requires `user.is_admin`. We
-    return 403 (not 404) on a non-admin: the user is authenticated and
-    the route exists; they're just not allowed.
 
-    Sprint 5 BE-52 — manual-refund endpoint. Sprint 8 will fold the
-    full admin dashboard surface in here; the dependency stays generic
-    so other admin endpoints can opt in by name.
+async def require_admin(
+    admin_session: str | None = Cookie(
+        default=None, alias=settings.ADMIN_SESSION_COOKIE_NAME
+    ),
+    store: AdminSessionStore = Depends(get_admin_session_store),
+    db: Session = Depends(get_db),
+) -> AdminUser:
+    """Authorize an admin endpoint via the opaque session cookie.
+
+    401 when no/expired session; 403 when the admin row is disabled.
+    Refreshes the sliding TTL on every successful call.
     """
-    if not user.is_admin:
+    if not admin_session:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "ADMIN_REQUIRED", "message": "Admin privilege required"},
+            status_code=401,
+            detail={"code": "ADMIN_AUTH_REQUIRED", "message": "Admin auth required"},
         )
-    return user
+    data = await store.get(admin_session)
+    if data is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ADMIN_SESSION_EXPIRED", "message": "Session expired"},
+        )
+    try:
+        admin_uuid = UUID(data["admin_id"])
+    except (TypeError, ValueError, KeyError):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ADMIN_SESSION_EXPIRED", "message": "Session expired"},
+        )
+    admin = db.query(AdminUser).filter(AdminUser.id == admin_uuid).first()
+    if admin is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "ADMIN_SESSION_EXPIRED", "message": "Session expired"},
+        )
+    if admin.is_active is False:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "ADMIN_DISABLED", "message": "Admin account disabled"},
+        )
+    await store.refresh(admin_session)
+    return admin
+
+
+def require_admin_csrf(
+    request: Request,
+    admin_csrf: str | None = Cookie(
+        default=None, alias=settings.ADMIN_CSRF_COOKIE_NAME
+    ),
+) -> None:
+    """Double-submit CSRF check for admin write endpoints. The csrf cookie
+    is non-httpOnly so the dashboard JS can echo it in X-CSRF-Token."""
+    header = request.headers.get("X-CSRF-Token")
+    if not admin_csrf or not header or header != admin_csrf:
+        raise HTTPException(
+            status_code=403, detail={"code": "CSRF_FAILED", "message": "CSRF check failed"}
+        )
 
 
 # --- Added by B5 (IdempotencyService + header guard) ---
