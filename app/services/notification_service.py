@@ -36,6 +36,7 @@ from app.integrations.push.base import BasePushClient
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+    from app.services.notification_log_service import NotificationLogService
     from app.services.push_tokens_service import PushTokensService
 
 
@@ -343,6 +344,17 @@ class NotificationService:
     # receipt or token. When ``self._db`` is None (legacy unit tests that
     # construct the service without a session) logging is skipped entirely.
 
+    def _log_service(self) -> "NotificationLogService":
+        # Lazy import (not top-level) to avoid pulling the notification_log
+        # service — and the SQLAlchemy model graph it imports — at module
+        # import time; a top-level import here reintroduces the cycle the
+        # three wrappers were written to avoid. Factored into one helper so
+        # the import lives in exactly one place.
+        from app.services.notification_log_service import (  # noqa: PLC0415
+            NotificationLogService,
+        )
+        return NotificationLogService(db=self._db)
+
     def _log_pending(
         self,
         *,
@@ -360,10 +372,7 @@ class NotificationService:
                     uid = UUID(user_id)
                 except (TypeError, ValueError):
                     uid = None
-            from app.services.notification_log_service import (  # noqa: PLC0415
-                NotificationLogService,
-            )
-            return NotificationLogService(db=self._db).record_pending(
+            return self._log_service().record_pending(
                 user_id=uid, event=event.value, channel=channel, provider=provider,
             )
         except Exception as exc:  # noqa: BLE001
@@ -377,10 +386,7 @@ class NotificationService:
         if self._db is None or row is None:
             return
         try:
-            from app.services.notification_log_service import (  # noqa: PLC0415
-                NotificationLogService,
-            )
-            NotificationLogService(db=self._db).mark_sent(row)
+            self._log_service().mark_sent(row)
         except Exception as exc:  # noqa: BLE001
             log.warning("notify: log mark_sent failed err=%s", exc)
 
@@ -388,10 +394,7 @@ class NotificationService:
         if self._db is None or row is None:
             return
         try:
-            from app.services.notification_log_service import (  # noqa: PLC0415
-                NotificationLogService,
-            )
-            NotificationLogService(db=self._db).mark_failed(row, error=error)
+            self._log_service().mark_failed(row, error=error)
         except Exception as exc:  # noqa: BLE001
             log.warning("notify: log mark_failed failed err=%s", exc)
 
@@ -445,17 +448,14 @@ class NotificationService:
             "reference": str(context.get("reference", "")),
         }
 
-        # One push audit row per dispatch (not per device): pending before
-        # the send(s), sent if ≥1 device succeeds, failed if every device
-        # fails (or the legacy single send raises).
-        log_row = self._log_pending(
-            user_id=user_id, event=event,
-            channel=NotificationChannel.push, provider="fcm",
-        )
-
         if self._push_tokens is None:
             # Legacy mode (Sprint 3 default + tests that predate
             # push-tokens storage) — one call per user, no fcm_token.
+            # One audit row per dispatch: pending → sent / failed.
+            log_row = self._log_pending(
+                user_id=user_id, event=event,
+                channel=NotificationChannel.push, provider="fcm",
+            )
             try:
                 await self._push.send(
                     user_id=user_id, title=copy.title, body=copy.body, data=data,
@@ -472,9 +472,23 @@ class NotificationService:
 
         # Token-aware mode — real FCM. Fan out one send per registered
         # device and evict registrations that FCM reports as dead.
+        #
+        # We DON'T create the pending audit row up front: a user with no
+        # registered device is the expected steady state, not a delivery
+        # failure, so it must leave no row at all (otherwise the failure
+        # bucket fills with the no-token baseline and stops signalling
+        # delivery health). The pending row is created only once we know
+        # there's at least one device to send to.
         try:
             tokens = self._push_tokens.list_for_user(user_id=UUID(user_id))
         except Exception as exc:
+            # The lookup itself errored — a genuine fault worth auditing.
+            # Create a row and immediately mark it failed so the error is
+            # captured (no row existed yet at this point).
+            log_row = self._log_pending(
+                user_id=user_id, event=event,
+                channel=NotificationChannel.push, provider="fcm",
+            )
             self._log_failed(log_row, error=str(exc))
             log.warning(
                 "notify: push device lookup failed event=%s user=%s err=%s",
@@ -482,11 +496,17 @@ class NotificationService:
             )
             return
         if not tokens:
-            # No devices to send to — nothing was delivered. Record the
-            # dispatch as failed so the audit trail reflects that the push
-            # never reached the user (rather than leaving a dangling pending).
-            self._log_failed(log_row, error="no registered devices")
+            # No devices to send to — nothing was attempted at the provider,
+            # so there's nothing to audit. Write NO row (see comment above).
             return
+
+        # One push audit row per dispatch (not per device): pending before
+        # the send(s), sent if ≥1 device succeeds, failed if every device
+        # fails.
+        log_row = self._log_pending(
+            user_id=user_id, event=event,
+            channel=NotificationChannel.push, provider="fcm",
+        )
 
         # Imported lazily so the legacy Sprint 3 tests (which never
         # exercise FCM) don't pay the google-auth import cost.
