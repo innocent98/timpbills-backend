@@ -6,11 +6,11 @@ full admin dashboard UI on top of this and any sibling endpoints we
 add here.
 
 Auth model: every route under /admin requires `require_admin`, which
-extends the standard `get_current_user` JWT path with an `is_admin`
-check. Non-admin authenticated users get 403 (route exists, just not
-allowed); unauthenticated → 401 from the underlying dep. Sprint 1 docs
-mentioned an `admin_users` join table; we deferred to a single
-`is_admin` column on `users` for v1 — see migration 202604281200.
+authenticates via an opaque session cookie backed by Redis and resolves
+the acting `AdminUser` from the `admin_users` table. No/expired session
+→ 401; a disabled admin row → 403. Write endpoints additionally carry
+`require_admin_csrf` for a double-submit CSRF check (cookie value echoed
+in `X-CSRF-Token`).
 """
 from typing import Annotated
 
@@ -18,11 +18,16 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_bill_service, get_db, require_admin
+from app.api.deps import (
+    get_bill_service,
+    get_db,
+    require_admin,
+    require_admin_csrf,
+)
 from app.db.models._enums import TransactionStatus, TransactionType
+from app.db.models.admin_user import AdminUser
 from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
-from app.db.models.user import User
 from app.services.bill_service import BillService
 from app.utils.responses import success
 
@@ -42,12 +47,22 @@ class ManualRefundRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
 
 
-@router.post("/refunds/{reference}/trigger", response_model=None)
+@router.post(
+    "/refunds/{reference}/trigger",
+    response_model=None,
+    # require_admin is listed first (and re-declared as a param below for
+    # the actor row) so authentication resolves BEFORE the CSRF check:
+    # FastAPI solves route-level dependencies ahead of path-operation
+    # parameter dependencies, so an unauthenticated POST must hit
+    # require_admin's 401 ADMIN_AUTH_REQUIRED rather than CSRF's 403.
+    # The dependency cache dedupes require_admin to a single resolution.
+    dependencies=[Depends(require_admin), Depends(require_admin_csrf)],
+)
 async def admin_trigger_refund(
     reference: str,
     body: ManualRefundRequest,
     request: Request,
-    admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
     bill_svc: Annotated[BillService, Depends(get_bill_service)],
 ):
