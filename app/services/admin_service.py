@@ -159,6 +159,97 @@ class AdminService:
         ]
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
+    # UI status vocabulary → which refund-row DB statuses map onto it.
+    # A refund Transaction is born with status=success (money credited) in
+    # TransactionService.create_refund, so success → "processed". The
+    # refund_failed/failed states (a refund that itself didn't land) →
+    # "failed". Anything still in motion (pending/processing/refund_pending)
+    # → "pending". The original tx's refund_pending→refunded walk lives on
+    # the ORIGINAL row, not the refund row, so it's irrelevant here.
+    _REFUND_STATUS_MAP: dict[str, tuple[TransactionStatus, ...]] = {
+        "processed": (TransactionStatus.success, TransactionStatus.refunded),
+        "failed": (TransactionStatus.failed, TransactionStatus.refund_failed),
+        "pending": (
+            TransactionStatus.pending,
+            TransactionStatus.processing,
+            TransactionStatus.refund_pending,
+        ),
+    }
+
+    @classmethod
+    def _ui_refund_status(cls, db_status: TransactionStatus) -> str:
+        for ui, members in cls._REFUND_STATUS_MAP.items():
+            if db_status in members:
+                return ui
+        return "pending"
+
+    def list_refunds(
+        self, *, limit: int, offset: int, status: str | None = None,
+    ) -> dict:
+        """Filterable, paginated refund list for the platform-admin refunds page.
+
+        Refunds are ``Transaction`` rows with ``type=refund`` (separate rows,
+        not a column/state on the original). Each links to its originating tx
+        via ``meta["original_reference"]`` and carries ``meta["original_type"]``.
+
+        The UI status (``pending``/``processed``/``failed``) is DERIVED from the
+        refund row's own DB status (see ``_REFUND_STATUS_MAP``), so the optional
+        ``status`` filter takes that UI vocabulary — the endpoint validates it
+        into a 400 ``INVALID_FILTER`` before calling here; we map it to the set
+        of underlying DB enum values for the WHERE clause.
+
+        ``reason`` and the manual/auto signal live on the ``TransactionEvent``
+        attached to the refund row (an admin-triggered refund's event reason is
+        prefixed ``admin_manual_refund``). We batch-load those events for the
+        page in one query to avoid an N+1.
+        """
+        query = (
+            self._db.query(Transaction, User)
+            .join(User, User.id == Transaction.user_id)
+            .filter(Transaction.type == TransactionType.refund)
+        )
+        if status:
+            query = query.filter(
+                Transaction.status.in_(self._REFUND_STATUS_MAP[status])
+            )
+        total = query.count()
+        rows = (
+            query.order_by(Transaction.created_at.desc())
+            .limit(limit).offset(offset).all()
+        )
+
+        # Batch-load the earliest event per refund for reason + manual signal.
+        refund_ids = [tx.id for tx, _ in rows]
+        events_by_tx: dict[object, TransactionEvent] = {}
+        if refund_ids:
+            for row_ev in (
+                self._db.query(TransactionEvent)
+                .filter(TransactionEvent.transaction_id.in_(refund_ids))
+                .order_by(TransactionEvent.created_at.asc())
+                .all()
+            ):
+                events_by_tx.setdefault(row_ev.transaction_id, row_ev)
+
+        items = []
+        for tx, user in rows:
+            ev: TransactionEvent | None = events_by_tx.get(tx.id)
+            reason = ev.reason if ev else None
+            manual = bool(reason and reason.startswith("admin_manual_refund"))
+            original_ref = (tx.meta or {}).get("original_reference")
+            original_type = (tx.meta or {}).get("original_type")
+            items.append({
+                "reference": tx.reference,
+                "original_reference": original_ref,
+                "type": original_type or tx.type.value,
+                "amount": f"{tx.amount:.2f}",
+                "customer_name": user.full_name,
+                "reason": reason,
+                "status": self._ui_refund_status(tx.status),
+                "created_at": tx.created_at.isoformat(),
+                "manual": manual,
+            })
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
     def get_transaction_detail(self, *, reference: str) -> dict | None:
         """Full investigation payload for one transaction.
 

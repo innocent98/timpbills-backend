@@ -12,6 +12,7 @@ the acting `AdminUser` from the `admin_users` table. No/expired session
 `require_admin_csrf` for a double-submit CSRF check (cookie value echoed
 in `X-CSRF-Token`).
 """
+import enum
 from datetime import datetime
 from typing import Annotated
 
@@ -36,6 +37,20 @@ from app.services.bill_service import BillService
 from app.utils.responses import success
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+class RefundStatusFilter(str, enum.Enum):
+    """UI-facing refund status vocabulary for the ``GET /admin/refunds`` filter.
+
+    Refund status is DERIVED (the service maps the refund row's raw DB enum
+    onto these three), so the filter validates against this set — passing a
+    raw DB enum like ``success`` is a 400 ``INVALID_FILTER``. Reused through
+    ``parse_enum_or_400`` so the bad-filter error shape matches Tasks 9/10.
+    """
+
+    pending = "pending"
+    processed = "processed"
+    failed = "failed"
 
 
 class ManualRefundRequest(BaseModel):
@@ -164,6 +179,30 @@ async def admin_trigger_refund(
         },
         request_id=getattr(request.state, "request_id", None),
     )
+
+
+@router.get("/refunds", response_model=None)
+async def admin_list_refunds(
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = Query(default=None),
+):
+    """Filterable, paginated refund list for the platform-admin refunds page.
+
+    ``status`` takes the UI vocabulary (``pending``/``processed``/``failed``) —
+    a DERIVED status the service maps from the refund row's raw DB enum. A bad
+    value is a 400 ``INVALID_FILTER`` (parsed here, like Tasks 9/10), never a
+    500. ``limit`` is bounded 1..100 (422 on violation).
+    """
+    status_filter = parse_enum_or_400(RefundStatusFilter, status, field="status")
+    data = AdminService(db=db).list_refunds(
+        limit=limit, offset=offset,
+        status=status_filter.value if status_filter else None,
+    )
+    return success(data, request_id=getattr(request.state, "request_id", None))
 
 
 @router.get("/overview", response_model=None)
