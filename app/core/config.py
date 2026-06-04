@@ -229,6 +229,13 @@ class Settings(BaseSettings):
     FIRST_SUPERUSER_EMAIL: EmailStr
     FIRST_SUPERUSER_PASSWORD: str
 
+    # --- Admin dashboard auth (opaque session cookie) ---
+    ADMIN_SESSION_TTL_SECONDS: int = 8 * 3600
+    ADMIN_SESSION_COOKIE_NAME: str = "admin_session"
+    ADMIN_CSRF_COOKIE_NAME: str = "admin_csrf"
+    ADMIN_COOKIE_SECURE: bool = True
+    ADMIN_COOKIE_DOMAIN: str | None = None  # set to ".timpbills.com" in staging/prod
+
     class Config:
         case_sensitive = True
         env_file = ".env"
