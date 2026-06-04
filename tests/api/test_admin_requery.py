@@ -426,6 +426,58 @@ async def test_requery_pending_funding_verifies_and_credits(admin_ctx, login_adm
     assert fresh_payment.status == PaymentStatus.success
 
 
+# ── 5b. Pending wallet_funding → KYC cap → deferred (no credit) ──────────
+
+
+@pytest.mark.asyncio
+async def test_requery_funding_kyc_cap_defers_no_credit(admin_ctx, login_admin):
+    """A pending wallet_funding tx whose credit would breach the user's KYC
+    cap → Paystack verify=success but wallet_svc.credit raises KycCapExceeded.
+
+    Mirrors _reconcile's defer: rollback, leave the tx pending, leave the
+    Payment pending (claim reverted), no wallet credit, HTTP 200 (NOT 500).
+    The owner is default tier_0 (cap ₦50,000); balance ₦46k + funding ₦5k
+    → ₦51k > cap → KycCapExceeded raised before credit() commits.
+    """
+    client, db, _redis = admin_ctx
+    csrf = await login_admin()
+    owner = _seed_user(db)
+    _seed_wallet(db, owner.id, balance=Decimal("46000.00"))
+    tx, payment = _seed_funding_tx(
+        db, owner.id, amount=Decimal("5000.00"),
+        status=TransactionStatus.pending,
+    )
+
+    stub = _StubPaystack()
+    stub.set_outcome(payment.provider_reference, "success", Decimal("5000.00"))
+    _override_paystack(stub)
+    try:
+        r = await client.post(
+            f"/api/v1/admin/transactions/{tx.reference}/requery",
+            headers={"X-CSRF-Token": csrf},
+        )
+    finally:
+        app.dependency_overrides.pop(get_paystack_provider, None)
+
+    # 200, not 500 — the cap breach is deferred, not an unhandled error.
+    assert r.status_code == 200, r.text
+    body = r.json()["data"]
+    assert body["requeried"] is True
+    # Status unchanged: still pending (could not resolve now).
+    assert body["status"] == "pending"
+
+    db.expire_all()
+    # Tx unchanged.
+    fresh = db.query(Transaction).filter(Transaction.id == tx.id).one()
+    assert fresh.status == TransactionStatus.pending
+    # No credit — wallet balance unchanged.
+    wallet = db.query(Wallet).filter(Wallet.user_id == owner.id).one()
+    assert wallet.balance == Decimal("46000.00")
+    # Payment claim rolled back — still pending for a later retry.
+    fresh_payment = db.query(Payment).filter(Payment.id == payment.id).one()
+    assert fresh_payment.status == PaymentStatus.pending
+
+
 # ── 6. Pending bill still pending → no state change ──────────────────────
 
 

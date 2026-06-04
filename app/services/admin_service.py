@@ -602,6 +602,11 @@ class AdminService:
 
         v = await payment_provider.verify(reference=payment.provider_reference)
 
+        from app.services.wallet_service import (
+            InsufficientBalance,
+            KycCapExceeded,
+        )
+
         if v.status == "success":
             if not self._claim_payment(payment.id, pay_status.success, pay_status):
                 return tx.status.value
@@ -609,7 +614,18 @@ class AdminService:
                 payment.method = v.authorization.channel
                 payment.last4 = v.authorization.last4
                 payment.bank_name = v.authorization.bank
-            wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+            try:
+                wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+            except (KycCapExceeded, InsufficientBalance):
+                # Domain exception on an otherwise-valid funding — defer,
+                # exactly as _reconcile does. The credit raised BEFORE its
+                # internal commit, so the uncommitted Payment claim is
+                # reverted by this rollback; Payment stays pending for a
+                # later retry (ops may raise the user's cap meanwhile). We
+                # do NOT credit, do NOT transition, do NOT 500 — return the
+                # tx's current (unchanged) status as "could not resolve now".
+                self._db.rollback()
+                return tx.status.value
             tx_svc.transition(
                 tx, to_status=TransactionStatus.success,
                 reason="admin_requery.verify.success",
