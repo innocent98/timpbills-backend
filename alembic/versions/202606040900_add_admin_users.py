@@ -27,17 +27,26 @@ depends_on = None
 
 
 def upgrade() -> None:
-    admin_role = postgresql.ENUM(
+    # Create the ENUM explicitly (checkfirst=True makes it idempotent), then
+    # reference it in the table column with create_type=False so create_table
+    # does NOT re-emit CREATE TYPE (which would raise DuplicateObject).
+    postgresql.ENUM(
         "superadmin", "support", name="admin_role_enum", create_type=True
-    )
-    admin_role.create(op.get_bind(), checkfirst=True)
+    ).create(op.get_bind(), checkfirst=True)
     op.create_table(
         "admin_users",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("email", sa.String(), nullable=False),
         sa.Column("password_hash", sa.String(), nullable=False),
         sa.Column("full_name", sa.String(), nullable=False),
-        sa.Column("role", admin_role, nullable=False, server_default="superadmin"),
+        sa.Column(
+            "role",
+            postgresql.ENUM(
+                "superadmin", "support",
+                name="admin_role_enum", create_type=False,
+            ),
+            nullable=False, server_default="superadmin",
+        ),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default="true"),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),

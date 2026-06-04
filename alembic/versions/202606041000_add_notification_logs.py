@@ -20,14 +20,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    channel = postgresql.ENUM(
+    # Create the ENUMs explicitly (checkfirst=True → idempotent), then
+    # reference them in the table columns with create_type=False so
+    # create_table does NOT re-emit CREATE TYPE (would raise DuplicateObject).
+    postgresql.ENUM(
         "push", "email", "sms", name="notification_channel_enum", create_type=True
-    )
-    status = postgresql.ENUM(
+    ).create(op.get_bind(), checkfirst=True)
+    postgresql.ENUM(
         "pending", "sent", "failed", name="notification_log_status_enum", create_type=True
-    )
-    channel.create(op.get_bind(), checkfirst=True)
-    status.create(op.get_bind(), checkfirst=True)
+    ).create(op.get_bind(), checkfirst=True)
     op.create_table(
         "notification_logs",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -38,8 +39,22 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.Column("event", sa.String(), nullable=False),
-        sa.Column("channel", channel, nullable=False),
-        sa.Column("status", status, nullable=False),
+        sa.Column(
+            "channel",
+            postgresql.ENUM(
+                "push", "email", "sms",
+                name="notification_channel_enum", create_type=False,
+            ),
+            nullable=False,
+        ),
+        sa.Column(
+            "status",
+            postgresql.ENUM(
+                "pending", "sent", "failed",
+                name="notification_log_status_enum", create_type=False,
+            ),
+            nullable=False,
+        ),
         sa.Column("provider", sa.String(), nullable=False),
         sa.Column("provider_reference", sa.String(), nullable=True),
         sa.Column("error", sa.Text(), nullable=True),
