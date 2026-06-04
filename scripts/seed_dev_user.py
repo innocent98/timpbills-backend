@@ -24,7 +24,6 @@ from app.core.security import hash_password, hash_pin
 from app.db.models.user import KycLevel, User
 from app.db.session import SessionLocal
 
-
 DEV_USER = {
     "phone":     "+2348000000001",
     "email":     "dev@timpbills.test",
@@ -72,7 +71,7 @@ def seed() -> None:
         print(f"  email     {DEV_USER['email']}")
         print(f"  password  {DEV_USER['password']}")
         print(f"  pin       {DEV_USER['pin']}")
-        print(f"  kyc_level tier_1 (phone_verified)")
+        print("  kyc_level tier_1 (phone_verified)")
     except Exception as exc:
         db.rollback()
         print(f"✗ Seed failed: {exc}", file=sys.stderr)
