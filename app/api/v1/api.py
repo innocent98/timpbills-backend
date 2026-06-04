@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     admin,
+    admin_auth,
     auth,
     bills,
     health,
@@ -25,3 +26,4 @@ api_router.include_router(push_tokens.router)
 api_router.include_router(referrals.router)
 api_router.include_router(users.router)
 api_router.include_router(admin.router)
+api_router.include_router(admin_auth.router)
