@@ -29,6 +29,10 @@ from app.api.deps import (
 )
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.admin_user import AdminUser
+from app.db.models.notification_log import (
+    NotificationChannel,
+    NotificationLogStatus,
+)
 from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
 from app.db.models.user import KycLevel
@@ -290,6 +294,34 @@ async def admin_list_users(
     tier_enum = parse_enum_or_400(KycLevel, tier, field="tier")
     data = AdminService(db=db).list_users(
         limit=limit, offset=offset, q=q, tier=tier_enum, status=status
+    )
+    return success(data, request_id=getattr(request.state, "request_id", None))
+
+
+@router.get("/notifications", response_model=None)
+async def admin_list_notifications(
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    channel: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    event: str | None = Query(default=None),
+    user_id: str | None = Query(default=None),
+):
+    """Filterable, paginated notification-log read for the admin dashboard.
+
+    Read-only view over the delivery audit trail. ``limit`` is bounded 1..100
+    (422 on violation). Bad ``channel``/``status`` values are a 400
+    ``INVALID_FILTER`` (client error), never a 500; ``event``/``user_id`` are
+    exact-match free-text filters.
+    """
+    channel_enum = parse_enum_or_400(NotificationChannel, channel, field="channel")
+    status_enum = parse_enum_or_400(NotificationLogStatus, status, field="status")
+    data = AdminService(db=db).list_notifications(
+        limit=limit, offset=offset, channel=channel_enum,
+        status=status_enum, event=event, user_id=user_id,
     )
     return success(data, request_id=getattr(request.state, "request_id", None))
 

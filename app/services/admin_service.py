@@ -8,6 +8,11 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models._enums import TransactionStatus, TransactionType
+from app.db.models.notification_log import (
+    NotificationChannel,
+    NotificationLog,
+    NotificationLogStatus,
+)
 from app.db.models.payment import Payment
 from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
@@ -248,6 +253,52 @@ class AdminService:
                 "created_at": tx.created_at.isoformat(),
                 "manual": manual,
             })
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    def list_notifications(
+        self, *, limit: int, offset: int,
+        channel: NotificationChannel | None = None,
+        status: NotificationLogStatus | None = None,
+        event: str | None = None, user_id: str | None = None,
+    ) -> dict:
+        """Filterable, paginated notification-log list for the admin dashboard.
+
+        Read-only view over the delivery audit trail (``notification_logs``).
+        Newest-first; ``total`` is the pre-pagination count for page controls.
+        ``channel``/``status`` are already-parsed enum members (the endpoint
+        validates the raw query strings into 400 ``INVALID_FILTER``), matching
+        the ``list_transactions(type_, status)`` convention; ``event``/
+        ``user_id`` are exact-match free-text filters.
+        """
+        query = self._db.query(NotificationLog)
+        if channel is not None:
+            query = query.filter(NotificationLog.channel == channel)
+        if status is not None:
+            query = query.filter(NotificationLog.status == status)
+        if event:
+            query = query.filter(NotificationLog.event == event)
+        if user_id:
+            query = query.filter(NotificationLog.user_id == user_id)
+        total = query.count()
+        rows = (
+            query.order_by(NotificationLog.created_at.desc())
+            .limit(limit).offset(offset).all()
+        )
+        items = [
+            {
+                "id": str(r.id),
+                "user_id": str(r.user_id) if r.user_id else None,
+                "event": r.event,
+                "channel": r.channel.value,
+                "status": r.status.value,
+                "provider": r.provider,
+                "provider_reference": r.provider_reference,
+                "error": r.error,
+                "created_at": r.created_at.isoformat(),
+                "sent_at": r.sent_at.isoformat() if r.sent_at else None,
+            }
+            for r in rows
+        ]
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     def get_transaction_detail(self, *, reference: str) -> dict | None:
