@@ -24,6 +24,8 @@ from app.api._filters import parse_enum_or_400
 from app.api.deps import (
     get_bill_service,
     get_db,
+    get_paystack_provider,
+    get_vtpass_provider,
     require_admin,
     require_admin_csrf,
 )
@@ -36,6 +38,8 @@ from app.db.models.notification_log import (
 from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
 from app.db.models.user import KycLevel
+from app.integrations.paystack.base import PaymentProvider
+from app.integrations.vtpass.base import BillProvider
 from app.services.admin_service import AdminService
 from app.services.bill_service import BillService
 from app.utils.responses import success
@@ -271,6 +275,51 @@ async def admin_transaction_detail(
             detail={"code": "TRANSACTION_NOT_FOUND", "message": "Transaction not found"},
         )
     return success(data, request_id=getattr(request.state, "request_id", None))
+
+
+@router.post(
+    "/transactions/{reference}/requery",
+    response_model=None,
+    # require_admin first so an unauthenticated POST resolves to 401
+    # ADMIN_AUTH_REQUIRED before the CSRF 403 — same ordering rationale as
+    # admin_trigger_refund (Task 6). POST won't shadow the GET detail route.
+    dependencies=[Depends(require_admin), Depends(require_admin_csrf)],
+)
+async def admin_requery_transaction(
+    reference: str,
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    vtpass: Annotated[BillProvider, Depends(get_vtpass_provider)],
+    paystack: Annotated[PaymentProvider, Depends(get_paystack_provider)],
+):
+    """Re-poll the provider for a STUCK transaction and apply the outcome.
+
+    The on-demand twin of the periodic reconcile sweep — backs the
+    dashboard "Needs attention → Requery" action. Reuses the EXACT
+    reconcile transitions:
+
+      * bill tx → ``BillProvider.requery`` + ``BillService.apply_provider_result``
+        (mirrors ``_reconcile_bills``);
+      * wallet_funding tx → Paystack ``verify`` on the linked Payment +
+        wallet credit / transition (mirrors ``_reconcile``).
+
+    Terminal txs (success/failed/refund_*) are a no-op — the provider is
+    NOT called and the response carries ``requeried=false``. Unknown
+    reference → 404 ``TRANSACTION_NOT_FOUND``.
+    """
+    result = await AdminService(db=db).requery_transaction(
+        reference=reference,
+        actor_admin_id=admin.id,
+        bill_provider=vtpass,
+        payment_provider=paystack,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "TRANSACTION_NOT_FOUND", "message": "Transaction not found"},
+        )
+    return success(result, request_id=getattr(request.state, "request_id", None))
 
 
 @router.get("/users", response_model=None)

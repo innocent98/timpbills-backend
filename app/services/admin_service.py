@@ -3,9 +3,14 @@ aggregation + listing logic lives here. Computes ONLY metrics backed by
 real data — no avg-processing-time (not persisted), no flight metrics."""
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from app.integrations.paystack.base import PaymentProvider
+    from app.integrations.vtpass.base import BillProvider
 
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.notification_log import (
@@ -450,3 +455,202 @@ class AdminService:
                 for t in recent
             ],
         }
+
+    async def requery_transaction(
+        self,
+        *,
+        reference: str,
+        actor_admin_id,
+        bill_provider: "BillProvider",
+        payment_provider: "PaymentProvider",
+    ) -> dict | None:
+        """On-demand provider re-poll for a STUCK transaction — the ops
+        counterpart of the periodic reconcile sweep.
+
+        Returns a small dict the endpoint serializes:
+        ``{"reference", "status", "requeried"}``; ``None`` when the
+        reference is unknown (endpoint maps to 404).
+
+        Behaviour mirrors the reconcile tasks EXACTLY:
+
+          * Terminal tx (success/failed/refund_*) → no-op, ``requeried=False``,
+            provider NOT called. (Same final-state set the reconcile sweeps
+            skip — there's nothing to re-poll.)
+          * Bill tx (airtime/data/electricity/cable/flight) → ``BillProvider.
+            requery(request_id=reference)`` then re-lock the row and apply via
+            ``BillService.apply_provider_result`` — the same call
+            ``_reconcile_bills`` makes. delivered→success(+partial refund),
+            failed→refund+credit+failed, pending→unchanged.
+          * wallet_funding tx → Paystack ``verify`` on the linked Payment +
+            ``_claim_payment``-style lock + wallet credit + transition, exactly
+            as ``_reconcile``. No refund on failure: a declined card never took
+            money (wallet_funding is intentionally OUT of REFUNDABLE_ON_FAILURE).
+
+        We deliberately OMIT the batch-only bookkeeping (defer counters,
+        permanent-attempts escalation, the abandoned→leave-pending sweep
+        cadence): those only make sense across a periodic loop. The state
+        transitions and refund path are identical to the sweep.
+
+        Every call writes one audit ``TransactionEvent`` (``reason=
+        "admin_requery"``, ``context={"actor_admin_user_id": ...}``) — even
+        the terminal no-op and the still-pending paths — so ops can see
+        "an admin re-polled this and here's what happened".
+        """
+        # Lazy imports: keep the admin_service import graph lean (these pull
+        # the bill/wallet/tx service stack + redis types) and avoid a circular
+        # import with app.api.deps (which imports AdminService transitively).
+        from app.api.deps import get_redis
+        from app.db.models._enums import TransactionType as _TxType
+        from app.db.models.payment import PaymentStatus as _PayStatus
+        from app.services.bill_service import BillService
+        from app.services.transaction_service import TransactionService
+        from app.services.wallet_service import WalletService
+
+        tx = (
+            self._db.query(Transaction)
+            .filter(Transaction.reference == reference)
+            .first()
+        )
+        if tx is None:
+            return None
+
+        actor_ctx = {"actor_admin_user_id": str(actor_admin_id)}
+
+        # Terminal states — nothing to re-poll. No-op (matches the
+        # _TX_FINAL_STATES skip in both reconcile tasks). We still audit.
+        if tx.status not in _PENDING:
+            self._write_audit(tx, reason="admin_requery", context={
+                **actor_ctx, "requeried": False, "status": tx.status.value,
+            })
+            self._db.commit()
+            return {
+                "reference": tx.reference,
+                "status": tx.status.value,
+                "requeried": False,
+            }
+
+        tx_svc = TransactionService(db=self._db)
+        wallet_svc = WalletService(db=self._db)
+
+        if tx.type == _TxType.wallet_funding:
+            new_status = await self._requery_funding(
+                tx=tx, payment_provider=payment_provider,
+                tx_svc=tx_svc, wallet_svc=wallet_svc, pay_status=_PayStatus,
+            )
+        else:
+            bill_svc = BillService(
+                db=self._db, tx_svc=tx_svc, wallet_svc=wallet_svc,
+                provider=bill_provider, redis=get_redis(),
+            )
+            new_status = await self._requery_bill(
+                tx=tx, bill_provider=bill_provider, bill_svc=bill_svc,
+            )
+
+        self._write_audit(tx, reason="admin_requery", context={
+            **actor_ctx, "requeried": True, "status": new_status,
+        })
+        self._db.commit()
+        return {
+            "reference": tx.reference,
+            "status": new_status,
+            "requeried": True,
+        }
+
+    async def _requery_bill(
+        self, *, tx: Transaction, bill_provider, bill_svc
+    ) -> str:
+        """Mirror of _reconcile_bills for a single tx: requery → re-lock →
+        skip-if-terminal → apply_provider_result. Returns the resulting
+        status string."""
+        from app.services.bill_service import _TX_FINAL_STATES
+
+        result = await bill_provider.requery(request_id=tx.reference)
+
+        # Re-fetch under a row-lock. A webhook / sweep may have finalized the
+        # tx between our SELECT and now — applying blind would race them or
+        # raise InvalidStateTransition. Same guard the sweep uses.
+        self._db.expire(tx)
+        locked = self._db.execute(
+            select(Transaction)
+            .where(Transaction.id == tx.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one()
+        if locked.status in _TX_FINAL_STATES:
+            return locked.status.value
+
+        bill_svc.apply_provider_result(
+            tx=locked, amount=locked.amount, result=result
+        )
+        return locked.status.value
+
+    async def _requery_funding(
+        self, *, tx: Transaction, payment_provider, tx_svc, wallet_svc, pay_status
+    ) -> str:
+        """Mirror of _reconcile for a single wallet_funding tx: verify the
+        linked Payment, claim it pending→success/failed, credit + transition
+        on success, transition-failed (no refund) on failure. Returns the
+        resulting status string."""
+        payment = (
+            self._db.query(Payment)
+            .filter(Payment.transaction_id == tx.id)
+            .first()
+        )
+        if payment is None:
+            # No payment row to verify against — leave the tx untouched.
+            return tx.status.value
+
+        v = await payment_provider.verify(reference=payment.provider_reference)
+
+        if v.status == "success":
+            if not self._claim_payment(payment.id, pay_status.success, pay_status):
+                return tx.status.value
+            if v.authorization is not None:
+                payment.method = v.authorization.channel
+                payment.last4 = v.authorization.last4
+                payment.bank_name = v.authorization.bank
+            wallet_svc.credit(user_id=tx.user_id, amount=tx.amount)
+            tx_svc.transition(
+                tx, to_status=TransactionStatus.success,
+                reason="admin_requery.verify.success",
+            )
+        elif v.status == "failed":
+            if not self._claim_payment(payment.id, pay_status.failed, pay_status):
+                return tx.status.value
+            tx_svc.transition(
+                tx, to_status=TransactionStatus.failed,
+                reason="admin_requery.verify.failed",
+            )
+            # No refund: wallet_funding is intentionally OUT of
+            # REFUNDABLE_ON_FAILURE — a declined card never took money.
+        # abandoned / unknown → leave pending, no transition.
+
+        self._db.refresh(tx)
+        return tx.status.value
+
+    def _claim_payment(self, payment_id, target_status, pay_status) -> bool:
+        """Atomically flip Payment.status pending → target under a row-lock.
+        Returns True if this call won the race (mirrors reconcile's
+        _claim_payment); a no-op if a concurrent webhook already mutated it."""
+        locked = (
+            self._db.query(Payment)
+            .filter(Payment.id == payment_id)
+            .with_for_update()
+            .one()
+        )
+        if locked.status != pay_status.pending:
+            return False
+        locked.status = target_status
+        return True
+
+    def _write_audit(self, tx: Transaction, *, reason: str, context: dict) -> None:
+        """Audit row on the tx. from_status==to_status (placeholder): the
+        real state transitions write their own events via TransactionService;
+        this row records that an admin re-polled and the outcome."""
+        self._db.add(TransactionEvent(
+            transaction_id=tx.id,
+            from_status=tx.status,
+            to_status=tx.status,
+            reason=reason,
+            context=context,
+        ))
