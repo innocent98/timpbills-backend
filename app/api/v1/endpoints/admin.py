@@ -12,6 +12,7 @@ the acting `AdminUser` from the `admin_users` table. No/expired session
 `require_admin_csrf` for a double-submit CSRF check (cookie value echoed
 in `X-CSRF-Token`).
 """
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -172,4 +173,48 @@ async def admin_overview(
 ):
     days = max(1, min(days, 90))
     data = AdminService(db=db).overview(days=days)
+    return success(data, request_id=getattr(request.state, "request_id", None))
+
+
+@router.get("/transactions", response_model=None)
+async def admin_list_transactions(
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = 20, offset: int = 0,
+    type: str | None = None, status: str | None = None,
+    date_from: str | None = None, date_to: str | None = None,
+    user_id: str | None = None, q: str | None = None,
+):
+    """Filterable, paginated transaction list for the ops dashboard.
+
+    ``limit`` is clamped to 1..100 so a runaway client can't pull the
+    whole table in one page. ``date_from``/``date_to`` are ISO-8601.
+    """
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    df = datetime.fromisoformat(date_from) if date_from else None
+    dt = datetime.fromisoformat(date_to) if date_to else None
+    data = AdminService(db=db).list_transactions(
+        limit=limit, offset=offset, type_=type, status=status,
+        date_from=df, date_to=dt, user_id=user_id, q=q,
+    )
+    return success(data, request_id=getattr(request.state, "request_id", None))
+
+
+@router.get("/transactions/{reference}", response_model=None)
+async def admin_transaction_detail(
+    reference: str,
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Full investigation payload for one transaction — tx + user summary
+    + linked payment + ordered event timeline. 404 on unknown reference."""
+    data = AdminService(db=db).get_transaction_detail(reference=reference)
+    if data is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "TRANSACTION_NOT_FOUND", "message": "Transaction not found"},
+        )
     return success(data, request_id=getattr(request.state, "request_id", None))

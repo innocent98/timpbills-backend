@@ -8,7 +8,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models._enums import TransactionStatus, TransactionType
+from app.db.models.payment import Payment
 from app.db.models.transaction import Transaction
+from app.db.models.transaction_event import TransactionEvent
+from app.db.models.user import User
 
 _SUCCESS = TransactionStatus.success
 _AWAITING = (TransactionStatus.refund_pending, TransactionStatus.refund_failed)
@@ -100,4 +103,112 @@ class AdminService:
                 "refunds_awaiting": refunds_awaiting,
                 "transactions_pending_over_5min": pending_over_5min,
             },
+        }
+
+    def list_transactions(
+        self, *, limit: int, offset: int, type_: str | None = None,
+        status: str | None = None, date_from: datetime | None = None,
+        date_to: datetime | None = None, user_id: str | None = None,
+        q: str | None = None,
+    ) -> dict:
+        """Filterable, paginated transaction list for the ops dashboard.
+
+        Joins User so each row carries the customer name without an N+1
+        per-row lookup. Newest-first. ``total`` is the pre-pagination
+        count so the dashboard can render page controls.
+        """
+        query = (
+            self._db.query(Transaction, User)
+            .join(User, User.id == Transaction.user_id)
+        )
+        if type_:
+            query = query.filter(Transaction.type == TransactionType(type_))
+        if status:
+            query = query.filter(Transaction.status == TransactionStatus(status))
+        if date_from:
+            query = query.filter(Transaction.created_at >= date_from)
+        if date_to:
+            query = query.filter(Transaction.created_at <= date_to)
+        if user_id:
+            query = query.filter(Transaction.user_id == user_id)
+        if q:
+            like = f"%{q}%"
+            query = query.filter(
+                (Transaction.reference.ilike(like)) | (User.full_name.ilike(like))
+            )
+        total = query.count()
+        rows = (
+            query.order_by(Transaction.created_at.desc())
+            .limit(limit).offset(offset).all()
+        )
+        items = [
+            {
+                "reference": tx.reference,
+                "type": tx.type.value,
+                "status": tx.status.value,
+                "amount": f"{tx.amount:.2f}",
+                "customer_name": user.full_name,
+                "created_at": tx.created_at.isoformat(),
+            }
+            for tx, user in rows
+        ]
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    def get_transaction_detail(self, *, reference: str) -> dict | None:
+        """Full investigation payload for one transaction.
+
+        Returns None when the reference is unknown so the endpoint can map
+        it to a 404. PII (email/phone) is returned in FULL — the admin
+        surface is trusted and ops needs it to investigate.
+        """
+        tx = (
+            self._db.query(Transaction)
+            .filter(Transaction.reference == reference)
+            .first()
+        )
+        if tx is None:
+            return None
+        user = self._db.query(User).filter(User.id == tx.user_id).first()
+        events = (
+            self._db.query(TransactionEvent)
+            .filter(TransactionEvent.transaction_id == tx.id)
+            .order_by(TransactionEvent.created_at.asc())
+            .all()
+        )
+        payment = (
+            self._db.query(Payment)
+            .filter(Payment.transaction_id == tx.id)
+            .first()
+        )
+        return {
+            "reference": tx.reference,
+            "type": tx.type.value,
+            "status": tx.status.value,
+            "amount": f"{tx.amount:.2f}",
+            "fee": f"{tx.fee:.2f}",
+            "meta": tx.meta,
+            "created_at": tx.created_at.isoformat(),
+            "user": None if user is None else {
+                "id": str(user.id), "full_name": user.full_name,
+                "email": user.email, "phone": user.phone,
+                "kyc_tier": user.kyc_level.numeric,
+            },
+            "payment": None if payment is None else {
+                "provider": payment.provider,
+                "provider_reference": payment.provider_reference,
+                "status": payment.status.value,
+                "method": payment.method,
+                "last4": payment.last4,
+                "bank_name": payment.bank_name,
+            },
+            "events": [
+                {
+                    "from_status": e.from_status.value if e.from_status else None,
+                    "to_status": e.to_status.value if e.to_status else None,
+                    "reason": e.reason,
+                    "context": e.context,
+                    "created_at": e.created_at.isoformat(),
+                }
+                for e in events
+            ],
         }
