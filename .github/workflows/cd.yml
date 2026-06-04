@@ -230,7 +230,10 @@ jobs:
           # so these are placeholders just to satisfy pydantic at import.
           SECRET_KEY: e2e-staging-conftest-placeholder
           DATABASE_URL: postgresql://unused:unused@localhost:5432/unused
-          FIRST_SUPERUSER_EMAIL: e2e@placeholder.test
+          # NOTE: must be a real, non-special-use domain — email-validator
+          # rejects reserved TLDs like .test/.example/.invalid, which made
+          # Settings() raise at conftest import and failed the whole E2E job.
+          FIRST_SUPERUSER_EMAIL: e2e@example.com
           FIRST_SUPERUSER_PASSWORD: unused-e2e
         run: |
           # Runs tests under tests/e2e marked with -m e2e.
