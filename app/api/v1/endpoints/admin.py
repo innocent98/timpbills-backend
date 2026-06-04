@@ -28,6 +28,7 @@ from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.admin_user import AdminUser
 from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
+from app.services.admin_service import AdminService
 from app.services.bill_service import BillService
 from app.utils.responses import success
 
@@ -160,3 +161,15 @@ async def admin_trigger_refund(
         },
         request_id=getattr(request.state, "request_id", None),
     )
+
+
+@router.get("/overview", response_model=None)
+async def admin_overview(
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    days: int = 7,
+):
+    days = max(1, min(days, 90))
+    data = AdminService(db=db).overview(days=days)
+    return success(data, request_id=getattr(request.state, "request_id", None))
