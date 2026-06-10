@@ -110,6 +110,70 @@ async def test_users_list_tier_filter(admin_ctx, login_admin):
 
 
 @pytest.mark.asyncio
+async def test_users_list_tier_filter_numeric(admin_ctx, login_admin):
+    # The admin UI sends the numeric tier (matching the kyc_tier it RENDERS),
+    # e.g. ?tier=1 — the endpoint must coerce it to the tier_1 enum, not 400.
+    client, db, _redis = admin_ctx
+    await login_admin()
+    _seed_user(db, full_name="Tier0 User", email="n0@x.com", phone="+2348030000010")
+    _seed_user(
+        db, full_name="Tier1 User", email="n1@x.com", phone="+2348030000011",
+        kyc_level=KycLevel.tier_1,
+    )
+    _seed_user(
+        db, full_name="Tier2 User", email="n2@x.com", phone="+2348030000012",
+        kyc_level=KycLevel.tier_2,
+    )
+
+    r = await client.get("/api/v1/admin/users?tier=1")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["total"] == 1
+    assert all(i["kyc_tier"] == 1 for i in data["items"])
+
+
+@pytest.mark.asyncio
+async def test_users_list_tier_filter_numeric_out_of_range_400(admin_ctx, login_admin):
+    # KycLevel only has tier_0/1/2, so ?tier=9 -> tier_9 -> 400 INVALID_FILTER.
+    client, db, _redis = admin_ctx
+    await login_admin()
+    r = await client.get("/api/v1/admin/users?tier=9")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_FILTER"
+
+
+@pytest.mark.asyncio
+async def test_users_list_status_disabled(admin_ctx, login_admin):
+    # status=disabled -> is_active False AND not deleted. Must exclude both
+    # active users and soft-deleted users.
+    from datetime import UTC, datetime
+
+    client, db, _redis = admin_ctx
+    await login_admin()
+    _seed_user(db, full_name="Active User", email="act@x.com", phone="+2348030000020")
+
+    disabled = _seed_user(
+        db, full_name="Disabled User", email="dis@x.com", phone="+2348030000021",
+    )
+    disabled.is_active = False
+    db.commit()
+
+    deleted = _seed_user(
+        db, full_name="Deleted User", email="del@x.com", phone="+2348030000022",
+    )
+    deleted.is_active = False
+    deleted.deleted_at = datetime.now(UTC)
+    db.commit()
+
+    r = await client.get("/api/v1/admin/users?status=disabled")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["total"] == 1
+    assert data["items"][0]["full_name"] == "Disabled User"
+    assert data["items"][0]["status"] == "disabled"
+
+
+@pytest.mark.asyncio
 async def test_user_detail(admin_ctx, login_admin):
     client, db, _redis = admin_ctx
     await login_admin()

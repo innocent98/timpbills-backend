@@ -55,6 +55,44 @@ async def test_transactions_list_filters_by_status(admin_ctx, login_admin):
 
 
 @pytest.mark.asyncio
+async def test_transactions_status_success_exclude_type_refund(admin_ctx, login_admin):
+    # Refund payout rows are type=refund AND status=success, so the bare
+    # "Success" status filter wrongly sweeps them in. exclude_type=refund lets
+    # the UI ask for "success purchases, excluding refunds".
+    client, db, _redis = admin_ctx
+    await login_admin()
+    u = _seed_user(db)
+    purchase = _seed_tx(
+        db, u.id, type_=TransactionType.airtime,
+        status=TransactionStatus.success, amount="1000",
+    )
+    refund = _seed_tx(
+        db, u.id, type_=TransactionType.refund,
+        status=TransactionStatus.success, amount="1000",
+    )
+
+    r = await client.get(
+        "/api/v1/admin/transactions?status=success&exclude_type=refund"
+    )
+    assert r.status_code == 200
+    data = r.json()["data"]
+    refs = {i["reference"] for i in data["items"]}
+    assert purchase.reference in refs
+    assert refund.reference not in refs
+    assert all(i["type"] != "refund" for i in data["items"])
+    assert data["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_transactions_invalid_exclude_type_filter_400(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    await login_admin()
+    r = await client.get("/api/v1/admin/transactions?exclude_type=bogus")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_FILTER"
+
+
+@pytest.mark.asyncio
 async def test_transactions_q_filters_by_customer_name(admin_ctx, login_admin):
     client, db, _redis = admin_ctx
     await login_admin()

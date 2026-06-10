@@ -167,6 +167,7 @@ class AdminService:
 
     def list_transactions(
         self, *, limit: int, offset: int, type_: TransactionType | None = None,
+        exclude_type: TransactionType | None = None,
         status: TransactionStatus | None = None, date_from: datetime | None = None,
         date_to: datetime | None = None, user_id: str | None = None,
         q: str | None = None,
@@ -187,6 +188,8 @@ class AdminService:
         )
         if type_:
             query = query.filter(Transaction.type == type_)
+        if exclude_type:
+            query = query.filter(Transaction.type != exclude_type)
         if status:
             query = query.filter(Transaction.status == status)
         if date_from:
@@ -466,6 +469,8 @@ class AdminService:
             query = query.filter(User.is_active.is_(True), User.deleted_at.is_(None))
         elif status == "deleted":
             query = query.filter(User.deleted_at.isnot(None))
+        elif status == "disabled":
+            query = query.filter(User.is_active.is_(False), User.deleted_at.is_(None))
         total = query.count()
         rows = query.order_by(User.created_at.desc()).limit(limit).offset(offset).all()
         items = [

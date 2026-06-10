@@ -233,6 +233,7 @@ async def admin_list_transactions(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     type: str | None = Query(default=None),
+    exclude_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
     date_from: datetime | None = Query(
         default=None, description="Inclusive lower bound (ISO 8601)"
@@ -251,10 +252,11 @@ async def admin_list_transactions(
     ``INVALID_FILTER`` (client error), never a 500.
     """
     type_enum = parse_enum_or_400(TransactionType, type, field="type")
+    exclude_type_enum = parse_enum_or_400(TransactionType, exclude_type, field="exclude_type")
     status_enum = parse_enum_or_400(TransactionStatus, status, field="status")
     data = AdminService(db=db).list_transactions(
-        limit=limit, offset=offset, type_=type_enum, status=status_enum,
-        date_from=date_from, date_to=date_to, user_id=user_id, q=q,
+        limit=limit, offset=offset, type_=type_enum, exclude_type=exclude_type_enum,
+        status=status_enum, date_from=date_from, date_to=date_to, user_id=user_id, q=q,
     )
     return success(data, request_id=getattr(request.state, "request_id", None))
 
@@ -340,7 +342,8 @@ async def admin_list_users(
     active/deleted filter handled in the service. Full PII returned —
     trusted surface.
     """
-    tier_enum = parse_enum_or_400(KycLevel, tier, field="tier")
+    raw_tier = f"tier_{tier}" if tier and tier.isdigit() else tier
+    tier_enum = parse_enum_or_400(KycLevel, raw_tier, field="tier")
     data = AdminService(db=db).list_users(
         limit=limit, offset=offset, q=q, tier=tier_enum, status=status
     )
