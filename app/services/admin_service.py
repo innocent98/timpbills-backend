@@ -33,28 +33,76 @@ class AdminService:
     def __init__(self, *, db: Session) -> None:
         self._db = db
 
+    def _window_metrics(self, start: datetime, end: datetime) -> dict:
+        """Aggregate count/volume/refund metrics for a half-open [start, end) window."""
+        base = self._db.query(Transaction).filter(
+            Transaction.created_at >= start, Transaction.created_at < end
+        )
+        total = base.count()
+        success_count = base.filter(Transaction.status == _SUCCESS).count()
+        volume = (
+            self._db.query(func.coalesce(func.sum(Transaction.amount), 0))
+            .filter(
+                Transaction.created_at >= start, Transaction.created_at < end,
+                Transaction.status == _SUCCESS,
+            )
+            .scalar()
+        )
+        refund_q = base.filter(Transaction.type == TransactionType.refund)
+        refund_count = refund_q.count()
+        refund_total = (
+            self._db.query(func.coalesce(func.sum(Transaction.amount), 0))
+            .filter(
+                Transaction.created_at >= start, Transaction.created_at < end,
+                Transaction.type == TransactionType.refund,
+            )
+            .scalar()
+        )
+        return {
+            "transaction_count": total,
+            "success_count": success_count,
+            "volume": Decimal(volume),
+            "refund_total": Decimal(refund_total),
+            "refund_count": refund_count,
+        }
+
+    @staticmethod
+    def _rel_delta(cur: Decimal, prior: Decimal) -> float | None:
+        """Relative change (cur-prior)/prior as a float, or None when prior is 0."""
+        if prior == 0:
+            return None
+        return float((cur - prior) / prior)
+
     def overview(self, *, days: int = 7) -> dict:
         now = datetime.now(UTC)
         since = now - timedelta(days=days)
+
+        cur = self._window_metrics(since, now)
+        prior = self._window_metrics(since - timedelta(days=days), since)
+
+        total = cur["transaction_count"]
+        success_rate = round(cur["success_count"] / total, 4) if total else 0.0
+        volume = cur["volume"]
+        refund_count = cur["refund_count"]
+        refund_total = cur["refund_total"]
+
+        prior_rate = (
+            prior["success_count"] / prior["transaction_count"]
+            if prior["transaction_count"]
+            else None
+        )
+        deltas = {
+            "success_rate_pp": (
+                round((success_rate - prior_rate) * 100, 1)
+                if prior_rate is not None
+                else None
+            ),
+            "volume_pct": self._rel_delta(cur["volume"], prior["volume"]),
+            "refund_total_pct": self._rel_delta(cur["refund_total"], prior["refund_total"]),
+        }
+
+        # service mix + daily_volume still scan the current window directly.
         q = self._db.query(Transaction).filter(Transaction.created_at >= since)
-
-        total = q.count()
-        success_count = q.filter(Transaction.status == _SUCCESS).count()
-        success_rate = round(success_count / total, 4) if total else 0.0
-
-        volume = (
-            self._db.query(func.coalesce(func.sum(Transaction.amount), 0))
-            .filter(Transaction.created_at >= since, Transaction.status == _SUCCESS)
-            .scalar()
-        )
-
-        refund_rows = q.filter(Transaction.type == TransactionType.refund)
-        refund_count = refund_rows.count()
-        refund_total = (
-            self._db.query(func.coalesce(func.sum(Transaction.amount), 0))
-            .filter(Transaction.created_at >= since, Transaction.type == TransactionType.refund)
-            .scalar()
-        )
 
         # service mix — share of successful transaction COUNT by type
         # (not naira volume; the dashboard renders this as a count-share bar).
@@ -108,6 +156,7 @@ class AdminService:
             "success_rate": success_rate,
             "refund_count": refund_count,
             "refund_total_ngn": f"{Decimal(refund_total):.2f}",
+            "deltas": deltas,
             "service_mix": service_mix,
             "daily_volume": daily_volume,
             "needs_attention": {
