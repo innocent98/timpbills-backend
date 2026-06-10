@@ -19,3 +19,5 @@ async def test_overview_authed_returns_metrics(admin_ctx, login_admin):
     assert "daily_volume" in data
     assert "needs_attention" in data
     assert data["needs_attention"]["refunds_awaiting"] == 0
+    assert "deltas" in data
+    assert set(data["deltas"]) == {"success_rate_pp", "volume_pct", "refund_total_pct"}
