@@ -171,3 +171,37 @@ async def test_transaction_detail_user_wallet_balance(admin_ctx, login_admin):
     r = await client.get(f"/api/v1/admin/transactions/{tx.reference}")
     assert r.status_code == 200
     assert r.json()["data"]["user"]["wallet_balance"] == "12400.00"
+
+
+@pytest.mark.asyncio
+async def test_transaction_detail_includes_linked_refund(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    await login_admin()
+    u = _seed_user(db)
+    tx = _seed_tx(db, u.id, type_=TransactionType.electricity, status=TransactionStatus.failed, amount="5000")
+    refund = Transaction(
+        user_id=u.id, reference=new_transaction_reference(user_id=str(u.id)),
+        type=TransactionType.refund, status=TransactionStatus.success,
+        amount=Decimal("5000"), fee=Decimal("0.00"),
+        meta={"original_reference": tx.reference},
+    )
+    db.add(refund); db.commit()
+    r = await client.get(f"/api/v1/admin/transactions/{tx.reference}")
+    assert r.status_code == 200
+    d = r.json()["data"]
+    assert d["refund"] is not None
+    assert d["refund"]["reference"] == refund.reference
+    assert d["refund"]["status"] == "success"
+    assert d["refund"]["amount"] == "5000.00"
+    assert isinstance(d["refund"]["created_at"], str) and d["refund"]["created_at"]
+
+
+@pytest.mark.asyncio
+async def test_transaction_detail_no_linked_refund_is_null(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    await login_admin()
+    u = _seed_user(db)
+    tx = _seed_tx(db, u.id, type_=TransactionType.electricity, status=TransactionStatus.failed, amount="5000")
+    r = await client.get(f"/api/v1/admin/transactions/{tx.reference}")
+    assert r.status_code == 200
+    assert r.json()["data"]["refund"] is None

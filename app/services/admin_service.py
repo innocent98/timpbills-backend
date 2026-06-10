@@ -386,6 +386,21 @@ class AdminService:
             .filter(Wallet.user_id == tx.user_id)
             .first()
         )
+        refund_row = None
+        if tx.type != TransactionType.refund:
+            refund_candidates = (
+                self._db.query(Transaction)
+                .filter(
+                    Transaction.user_id == tx.user_id,
+                    Transaction.type == TransactionType.refund,
+                )
+                .all()
+            )
+            refund_row = next(
+                (c for c in refund_candidates
+                 if c.meta and c.meta.get("original_reference") == tx.reference),
+                None,
+            )
         return {
             "reference": tx.reference,
             "type": tx.type.value,
@@ -408,6 +423,12 @@ class AdminService:
                 "method": payment.method,
                 "last4": payment.last4,
                 "bank_name": payment.bank_name,
+            },
+            "refund": None if refund_row is None else {
+                "reference": refund_row.reference,
+                "amount": f"{refund_row.amount:.2f}",
+                "status": refund_row.status.value,
+                "created_at": refund_row.created_at.isoformat(),
             },
             "events": [
                 {
