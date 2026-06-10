@@ -147,6 +147,8 @@ async def test_transaction_detail_returns_events_and_user(admin_ctx, login_admin
     assert d["user"]["full_name"] == "Ada Customer"
     assert d["user"]["email"] == "ada@x.com"  # full PII, unmasked
     assert "events" in d
+    assert d["user"]["wallet_balance"] == "0.00"  # no wallet row seeded -> zero
+    assert isinstance(d["user"]["created_at"], str) and d["user"]["created_at"]
 
 
 @pytest.mark.asyncio
@@ -156,3 +158,16 @@ async def test_transaction_detail_404(admin_ctx, login_admin):
     r = await client.get("/api/v1/admin/transactions/NOPE-123")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "TRANSACTION_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_transaction_detail_user_wallet_balance(admin_ctx, login_admin):
+    from app.db.models.wallet import Wallet
+    client, db, _redis = admin_ctx
+    await login_admin()
+    u = _seed_user(db)
+    db.add(Wallet(user_id=u.id, balance=Decimal("12400.00"))); db.commit()
+    tx = _seed_tx(db, u.id, type_=TransactionType.airtime, status=TransactionStatus.success, amount="1000")
+    r = await client.get(f"/api/v1/admin/transactions/{tx.reference}")
+    assert r.status_code == 200
+    assert r.json()["data"]["user"]["wallet_balance"] == "12400.00"

@@ -381,6 +381,11 @@ class AdminService:
             .filter(Payment.transaction_id == tx.id)
             .first()
         )
+        wallet = (
+            self._db.query(Wallet)
+            .filter(Wallet.user_id == tx.user_id)
+            .first()
+        )
         return {
             "reference": tx.reference,
             "type": tx.type.value,
@@ -393,6 +398,8 @@ class AdminService:
                 "id": str(user.id), "full_name": user.full_name,
                 "email": user.email, "phone": user.phone,
                 "kyc_tier": user.kyc_level.numeric,
+                "wallet_balance": f"{(wallet.balance if wallet else 0):.2f}",
+                "created_at": user.created_at.isoformat(),
             },
             "payment": None if payment is None else {
                 "provider": payment.provider,
