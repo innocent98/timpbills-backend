@@ -15,7 +15,7 @@ services:
       - -k
       - uvicorn.workers.UvicornWorker
       - -w
-      - "${WEB_CONCURRENCY:-4}"
+      - "${WEB_CONCURRENCY:-2}"
       - -b
       - "0.0.0.0:8000"
       - --graceful-timeout
@@ -38,8 +38,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # tini as PID 1: forwards signals and reaps orphaned children so the
+    # gunicorn master never leaves <defunct> processes behind.
+    init: true
     restart: unless-stopped
-    mem_limit: ${API_MEM_LIMIT:-900m}
+    # mem_limit is a CEILING, not a reservation — the container only consumes
+    # the pages it actually touches. Sized for WEB_CONCURRENCY=2 uvicorn
+    # workers (~150-200MB RSS each). Raise via API_MEM_LIMIT on a larger host.
+    mem_limit: ${API_MEM_LIMIT:-512m}
     cpus: ${API_CPUS:-1.5}
     healthcheck:
       test:
@@ -68,6 +74,12 @@ services:
       - -l
       - info
       - --concurrency=${WORKER_CONCURRENCY:-2}
+      # Recycle each prefork child after N tasks and if it crosses a memory
+      # ceiling (KB). This bounds slow per-child memory creep and guarantees
+      # the master cleanly reaps + respawns children instead of letting RSS
+      # grow unbounded. --max-memory-per-child is in KILOBYTES (200000 = ~195MB).
+      - --max-tasks-per-child=${WORKER_MAX_TASKS_PER_CHILD:-200}
+      - --max-memory-per-child=${WORKER_MAX_MEMORY_PER_CHILD_KB:-200000}
     env_file: .env
     volumes:
       - ./timpbills-firebase-adminsdk.json:/app/secrets/timpbills-firebase-adminsdk.json:ro
@@ -76,8 +88,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    init: true
     restart: unless-stopped
-    mem_limit: ${WORKER_MEM_LIMIT:-700m}
+    mem_limit: ${WORKER_MEM_LIMIT:-384m}
     cpus: ${WORKER_CPUS:-1.0}
     healthcheck:
       test:
@@ -103,16 +116,25 @@ services:
       - beat
       - -l
       - info
+      # PersistentScheduler writes its shelve DB to CWD (/app) by default,
+      # but the runtime image runs as non-root appuser and /app is root-owned
+      # (only /app/logs + /app/secrets are writable). Writing to /tmp avoids
+      # the PermissionError → crash → restart-loop → re-import memory spike.
+      - --schedule=/tmp/celerybeat-schedule
+      - --pidfile=
     env_file: .env
     volumes:
       - ./timpbills-firebase-adminsdk.json:/app/secrets/timpbills-firebase-adminsdk.json:ro
     depends_on:
-      db:
-        condition: service_healthy
+      # beat only needs the broker (Redis) to publish scheduled tasks; the DB
+      # is touched by the worker that runs them, not by beat itself.
       redis:
         condition: service_healthy
+    init: true
     restart: unless-stopped
-    mem_limit: ${BEAT_MEM_LIMIT:-200m}
+    # Baseline RSS of the import graph (celery + sqlalchemy + sentry + pydantic)
+    # is ~130-190MB; 200m left no headroom for restart spikes. 256m is safe.
+    mem_limit: ${BEAT_MEM_LIMIT:-256m}
     cpus: ${BEAT_CPUS:-0.3}
     healthcheck:
       test:
@@ -140,15 +162,19 @@ services:
     command:
       - postgres
       - -c
-      - shared_buffers=${PG_SHARED_BUFFERS:-256MB}
+      # Tuned for a small co-located host. shared_buffers ~25% of the DB's
+      # mem_limit; effective_cache_size is only a planner hint (no allocation).
+      # max_connections=50 is ample given the app pool is 5+10 per process.
+      # Override all of these via PG_* env on a larger / dedicated DB host.
+      - shared_buffers=${PG_SHARED_BUFFERS:-128MB}
       - -c
-      - max_connections=${PG_MAX_CONNECTIONS:-100}
+      - max_connections=${PG_MAX_CONNECTIONS:-50}
       - -c
       - work_mem=${PG_WORK_MEM:-8MB}
       - -c
-      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1GB}
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-512MB}
     restart: unless-stopped
-    mem_limit: ${DB_MEM_LIMIT:-1200m}
+    mem_limit: ${DB_MEM_LIMIT:-640m}
     cpus: ${DB_CPUS:-1.5}
     healthcheck:
       test:
