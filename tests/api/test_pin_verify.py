@@ -59,7 +59,9 @@ async def client(db_session):
 
 
 async def _seed_user(client: AsyncClient) -> dict:
-    """Register → verify email → set PIN → return auth headers."""
+    """Register → verify email (migration path: PIN pre-stamped) → return
+    auth headers. B9: the standalone /auth/pin/set call is no longer
+    needed here because the PIN is pre-stamped by the helper."""
     r = await client.post(
         "/api/v1/auth/register",
         json={
@@ -71,6 +73,9 @@ async def _seed_user(client: AsyncClient) -> dict:
     )
     assert r.status_code == 201, r.text
 
+    from tests._b9_seed import stamp_for_email_verify_tokens
+    stamp_for_email_verify_tokens(email="pinverify@test.co", pin="8527")
+
     code = _test_email_client.sent[-1].code_or_body
     r2 = await client.post(
         "/api/v1/auth/email/verify",
@@ -79,13 +84,7 @@ async def _seed_user(client: AsyncClient) -> dict:
     assert r2.status_code == 200, r2.text
     tokens = r2.json()["data"]["tokens"]
 
-    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
-    r3 = await client.post(
-        "/api/v1/auth/pin/set", json={"pin": "8527"}, headers=headers
-    )
-    assert r3.status_code == 200, r3.text
-
-    return headers
+    return {"Authorization": f"Bearer {tokens['access_token']}"}
 
 
 @pytest.mark.asyncio

@@ -185,15 +185,58 @@ class Settings(BaseSettings):
             return {k: Decimal(str(val)) for k, val in parsed.items()}
         raise ValueError(f"ELECTRICITY_DISCO_CAPS must be a JSON object, got {type(v).__name__}")
 
+    # ── Cloudinary (avatar uploads — Sprint 5c · Task 3.1) ───────────────
+    # All three required for live uploads; if any is missing the
+    # AvatarService skips configuration and any upload attempt raises
+    # AvatarUploadError up to the route, which returns 502. Tests patch
+    # cloudinary.uploader.upload directly so real creds are never needed.
+    CLOUDINARY_CLOUD_NAME: str | None = None
+    CLOUDINARY_API_KEY: str | None = None
+    CLOUDINARY_API_SECRET: str | None = None
+
+    # ── Phase A+B auth migration ─────────────────────────────────────────
+    # Flags + tunables for the phone-only-auth + PIN-login rollout. See
+    # docs/plans/phone-only-auth.md for the staged migration timeline.
+    AUTH_STRICT_GATES: bool = False
+    """When True, protected endpoints refuse for users missing any of the
+    three auth gates (email_verified, is_phone_verified, pin_hash). Flip
+    to True after ~80% mobile-version adoption of the migration build."""
+
+    AUTH_PIN_LOGIN_ENABLED: bool = True
+    """Master switch for /auth/pin-login. Disable to temporarily force
+    all users back to phone+password login."""
+
+    TERMII_OTP_CHANNEL: str = "dnd"
+    """Termii SMS channel for OTP delivery. ``dnd`` bypasses the NCC DND
+    registry (essential for production OTP delivery on Nigerian carriers);
+    ``generic`` is cheaper but blocked for DND-registered numbers."""
+
+    OTP_RESEND_COOLDOWN_SECONDS: int = 60
+    """Minimum seconds between successive OTP sends for the same
+    (user, purpose) pair."""
+
+    OTP_RESEND_DAILY_CAP: int = 10
+    """Maximum OTPs per phone per day (covers all purposes combined).
+    Defense against SMS-bombing of a single number."""
+
     # Observability — Sentry (optional; no-op when DSN unset)
     SENTRY_DSN: str | None = None
     SENTRY_ENVIRONMENT: str | None = None  # defaults to ENVIRONMENT if unset
     SENTRY_TRACES_SAMPLE_RATE: float = 0.05
     SENTRY_PROFILES_SAMPLE_RATE: float = 0.0
 
-    # Admin
-    FIRST_SUPERUSER_EMAIL: EmailStr
-    FIRST_SUPERUSER_PASSWORD: str
+    # --- Admin dashboard auth (opaque session cookie) ---
+    # NOTE: there is intentionally no FIRST_SUPERUSER_* setting. Admin users
+    # are created out-of-band via `scripts/create_admin.py` (writes the
+    # admin_users table directly). The old cookiecutter-template superuser
+    # seeding was removed; keeping a required EmailStr here only ever broke
+    # startup in contexts that don't need an admin (e.g. the live-API E2E
+    # suite). Any leftover FIRST_SUPERUSER_* in a .env is ignored (extra="ignore").
+    ADMIN_SESSION_TTL_SECONDS: int = 8 * 3600
+    ADMIN_SESSION_COOKIE_NAME: str = "admin_session"
+    ADMIN_CSRF_COOKIE_NAME: str = "admin_csrf"
+    ADMIN_COOKIE_SECURE: bool = True
+    ADMIN_COOKIE_DOMAIN: str | None = None  # set to ".timpbills.com" in staging/prod
 
     class Config:
         case_sensitive = True

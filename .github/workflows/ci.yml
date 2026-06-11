@@ -119,8 +119,6 @@ jobs:
           # so these must be set even though the migration itself doesn't use them.
           SECRET_KEY: ci-test-secret-key-do-not-use-in-prod
           ENVIRONMENT: test
-          FIRST_SUPERUSER_EMAIL: admin@test.com
-          FIRST_SUPERUSER_PASSWORD: testpassword
         run: poetry run alembic upgrade head
 
       - name: Run tests with coverage
@@ -130,8 +128,6 @@ jobs:
           REDIS_URL: "redis://localhost:6379/0"
           SECRET_KEY: ci-test-secret-key-do-not-use-in-prod
           ENVIRONMENT: "test"
-          FIRST_SUPERUSER_EMAIL: admin@test.com
-          FIRST_SUPERUSER_PASSWORD: testpassword
           # Force-fake all third-party providers in CI so tests never hit
           # real Termii / Resend / Paystack / VTPass / FCM endpoints.
           FORCE_FAKE_PROVIDERS: "true"

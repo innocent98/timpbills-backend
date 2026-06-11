@@ -1,8 +1,9 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, Enum, ForeignKey, String
+from sqlalchemy import Boolean, Column, Date, DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 
 from app.db.base import Base
 from app.db.mixins import TimestampMixin
@@ -30,6 +31,18 @@ class KycLevel(str, enum.Enum):
     tier_1 = "tier_1"
     tier_2 = "tier_2"
 
+    @property
+    def numeric(self) -> int:
+        """Tier as an integer (0/1/2) for the public API response.
+
+        The DB column stores the enum string, but mobile expects a
+        numeric tier so it can render labels (Tier 0/1/2/3) and gate
+        features by tier threshold via comparison.  The mobile DTO
+        already declares ``int kycLevel`` and switches on it — see
+        ``profile_account_card.dart``.
+        """
+        return int(self.value.rsplit("_", 1)[-1])
+
 
 class User(TimestampMixin, Base):
     __tablename__ = "users"
@@ -44,10 +57,6 @@ class User(TimestampMixin, Base):
     email_verified = Column(Boolean, nullable=False, default=False, server_default="false")
     is_phone_verified = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
-    # Single-bit admin flag — see alembic 202604281200 for rationale
-    # (vs a separate admin_users join table). Defaults False so every
-    # non-admin user just has it unset.
-    is_admin = Column(Boolean, nullable=False, default=False, server_default="false")
 
     # Sprint 5b: referral system. `referral_code` is the system-generated
     # 6-char invite code (immutable per user). `referred_by_user_id` is
@@ -64,4 +73,38 @@ class User(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
+    )
+
+    # Sprint 5c: profile-extension columns. All nullable — these are
+    # optional, surfaced by the profile screen and edited via PATCH /me.
+    # Migration 202605201200 added the underlying columns.
+    date_of_birth = Column(Date, nullable=True)
+    gender = Column(String(20), nullable=True)
+    address = Column(Text, nullable=True)
+    avatar_url = Column(String(512), nullable=True)
+
+    # Sprint 5c · Task 4.2: "log me out everywhere" stamp.
+    # When set, every access token whose ``iat`` claim predates this
+    # timestamp is rejected by the auth gate. Updated atomically by
+    # ``/auth/password/change`` so a stolen password can't outlive
+    # the user's discovery + remediation window.
+    # Migration 202605210900 added the column.
+    tokens_revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Sprint 5c · Task 6.1: soft-delete tombstone for DELETE /users/me.
+    # Set alongside ``is_active=False`` + ``tokens_revoked_at`` when the
+    # user self-deletes. The /auth/register flow consults this column to
+    # block re-registration with the same phone or email for 30 days.
+    # Hard delete (PII purge) is a Sprint 8 / compliance concern.
+    # Migration 202605220900 added the column.
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    # 1:1 back-reference to NotificationPreference. `cascade="all,
+    # delete-orphan"` mirrors the FK's ON DELETE CASCADE — deleting the
+    # user from the ORM also drops their preference row in the same flush.
+    notification_preference = relationship(
+        "NotificationPreference",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
     )

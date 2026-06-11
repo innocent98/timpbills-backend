@@ -79,6 +79,28 @@ _SUCCESS_CODE = "000"
 _PENDING_CODE = "099"
 
 
+# Shared module-level httpx client. Reusing the connection pool keeps TLS
+# sessions warm across calls — saves ~200–500ms per VTPass hit otherwise
+# burned on the handshake. Safe across async tasks.
+_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=10, max_connections=20)
+_shared_client: httpx.AsyncClient | None = None
+
+
+def _http() -> httpx.AsyncClient:
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = httpx.AsyncClient(limits=_HTTP_LIMITS)
+    return _shared_client
+
+
+async def shutdown_http() -> None:
+    """Drain the shared httpx client. Call from app lifespan shutdown."""
+    global _shared_client
+    if _shared_client is not None:
+        await _shared_client.aclose()
+        _shared_client = None
+
+
 # Known permanent-failure codes per VTPass response-codes doc:
 #   011  INVALID ARGUMENTS
 #   012  PRODUCT DOES NOT EXIST
@@ -233,18 +255,18 @@ class VTPassClient(BillProvider):
         return translate_response(body, request_id=request_id, requested=amount_ngn)
 
     async def purchase_data(
-        self, *, request_id: str, service_id: str, phone: str, variation_code: str
+        self,
+        *,
+        request_id: str,
+        service_id: str,
+        phone: str,
+        variation_code: str,
+        amount_ngn: Decimal,
     ) -> BillPurchaseResponse:
-        # Resolve the price from the catalog — never trust a client amount.
-        plans = await self.list_data_plans(service_id=service_id)
-        match = next(
-            (v for v in plans.variations if v.variation_code == variation_code),
-            None,
-        )
-        if match is None:
-            raise ProviderPermanentFailure(
-                f"Unknown data plan variation_code={variation_code!r} for service_id={service_id!r}"
-            )
+        # Price is sourced + validated server-side in BillService.purchase_data
+        # before this call. VTPass returns a permanent-failure code (011/012)
+        # if variation_code is unknown, so no second catalog round-trip is
+        # needed here.
         body = await self._post_pay({
             "request_id":    request_id,
             "serviceID":     service_id,
@@ -252,7 +274,7 @@ class VTPassClient(BillProvider):
             "variation_code": variation_code,
             "phone":         phone,
         })
-        return translate_response(body, request_id=request_id, requested=match.price_ngn)
+        return translate_response(body, request_id=request_id, requested=amount_ngn)
 
     async def list_data_plans(self, *, service_id: str) -> DataPlanList:
         body = await self._get("/api/service-variations", {"serviceID": service_id})
@@ -553,14 +575,19 @@ class VTPassClient(BillProvider):
     @retry(
         reraise=True,
         retry=retry_if_exception_type(ProviderTemporaryFailure),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
     )
     async def _post_pay(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/api/pay", payload, use_secret_key=True)
 
     async def _post(
-        self, path: str, payload: dict[str, Any], *, use_secret_key: bool
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        use_secret_key: bool,
+        timeout: float = 30.0,
     ) -> dict[str, Any]:
         headers = {
             "api-key": self._api_key,
@@ -570,20 +597,34 @@ class VTPassClient(BillProvider):
             "Content-Type": "application/json",
         }
         try:
-            async with httpx.AsyncClient(timeout=30) as c:
-                r = await c.post(f"{self._base}{path}", json=payload, headers=headers)
+            r = await _http().post(
+                f"{self._base}{path}",
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as exc:
             raise ProviderTemporaryFailure(f"vtpass network error: {exc}") from exc
         return self._handle_response(r)
 
-    async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _get(
+        self,
+        path: str,
+        params: dict[str, Any],
+        *,
+        timeout: float = 15.0,
+    ) -> dict[str, Any]:
         headers = {
             "api-key": self._api_key,
             "public-key": self._public,
         }
         try:
-            async with httpx.AsyncClient(timeout=15) as c:
-                r = await c.get(f"{self._base}{path}", params=params, headers=headers)
+            r = await _http().get(
+                f"{self._base}{path}",
+                params=params,
+                headers=headers,
+                timeout=timeout,
+            )
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.NetworkError) as exc:
             raise ProviderTemporaryFailure(f"vtpass network error: {exc}") from exc
         return self._handle_response(r)

@@ -4,6 +4,7 @@ from httpx import AsyncClient, ASGITransport
 from app.main import app
 from app.api.deps import (
     get_db,
+    get_redis,
     get_token_store,
     get_email_provider,
     _fake_sms_singleton,
@@ -34,11 +35,15 @@ async def client(db_session):
     def _get_token_store():
         return RedisTokenStore(redis=fake_redis)
 
+    def _get_redis():
+        return fake_redis
+
     def _get_email():
         return _test_email_client
 
     app.dependency_overrides[get_db] = _get_db
     app.dependency_overrides[get_token_store] = _get_token_store
+    app.dependency_overrides[get_redis] = _get_redis
     app.dependency_overrides[get_email_provider] = _get_email
     reset_fake_sms()
     reset_fake_email()
@@ -79,9 +84,14 @@ async def test_register_then_verify_email_happy_path(client):
     )
     assert r2.status_code == 200, r2.text
     body2 = r2.json()
-    assert body2["data"]["pin_set"] is False
+    # B9: fresh registration's first /email/verify call routes mobile
+    # to the phone-OTP screen with no tokens yet.
+    assert body2["data"]["email_verified"] is True
     assert body2["data"]["phone_verified"] is False
-    assert body2["data"]["tokens"]["access_token"]
+    assert body2["data"]["pin_set"] is False
+    assert body2["data"]["next_action"] == "phone_verification_required"
+    assert body2["data"].get("tokens") is None
+    assert body2["data"].get("pin_setup_token") is None
 
 
 @pytest.mark.asyncio
@@ -138,27 +148,52 @@ async def test_email_resend_endpoint(client):
 
 @pytest.mark.asyncio
 async def test_phone_upgrade_flow(client):
-    """Full phone upgrade: register → email verify → send phone OTP → verify phone OTP."""
+    """Full phone upgrade: register → email verify (migration path) →
+    re-trigger phone verification flow against the authenticated
+    /phone/send-otp + /phone/verify-otp endpoints.
+
+    B9: a fresh registration's /email/verify does NOT issue tokens
+    (no PIN, no phone-verified gate yet). We take the migration branch
+    here by pre-stamping phone-verified + PIN — the authenticated
+    /phone/verify-otp endpoint still has to behave correctly when
+    invoked again."""
+    email = "upgrade@test.co"
     # Register
     await client.post(
         "/api/v1/auth/register",
         json={
             "full_name": "Upgrade User",
             "phone": "+2348022222226",
-            "email": "upgrade@test.co",
+            "email": email,
             "password": "Secret1!",
         },
     )
+
+    from tests._b9_seed import stamp_for_email_verify_tokens
+    stamp_for_email_verify_tokens(email=email)
+
     email_code = _test_email_client.sent[-1].code_or_body
 
-    # Verify email → get tokens
+    # Verify email → get tokens (migration branch)
     r_ev = await client.post(
-        "/api/v1/auth/email/verify", json={"email": "upgrade@test.co", "code": email_code}
+        "/api/v1/auth/email/verify", json={"email": email, "code": email_code}
     )
     assert r_ev.status_code == 200, r_ev.text
     access_token = r_ev.json()["data"]["tokens"]["access_token"]
 
     headers = {"Authorization": f"Bearer {access_token}"}
+
+    # The migration pre-stamp marked phone as verified; flip it back so
+    # the on-demand /phone/send-otp + /phone/verify-otp paths exercise
+    # their intended state transitions. kyc_level was never promoted so
+    # it's already tier_0.
+    from app.api.deps import get_db
+    from app.db.models.user import User
+    from app.main import app as _app
+    db = next(_app.dependency_overrides[get_db]())
+    user = db.query(User).filter(User.email == email).first()
+    user.is_phone_verified = False
+    db.commit()
 
     # Send phone OTP (authenticated)
     r_send = await client.post("/api/v1/auth/phone/send-otp", headers=headers)
@@ -212,8 +247,8 @@ async def rate_limited_client(db_session):
 
 @pytest.mark.asyncio
 async def test_login_rate_limited(rate_limited_client):
-    """6th login attempt with bad creds should return 429."""
-    payload = {"identifier": "nobody@example.com", "password": "WrongPass1!"}
+    """6th login attempt with bad creds should return 429 (B12: phone field)."""
+    payload = {"phone": "+2348099999900", "password": "WrongPass1!"}
     last_response = None
     for _ in range(6):
         last_response = await rate_limited_client.post("/api/v1/auth/login", json=payload)
@@ -221,8 +256,9 @@ async def test_login_rate_limited(rate_limited_client):
 
 
 @pytest.mark.asyncio
-async def test_login_rejects_unverified_email(client):
-    """Register → skip email verify → login → expect 403 EMAIL_NOT_VERIFIED."""
+async def test_login_unverified_email_returns_email_action(client):
+    """B12: register → skip email verify → login → 200 with
+    next_action=email_verification_required (no longer 403)."""
     await client.post(
         "/api/v1/auth/register",
         json={
@@ -232,13 +268,14 @@ async def test_login_rejects_unverified_email(client):
             "password": "Secret1!",
         },
     )
-    # Do NOT verify email — attempt login immediately
     r = await client.post(
         "/api/v1/auth/login",
-        json={"identifier": "unverified@flow.co", "password": "Secret1!"},
+        json={"phone": "+2348022222230", "password": "Secret1!"},
     )
-    assert r.status_code == 403, r.text
-    assert r.json()["error"]["code"] == "EMAIL_NOT_VERIFIED"
+    assert r.status_code == 200, r.text
+    body = r.json()["data"]
+    assert body["next_action"] == "email_verification_required"
+    assert body.get("tokens") is None
 
 
 @pytest.mark.asyncio
@@ -298,7 +335,7 @@ async def test_login_rejects_inactive_user(db_session):
 
             r = await c.post(
                 "/api/v1/auth/login",
-                json={"identifier": "inactive@flow.co", "password": "Secret1!"},
+                json={"phone": "+2348022222231", "password": "Secret1!"},
             )
             assert r.status_code == 403, r.text
             assert r.json()["error"]["code"] == "ACCOUNT_DISABLED"
@@ -321,6 +358,10 @@ async def test_refresh_token_not_accepted_as_access(client):
             "password": "Secret1!",
         },
     )
+    # B9: migration-branch pre-stamp so /email/verify returns tokens.
+    from tests._b9_seed import stamp_for_email_verify_tokens
+    stamp_for_email_verify_tokens(email="tokentype@flow.co")
+
     # Verify email to get tokens
     code = _test_email_client.sent[-1].code_or_body
     r_ev = await client.post(

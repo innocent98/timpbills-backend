@@ -118,21 +118,19 @@ class FakeVTPassClient(BillProvider):
         service_id: str,
         phone: str,
         variation_code: str,
+        amount_ngn: Decimal,
     ) -> BillPurchaseResponse:
-        # Price comes from the fake's plan catalog — keeping parity with
-        # real VTPass which derives it server-side.
+        # Validate against the fake's plan catalog so an unknown
+        # variation_code still trips the permanent-failure path (refund
+        # test coverage). Real VTPass returns a non-000 code; the fake
+        # mimics that by flagging the tx to fail before responding.
         plans = await self.list_data_plans(service_id=service_id)
-        match = next(
-            (v for v in plans.variations if v.variation_code == variation_code),
-            None,
-        )
-        if match is None:
-            # Surface as a permanent failure to force a refund path test.
+        if not any(v.variation_code == variation_code for v in plans.variations):
             self.will_fail(request_id)
             return self._build_response(request_id, Decimal("0.00"))
-        self._requested_amounts[request_id] = match.price_ngn
+        self._requested_amounts[request_id] = amount_ngn
         self._transaction_ids[request_id] = f"vtp_{request_id[:12]}"
-        return self._build_response(request_id, match.price_ngn)
+        return self._build_response(request_id, amount_ngn)
 
     async def list_data_plans(self, *, service_id: str) -> DataPlanList:
         return DataPlanList(

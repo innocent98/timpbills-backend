@@ -1,100 +1,54 @@
 """API-level tests for /admin/refunds/{reference}/trigger — Sprint 5 BE-52.
 
-Covers the four contract corners:
+Auth migrated (admin sprint, Task 6) to the opaque session-cookie +
+double-submit CSRF model. The acting actor is now an ``AdminUser``
+(authenticated via ``login_admin``), which is distinct from the regular
+``User`` whose wallet the refund credits — so each refund test seeds a
+target ``User`` + ``Wallet`` + failed ``Transaction`` and authenticates
+as a *separate* admin.
 
-  1. Auth required → 401 without bearer.
-  2. Authenticated but non-admin → 403.
-  3. Admin can trigger a refund on a failed bill tx → wallet credited,
-     audit row written, original tx walks to `refunded`.
-  4. Re-triggering an already-refunded tx → 200, no double credit,
-     `was_created=false`, audit row still written.
+Covers the contract corners:
 
-Sprint 8 will build the admin dashboard UI on top of this; we only ship
-the API surface here.
+  1. No session cookie → 401 ``ADMIN_AUTH_REQUIRED``.
+  2. Disabled admin row → 403 ``ADMIN_DISABLED``.
+  3. Authenticated admin without ``X-CSRF-Token`` → 403 ``CSRF_FAILED``.
+  4. Admin can trigger a refund on a failed bill tx → target wallet
+     credited, audit row written, original tx walks to ``refunded``.
+  5. Re-triggering an already-refunded tx → 200, no double credit,
+     ``was_created=false``, audit row still written.
+  6. Negative paths: unknown tx → 404, refund-type tx → 400, short
+     reason → 422.
 """
+import uuid
 from decimal import Decimal
 
 import pytest
-import pytest_asyncio
-from fakeredis.aioredis import FakeRedis
-from httpx import ASGITransport, AsyncClient
 
-from app.api.deps import (
-    get_db,
-    get_email_provider,
-    get_redis,
-    get_token_store,
-    reset_fake_email,
-    reset_fake_paystack,
-    reset_fake_sms,
-    reset_fake_vtpass,
-)
-from app.core.limiter import limiter
+from app.core.security import hash_password
+from app.db.models.admin_user import AdminUser
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
 from app.db.models.user import User
 from app.db.models.wallet import Wallet
-from app.integrations.email.fake import FakeEmailClient
-from app.main import app
-from app.services.token_store import RedisTokenStore
 from app.utils.references import new_transaction_reference
 
-import tests.e2e.test_auth_full_flows as _e2e_mod
-from tests.e2e.test_auth_full_flows import _seed_logged_in_user
 
+def _seed_target_user(db, *, email: str = "target@e.co") -> User:
+    """Create the regular ``User`` who OWNS the transaction being refunded.
 
-_test_email_client = FakeEmailClient()
-
-
-@pytest_asyncio.fixture
-async def client(db_session):
-    def _get_db():
-        try:
-            yield db_session
-        finally:
-            pass
-
-    fake_redis = FakeRedis(decode_responses=True)
-
-    def _get_token_store():
-        return RedisTokenStore(redis=fake_redis)
-
-    def _get_email():
-        return _test_email_client
-
-    async def _get_redis():
-        return fake_redis
-
-    app.dependency_overrides[get_db] = _get_db
-    app.dependency_overrides[get_token_store] = _get_token_store
-    app.dependency_overrides[get_email_provider] = _get_email
-    app.dependency_overrides[get_redis] = _get_redis
-    reset_fake_sms()
-    reset_fake_email()
-    reset_fake_paystack()
-    reset_fake_vtpass()
-    _test_email_client.sent.clear()
-
-    _orig = _e2e_mod._e2e_email_client
-    _e2e_mod._e2e_email_client = _test_email_client
-
-    limiter.enabled = False
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-    limiter.enabled = True
-
-    _e2e_mod._e2e_email_client = _orig
-    await fake_redis.aclose()
-    app.dependency_overrides.clear()
-
-
-def _make_admin(db, email: str) -> User:
-    """Promote an existing user (created via _seed_logged_in_user) to admin."""
-    user = db.query(User).filter(User.email == email).one()
-    user.is_admin = True
+    This is the wallet-credit target — separate from the ``AdminUser``
+    performing the action (authenticated via ``login_admin``).
+    """
+    user = User(
+        email=email,
+        phone=f"+23480{uuid.uuid4().int % 10**8:08d}",
+        full_name="Refund Target",
+        password_hash=hash_password("Secret1!"),
+    )
+    db.add(user)
     db.commit()
+    db.refresh(user)
     return user
 
 
@@ -127,41 +81,70 @@ def _seed_failed_bill_tx(db, user_id, *, amount: Decimal = Decimal("1500.00")) -
 
 
 @pytest.mark.asyncio
-async def test_admin_refund_unauthenticated_rejects_401(client):
-    r = await client.post(
+async def test_admin_refund_unauthenticated_rejects_401(admin_client):
+    r = await admin_client.post(
         "/api/v1/admin/refunds/TMP-260428-0001/trigger",
         json={"reason": "Customer reported never received airtime"},
     )
     assert r.status_code == 401
+    assert r.json()["error"]["code"] == "ADMIN_AUTH_REQUIRED"
 
 
 @pytest.mark.asyncio
-async def test_admin_refund_non_admin_rejects_403(client, db_session):
-    _, headers = await _seed_logged_in_user(client)
-    tx = _seed_failed_bill_tx(db_session, db_session.query(User).one().id)
+async def test_admin_refund_disabled_admin_rejects_403(admin_ctx, login_admin):
+    """A seeded-but-disabled admin row holding a valid session is rejected
+    with 403 ADMIN_DISABLED — the session resolves, but the admin can no
+    longer act."""
+    client, db, _redis = admin_ctx
+    csrf = await login_admin()  # seeds the ops@x.com admin + session cookies
+
+    admin = db.query(AdminUser).filter_by(email="ops@x.com").one()
+    admin.is_active = False
+    db.commit()
+
+    # Send a VALID csrf header so the 403 can only come from the disabled
+    # check, not a CSRF mismatch — this also asserts auth resolves first.
+    r = await client.post(
+        "/api/v1/admin/refunds/TMP-260428-0001/trigger",
+        json={"reason": "Customer reported never received airtime"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "ADMIN_DISABLED"
+
+
+@pytest.mark.asyncio
+async def test_admin_refund_missing_csrf_rejects_403(admin_ctx, login_admin):
+    """Authenticated admin (session cookies set) but no X-CSRF-Token header
+    → 403 CSRF_FAILED. With the header the request proceeds (asserted in the
+    happy-path test below)."""
+    client, db, _redis = admin_ctx
+    await login_admin()
+    target = _seed_target_user(db)
+    tx = _seed_failed_bill_tx(db, target.id)
 
     r = await client.post(
         f"/api/v1/admin/refunds/{tx.reference}/trigger",
         json={"reason": "Customer reported never received airtime"},
-        headers=headers,
     )
     assert r.status_code == 403
-    assert r.json()["error"]["code"] == "ADMIN_REQUIRED"
+    assert r.json()["error"]["code"] == "CSRF_FAILED"
 
 
 # ── 2. Happy path ───────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_admin_refund_credits_wallet_and_walks_tx_to_refunded(client, db_session):
-    _, headers = await _seed_logged_in_user(client)
-    admin = _make_admin(db_session, "e@e.co")
-    tx = _seed_failed_bill_tx(db_session, admin.id, amount=Decimal("1500.00"))
+async def test_admin_refund_credits_wallet_and_walks_tx_to_refunded(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    csrf = await login_admin()
+    target = _seed_target_user(db)
+    tx = _seed_failed_bill_tx(db, target.id, amount=Decimal("1500.00"))
 
     r = await client.post(
         f"/api/v1/admin/refunds/{tx.reference}/trigger",
         json={"reason": "Customer reported never received airtime"},
-        headers=headers,
+        headers={"X-CSRF-Token": csrf},
     )
     assert r.status_code == 200, r.text
     body = r.json()["data"]
@@ -171,14 +154,14 @@ async def test_admin_refund_credits_wallet_and_walks_tx_to_refunded(client, db_s
     assert body["transaction_status"] == "refunded"
 
     # Wallet credited by the refund amount.
-    wallet = db_session.query(Wallet).filter(Wallet.user_id == admin.id).one()
+    wallet = db.query(Wallet).filter(Wallet.user_id == target.id).one()
     assert wallet.balance == Decimal("1500.00")
 
     # Refund row exists, linked back to the original via meta.
     refund = (
-        db_session.query(Transaction)
+        db.query(Transaction)
         .filter(
-            Transaction.user_id == admin.id,
+            Transaction.user_id == target.id,
             Transaction.type == TransactionType.refund,
         )
         .one()
@@ -188,7 +171,7 @@ async def test_admin_refund_credits_wallet_and_walks_tx_to_refunded(client, db_s
 
     # Audit row on the original tx records the admin actor + reason.
     audit_rows = (
-        db_session.query(TransactionEvent)
+        db.query(TransactionEvent)
         .filter(TransactionEvent.transaction_id == tx.id)
         .all()
     )
@@ -198,8 +181,7 @@ async def test_admin_refund_credits_wallet_and_walks_tx_to_refunded(client, db_s
     ]
     assert len(admin_attempts) == 1
     ctx = admin_attempts[0].context
-    assert ctx["actor_admin_user_id"] == str(admin.id)
-    assert ctx["actor_admin_email"] == "e@e.co"
+    assert ctx["actor_admin_email"] == "ops@x.com"
     assert ctx["refund_was_created"] is True
 
 
@@ -207,25 +189,26 @@ async def test_admin_refund_credits_wallet_and_walks_tx_to_refunded(client, db_s
 
 
 @pytest.mark.asyncio
-async def test_admin_refund_re_trigger_is_noop_with_audit_row(client, db_session):
+async def test_admin_refund_re_trigger_is_noop_with_audit_row(admin_ctx, login_admin):
     """Second admin trigger after the refund has already landed: no
     double-credit, returns was_created=false, but still writes an audit
     row so 'Adebayo retried this' is reconstructable from history."""
-    _, headers = await _seed_logged_in_user(client)
-    admin = _make_admin(db_session, "e@e.co")
-    tx = _seed_failed_bill_tx(db_session, admin.id, amount=Decimal("2500.00"))
+    client, db, _redis = admin_ctx
+    csrf = await login_admin()
+    target = _seed_target_user(db)
+    tx = _seed_failed_bill_tx(db, target.id, amount=Decimal("2500.00"))
 
     # First trigger — creates refund.
     r1 = await client.post(
         f"/api/v1/admin/refunds/{tx.reference}/trigger",
         json={"reason": "First refund — customer disputed"},
-        headers=headers,
+        headers={"X-CSRF-Token": csrf},
     )
     assert r1.status_code == 200
     assert r1.json()["data"]["was_created"] is True
 
     wallet_after_first = (
-        db_session.query(Wallet).filter(Wallet.user_id == admin.id).one().balance
+        db.query(Wallet).filter(Wallet.user_id == target.id).one().balance
     )
     assert wallet_after_first == Decimal("2500.00")
 
@@ -233,7 +216,7 @@ async def test_admin_refund_re_trigger_is_noop_with_audit_row(client, db_session
     r2 = await client.post(
         f"/api/v1/admin/refunds/{tx.reference}/trigger",
         json={"reason": "Re-checking after escalation"},
-        headers=headers,
+        headers={"X-CSRF-Token": csrf},
     )
     assert r2.status_code == 200, r2.text
     body = r2.json()["data"]
@@ -241,15 +224,15 @@ async def test_admin_refund_re_trigger_is_noop_with_audit_row(client, db_session
     assert body["refund_reference"] == r1.json()["data"]["refund_reference"]
 
     # Wallet not double-credited.
-    db_session.expire_all()
+    db.expire_all()
     wallet_after_second = (
-        db_session.query(Wallet).filter(Wallet.user_id == admin.id).one().balance
+        db.query(Wallet).filter(Wallet.user_id == target.id).one().balance
     )
     assert wallet_after_second == Decimal("2500.00")
 
     # Both audit rows written — one per admin attempt.
     admin_attempts = (
-        db_session.query(TransactionEvent)
+        db.query(TransactionEvent)
         .filter(
             TransactionEvent.transaction_id == tx.id,
             TransactionEvent.reason.like("admin_manual_refund_attempt%"),
@@ -266,60 +249,62 @@ async def test_admin_refund_re_trigger_is_noop_with_audit_row(client, db_session
 
 
 @pytest.mark.asyncio
-async def test_admin_refund_unknown_tx_404(client, db_session):
-    _, headers = await _seed_logged_in_user(client)
-    _make_admin(db_session, "e@e.co")
+async def test_admin_refund_unknown_tx_404(admin_ctx, login_admin):
+    client, db, _redis = admin_ctx
+    csrf = await login_admin()
 
     r = await client.post(
         "/api/v1/admin/refunds/TMP-999999-NONE/trigger",
         json={"reason": "Looking for a tx that doesn't exist"},
-        headers=headers,
+        headers={"X-CSRF-Token": csrf},
     )
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "TRANSACTION_NOT_FOUND"
 
 
 @pytest.mark.asyncio
-async def test_admin_refund_rejects_refund_type_tx(client, db_session):
+async def test_admin_refund_rejects_refund_type_tx(admin_ctx, login_admin):
     """A refund can't itself be refunded — that would be a state-machine
     violation. The endpoint must reject before touching any wallet
     state."""
-    _, headers = await _seed_logged_in_user(client)
-    admin = _make_admin(db_session, "e@e.co")
+    client, db, _redis = admin_ctx
+    csrf = await login_admin()
+    target = _seed_target_user(db)
 
     # Insert a refund-type tx directly.
     refund_tx = Transaction(
-        user_id=admin.id,
-        reference=new_transaction_reference(user_id=str(admin.id), prefix="TMPR"),
+        user_id=target.id,
+        reference=new_transaction_reference(user_id=str(target.id), prefix="TMPR"),
         type=TransactionType.refund,
         status=TransactionStatus.success,
         amount=Decimal("500.00"),
         fee=Decimal("0.00"),
         meta={"original_reference": "TMP-260428-0099"},
     )
-    db_session.add(refund_tx)
-    db_session.commit()
+    db.add(refund_tx)
+    db.commit()
 
     r = await client.post(
         f"/api/v1/admin/refunds/{refund_tx.reference}/trigger",
         json={"reason": "Operator typo — tried to refund a refund"},
-        headers=headers,
+        headers={"X-CSRF-Token": csrf},
     )
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "UNREFUNDABLE_TX_TYPE"
 
 
 @pytest.mark.asyncio
-async def test_admin_refund_rejects_short_reason(client, db_session):
+async def test_admin_refund_rejects_short_reason(admin_ctx, login_admin):
     """Reason has min_length=3 — a single-character or empty reason
     gives ops nothing useful to read in the audit log later."""
-    _, headers = await _seed_logged_in_user(client)
-    admin = _make_admin(db_session, "e@e.co")
-    tx = _seed_failed_bill_tx(db_session, admin.id)
+    client, db, _redis = admin_ctx
+    csrf = await login_admin()
+    target = _seed_target_user(db)
+    tx = _seed_failed_bill_tx(db, target.id)
 
     r = await client.post(
         f"/api/v1/admin/refunds/{tx.reference}/trigger",
         json={"reason": "x"},
-        headers=headers,
+        headers={"X-CSRF-Token": csrf},
     )
     assert r.status_code == 422

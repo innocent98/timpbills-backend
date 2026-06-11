@@ -54,23 +54,15 @@ def _mock_httpx_response(
 
 
 def _patch_async_client(*, post_return=None, get_return=None, post_side_effect=None):
-    """Patch httpx.AsyncClient to return our mocked response(s). The
-    client's `async with httpx.AsyncClient(...) as c:` path requires
-    mocking both the async context manager and the `.post` / `.get`
-    awaitables on the yielded instance."""
+    """Patch the shared httpx client (vtpass.client._http) so .post/.get
+    return our mocked response(s)."""
     inner = MagicMock()
     if post_side_effect is not None:
         inner.post = AsyncMock(side_effect=post_side_effect)
     else:
         inner.post = AsyncMock(return_value=post_return)
     inner.get = AsyncMock(return_value=get_return)
-
-    ctx = MagicMock()
-    ctx.__aenter__ = AsyncMock(return_value=inner)
-    ctx.__aexit__ = AsyncMock(return_value=None)
-
-    factory = MagicMock(return_value=ctx)
-    return patch("app.integrations.vtpass.client.httpx.AsyncClient", factory), inner
+    return patch("app.integrations.vtpass.client._http", return_value=inner), inner
 
 
 # ── validate_meter ─────────────────────────────────────────────────────

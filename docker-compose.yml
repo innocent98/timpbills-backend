@@ -1,8 +1,9 @@
 services:
   api:
+    image: timpbills-backend:dev
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      target: dev
     container_name: timpbills_api
     ports:
       - "8000:8000"
@@ -25,6 +26,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    init: true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
@@ -34,11 +36,10 @@ services:
       start_period: 15s
 
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-    command: celery -A app.workers.celery_app worker -l info
+    image: timpbills-backend:dev
+    command: celery -A app.workers.celery_app worker -l info --max-tasks-per-child=200
     container_name: timpbills_worker
+    init: true  # tini reaps prefork orphans — no <defunct> celery processes
     volumes:
       - ./app:/app/app
       - ./pyproject.toml:/app/pyproject.toml
@@ -47,16 +48,19 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-timpbills}:${POSTGRES_PASSWORD:-timpbills_dev}@db:5432/${POSTGRES_DB:-timpbills}
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      db: { condition: service_healthy }
-      redis: { condition: service_healthy }
+      api:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   beat:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-    command: celery -A app.workers.celery_app beat -l info
+    image: timpbills-backend:dev
+    command: celery -A app.workers.celery_app beat -l info --schedule=/tmp/celerybeat-schedule --pidfile=
     container_name: timpbills_beat
+    init: true
     volumes:
       - ./app:/app/app
       - ./pyproject.toml:/app/pyproject.toml
@@ -65,8 +69,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-timpbills}:${POSTGRES_PASSWORD:-timpbills_dev}@db:5432/${POSTGRES_DB:-timpbills}
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      db: { condition: service_healthy }
-      redis: { condition: service_healthy }
+      api:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   db:

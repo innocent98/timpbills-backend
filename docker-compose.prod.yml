@@ -38,8 +38,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # tini as PID 1: forwards signals and reaps orphaned children so the
+    # gunicorn master never leaves <defunct> processes behind.
+    init: true
     restart: unless-stopped
-    mem_limit: ${API_MEM_LIMIT:-900m}
+    # mem_limit is a per-container cgroup CEILING (a container hitting it is
+    # OOM-killed even when the host has free RAM) — not a reservation. These
+    # DEFAULTS are sized for PRODUCTION (WEB_CONCURRENCY=4, ~800MB + headroom)
+    # on the shared 8GB host. Staging overrides every limit far lower via
+    # .env.staging so the two stacks coexist; see that file.
+    mem_limit: ${API_MEM_LIMIT:-1536m}
     cpus: ${API_CPUS:-1.5}
     healthcheck:
       test:
@@ -68,6 +76,12 @@ services:
       - -l
       - info
       - --concurrency=${WORKER_CONCURRENCY:-2}
+      # Recycle each prefork child after N tasks and if it crosses a memory
+      # ceiling (KB). This bounds slow per-child memory creep and guarantees
+      # the master cleanly reaps + respawns children instead of letting RSS
+      # grow unbounded. --max-memory-per-child is in KILOBYTES (200000 = ~195MB).
+      - --max-tasks-per-child=${WORKER_MAX_TASKS_PER_CHILD:-200}
+      - --max-memory-per-child=${WORKER_MAX_MEMORY_PER_CHILD_KB:-200000}
     env_file: .env
     volumes:
       - ./timpbills-firebase-adminsdk.json:/app/secrets/timpbills-firebase-adminsdk.json:ro
@@ -76,8 +90,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    init: true
     restart: unless-stopped
-    mem_limit: ${WORKER_MEM_LIMIT:-700m}
+    mem_limit: ${WORKER_MEM_LIMIT:-768m}
     cpus: ${WORKER_CPUS:-1.0}
     healthcheck:
       test:
@@ -103,16 +118,25 @@ services:
       - beat
       - -l
       - info
+      # PersistentScheduler writes its shelve DB to CWD (/app) by default,
+      # but the runtime image runs as non-root appuser and /app is root-owned
+      # (only /app/logs + /app/secrets are writable). Writing to /tmp avoids
+      # the PermissionError → crash → restart-loop → re-import memory spike.
+      - --schedule=/tmp/celerybeat-schedule
+      - --pidfile=
     env_file: .env
     volumes:
       - ./timpbills-firebase-adminsdk.json:/app/secrets/timpbills-firebase-adminsdk.json:ro
     depends_on:
-      db:
-        condition: service_healthy
+      # beat only needs the broker (Redis) to publish scheduled tasks; the DB
+      # is touched by the worker that runs them, not by beat itself.
       redis:
         condition: service_healthy
+    init: true
     restart: unless-stopped
-    mem_limit: ${BEAT_MEM_LIMIT:-200m}
+    # Baseline RSS of the import graph (celery + sqlalchemy + sentry + pydantic)
+    # is ~130-190MB; 200m left no headroom for restart spikes. 256m is safe.
+    mem_limit: ${BEAT_MEM_LIMIT:-256m}
     cpus: ${BEAT_CPUS:-0.3}
     healthcheck:
       test:
@@ -140,15 +164,19 @@ services:
     command:
       - postgres
       - -c
-      - shared_buffers=${PG_SHARED_BUFFERS:-256MB}
+      # DEFAULTS are PRODUCTION-sized for the shared 8GB host. shared_buffers
+      # ~25-50% of the DB mem_limit; effective_cache_size is a planner hint
+      # (no allocation) reflecting RAM available for caching. Staging shrinks
+      # all of these via PG_* in .env.staging.
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
       - -c
       - max_connections=${PG_MAX_CONNECTIONS:-100}
       - -c
       - work_mem=${PG_WORK_MEM:-8MB}
       - -c
-      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1GB}
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-4GB}
     restart: unless-stopped
-    mem_limit: ${DB_MEM_LIMIT:-1200m}
+    mem_limit: ${DB_MEM_LIMIT:-2048m}
     cpus: ${DB_CPUS:-1.5}
     healthcheck:
       test:
@@ -170,7 +198,7 @@ services:
     command:
       - redis-server
       - --maxmemory
-      - ${REDIS_MAX_MEMORY:-200mb}
+      - ${REDIS_MAX_MEMORY:-256mb}
       - --maxmemory-policy
       - noeviction
       - --requirepass
@@ -180,7 +208,7 @@ services:
     volumes:
       - redis_data:/data
     restart: unless-stopped
-    mem_limit: ${REDIS_MEM_LIMIT:-256m}
+    mem_limit: ${REDIS_MEM_LIMIT:-512m}
     cpus: ${REDIS_CPUS:-0.5}
     healthcheck:
       # Compose interpolates ${REDIS_PASSWORD} from .env at parse time and

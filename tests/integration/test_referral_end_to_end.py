@@ -170,18 +170,19 @@ async def _signup_referee_with_code(
         },
     )
     assert r.status_code == 201, r.text
+
+    # B9: migration-branch pre-stamp so /email/verify yields tokens
+    # without requiring a separate /pin/set call.
+    from tests._b9_seed import stamp_for_email_verify_tokens
+    stamp_for_email_verify_tokens(email=email)
+
     code_otp = _test_email.sent[-1].code_or_body
     r2 = await client.post(
         "/api/v1/auth/email/verify", json={"email": email, "code": code_otp},
     )
     assert r2.status_code == 200, r2.text
     tokens = r2.json()["data"]["tokens"]
-    auth = {"Authorization": f"Bearer {tokens['access_token']}"}
-    r3 = await client.post(
-        "/api/v1/auth/pin/set", json={"pin": "8527"}, headers=auth,
-    )
-    assert r3.status_code == 200
-    return auth
+    return {"Authorization": f"Bearer {tokens['access_token']}"}
 
 
 # ── tests ───────────────────────────────────────────────────────────────

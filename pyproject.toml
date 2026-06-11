@@ -19,8 +19,9 @@ pydantic-settings = "^2.9.0"
 python-multipart = "^0.0.20"
 python-dotenv = "^1.1.0"
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
-passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+passlib = {extras = ["bcrypt", "argon2"], version = "^1.7.4"}
 bcrypt = "~4.0.1"  # pin to 4.0.x — passlib 1.7 can't read bcrypt 4.1+ __about__ attr
+argon2-cffi = "^23.1.0"  # primary password scheme; passlib reads via its argon2 backend
 sqlalchemy = "^2.0.41"
 alembic = "^1.15.0"
 loguru = "^0.7.3"
@@ -43,6 +44,7 @@ sentry-sdk = {extras = ["fastapi"], version = "^2.17.0"}
 # docs/superpowers/plans/2026-04-21-sprint-3-airtime-data.md §4 (B13).
 google-auth = ">=2.30"
 google-auth-oauthlib = ">=1.2"
+cloudinary = "^1.44.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

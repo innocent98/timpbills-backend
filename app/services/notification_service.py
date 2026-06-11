@@ -28,11 +28,15 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from app.core.logger import log
+from app.db.models.notification_log import NotificationChannel, NotificationLog
 from app.integrations.email.base import EmailProvider
 from app.integrations.email.renderer import render_email
 from app.integrations.push.base import BasePushClient
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from app.services.notification_log_service import NotificationLogService
     from app.services.push_tokens_service import PushTokensService
 
 
@@ -67,6 +71,119 @@ class NotificationEvent(str, Enum):
     referrer_signup_notified        = "referrer_signup_notified"
     referral_credited               = "referral_credited"
     welcome_bonus                   = "welcome_bonus"
+
+
+# ─── Notification categories (Sprint 5c · Task 5.2) ─────────────────────────
+#
+# Each NotificationEvent belongs to exactly one user-facing category. The
+# NotificationPreference row carries one boolean per category; dispatch
+# consults the user's row before fanning out to push. Categories are
+# *push-side* — email is independently gated by `email_notifications`.
+#
+# Why an explicit category enum (instead of inlining strings): the
+# NotificationPreference model already exposes these four columns. Mirroring
+# them as an enum here makes the mapping side a compile-time invariant
+# (mypy will complain if a column name drifts) and keeps the EVENT_CATEGORY
+# table self-documenting.
+
+
+class NotificationCategory(str, Enum):
+    transaction_alerts = "transaction_alerts"
+    referral_updates = "referral_updates"
+    promotions = "promotions"
+
+
+# Single source of truth for "which preference flag gates which event".
+# A NotificationEvent missing from this map would bypass user preferences
+# entirely — tests/services/test_notification_gating.py pins coverage so a
+# new event without a category entry breaks loudly at CI.
+EVENT_CATEGORY: dict[NotificationEvent, NotificationCategory] = {
+    NotificationEvent.bill_success:                NotificationCategory.transaction_alerts,
+    NotificationEvent.bill_failure_refund:         NotificationCategory.transaction_alerts,
+    NotificationEvent.wallet_funded:               NotificationCategory.transaction_alerts,
+    NotificationEvent.electricity_token_delivered: NotificationCategory.transaction_alerts,
+    NotificationEvent.cable_activated:             NotificationCategory.transaction_alerts,
+    NotificationEvent.refund_complete:             NotificationCategory.transaction_alerts,
+    NotificationEvent.referrer_signup_notified:    NotificationCategory.referral_updates,
+    NotificationEvent.referral_credited:           NotificationCategory.referral_updates,
+    NotificationEvent.welcome_bonus:               NotificationCategory.referral_updates,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedPrefs:
+    """Snapshot of a user's notification preferences as consulted by
+    dispatch. Either pulled from the user's row, or — when no row exists
+    yet (lazy-creation defaults) or the lookup fails — populated from the
+    documented spec §3.2 defaults: transactional + referral + email ON,
+    promotions OFF. Defaults are deliberately permissive on the
+    transactional channel so absence of a row never silently drops a
+    receipt."""
+
+    transaction_alerts:  bool = True
+    referral_updates:    bool = True
+    promotions:          bool = False
+    email_notifications: bool = True
+
+    def push_allowed(self, category: NotificationCategory) -> bool:
+        if category is NotificationCategory.transaction_alerts:
+            return self.transaction_alerts
+        if category is NotificationCategory.referral_updates:
+            return self.referral_updates
+        if category is NotificationCategory.promotions:
+            return self.promotions
+        return True  # pragma: no cover — exhaustive above
+
+    @property
+    def email_allowed(self) -> bool:
+        return self.email_notifications
+
+
+_DEFAULT_PREFS = _ResolvedPrefs()
+
+
+def _resolve_prefs(db: "Session | None", user_id: str) -> _ResolvedPrefs:
+    """Load the user's NotificationPreference row → _ResolvedPrefs.
+
+    Fallback chain:
+      * ``db is None``           → spec-default prefs (legacy callers).
+      * ``user_id`` not parseable → spec-default prefs.
+      * Row not found            → spec-default prefs (matches lazy-create
+                                   semantics: a user who has never opened
+                                   the screen behaves as the documented
+                                   default).
+      * Any other DB error       → spec-default prefs + warning log so
+                                   we never silently suppress a receipt
+                                   on a transient DB hiccup.
+    """
+    if db is None:
+        return _DEFAULT_PREFS
+    try:
+        user_uuid = UUID(user_id)
+    except (TypeError, ValueError):
+        return _DEFAULT_PREFS
+    # Local import to avoid pulling the SQLAlchemy model graph at module
+    # import time (the Celery worker boots this module on every task).
+    from app.db.models.notification_preference import (  # noqa: PLC0415
+        NotificationPreference,
+    )
+    try:
+        row = (
+            db.query(NotificationPreference)
+            .filter(NotificationPreference.user_id == user_uuid)
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("notify: prefs lookup failed user=%s err=%s", user_id, exc)
+        return _DEFAULT_PREFS
+    if row is None:
+        return _DEFAULT_PREFS
+    return _ResolvedPrefs(
+        transaction_alerts=bool(row.transaction_alerts),
+        referral_updates=bool(row.referral_updates),
+        promotions=bool(row.promotions),
+        email_notifications=bool(row.email_notifications),
+    )
 
 
 # Maps event → (email_template_name, push_title_template, push_body_key)
@@ -160,6 +277,7 @@ class NotificationService:
         email_client: EmailProvider,
         push_client: BasePushClient,
         push_tokens_service: "PushTokensService | None" = None,
+        db: "Session | None" = None,
     ) -> None:
         """If ``push_tokens_service`` is wired, ``_maybe_push`` runs in
         token-aware mode: look up all registered FCM tokens for the
@@ -167,10 +285,18 @@ class NotificationService:
         the FCM client. If omitted (Sprint 3 default + tests that
         predate push-tokens storage), falls back to a single
         ``push_client.send(user_id=..., fcm_token=None)`` call — the
-        FakePushClient is happy with that."""
+        FakePushClient is happy with that.
+
+        Sprint 5c · Task 5.2: ``db`` enables NotificationPreference-aware
+        gating. When wired, dispatch consults the user's preference row
+        (or spec defaults if no row exists) before each channel; when
+        ``None``, every event fires unconditionally. The Celery worker
+        always wires it; legacy unit tests construct without it and
+        retain the old default-on behaviour."""
         self._email = email_client
         self._push = push_client
         self._push_tokens = push_tokens_service
+        self._db = db
 
     async def dispatch(
         self,
@@ -181,16 +307,104 @@ class NotificationService:
         context: dict[str, Any],
     ) -> None:
         """Send the email + push for this event. Each channel failure
-        is caught and logged so neither blocks the other."""
-        await self._maybe_email(
-            user_email=user_email, event=event, context=context,
+        is caught and logged so neither blocks the other.
+
+        Per-event gating: ``EVENT_CATEGORY`` maps the event onto one of
+        the NotificationPreference push categories, then the user's row
+        is consulted. ``email_notifications`` independently gates the
+        email channel. Both lookups go through ``_resolve_prefs`` which
+        falls back to spec defaults on any miss/error so a transient DB
+        blip never silently drops a transactional push."""
+        prefs = _resolve_prefs(self._db, user_id)
+
+        if prefs.email_allowed:
+            await self._maybe_email(
+                user_id=user_id, user_email=user_email, event=event, context=context,
+            )
+
+        category = EVENT_CATEGORY.get(event)
+        # An event without a category mapping is a bug (the dedicated
+        # test_event_category_map_covers_every_event test catches this
+        # at CI). Be defensive at runtime: if it ever happens in prod,
+        # treat the event as transactional so the user still gets the
+        # message — silent suppression would be the worse failure mode.
+        push_allowed = (
+            prefs.push_allowed(category) if category is not None else True
         )
-        await self._maybe_push(
-            user_id=user_id, event=event, context=context,
+        if push_allowed:
+            await self._maybe_push(
+                user_id=user_id, event=event, context=context,
+            )
+
+    # ── Best-effort audit logging (Task 13) ──────────────────────────────
+    #
+    # Every channel send records a notification_logs row: pending → sent /
+    # failed. The writes are wrapped so a logging failure can NEVER break
+    # the underlying send — an audit-trail hiccup must not cost a user their
+    # receipt or token. When ``self._db`` is None (legacy unit tests that
+    # construct the service without a session) logging is skipped entirely.
+
+    def _log_service(self) -> "NotificationLogService":
+        # Lazy import (not top-level) to avoid pulling the notification_log
+        # service — and the SQLAlchemy model graph it imports — at module
+        # import time; a top-level import here reintroduces the cycle the
+        # three wrappers were written to avoid. Factored into one helper so
+        # the import lives in exactly one place.
+        from app.services.notification_log_service import (  # noqa: PLC0415
+            NotificationLogService,
         )
+        return NotificationLogService(db=self._db)
+
+    def _log_pending(
+        self,
+        *,
+        user_id: str | None,
+        event: NotificationEvent,
+        channel: NotificationChannel,
+        provider: str,
+    ) -> NotificationLog | None:
+        if self._db is None:
+            return None
+        try:
+            uid: UUID | None = None
+            if user_id:
+                try:
+                    uid = UUID(user_id)
+                except (TypeError, ValueError):
+                    uid = None
+            return self._log_service().record_pending(
+                user_id=uid, event=event.value, channel=channel, provider=provider,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "notify: log record_pending failed event=%s channel=%s err=%s",
+                event.value, channel.value, exc,
+            )
+            return None
+
+    def _log_sent(self, row: NotificationLog | None) -> None:
+        if self._db is None or row is None:
+            return
+        try:
+            self._log_service().mark_sent(row)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("notify: log mark_sent failed err=%s", exc)
+
+    def _log_failed(self, row: NotificationLog | None, *, error: str) -> None:
+        if self._db is None or row is None:
+            return
+        try:
+            self._log_service().mark_failed(row, error=error)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("notify: log mark_failed failed err=%s", exc)
 
     async def _maybe_email(
-        self, *, user_email: str, event: NotificationEvent, context: dict[str, Any]
+        self,
+        *,
+        user_id: str,
+        user_email: str,
+        event: NotificationEvent,
+        context: dict[str, Any],
     ) -> None:
         if not user_email:
             return
@@ -206,15 +420,22 @@ class NotificationService:
             )
             return
         subject = _email_subject(event, context)
+        log_row = self._log_pending(
+            user_id=user_id, event=event,
+            channel=NotificationChannel.email, provider="resend",
+        )
         try:
             await self._email.send_text(
                 to=user_email, subject=subject, html=html, text=text,
             )
         except Exception as exc:
+            self._log_failed(log_row, error=str(exc))
             log.warning(
                 "notify: email send failed event=%s to=%s err=%s",
                 event.value, user_email, exc,
             )
+        else:
+            self._log_sent(log_row)
 
     async def _maybe_push(
         self, *, user_id: str, event: NotificationEvent, context: dict[str, Any]
@@ -230,34 +451,69 @@ class NotificationService:
         if self._push_tokens is None:
             # Legacy mode (Sprint 3 default + tests that predate
             # push-tokens storage) — one call per user, no fcm_token.
+            # One audit row per dispatch: pending → sent / failed.
+            log_row = self._log_pending(
+                user_id=user_id, event=event,
+                channel=NotificationChannel.push, provider="fcm",
+            )
             try:
                 await self._push.send(
                     user_id=user_id, title=copy.title, body=copy.body, data=data,
                 )
             except Exception as exc:
+                self._log_failed(log_row, error=str(exc))
                 log.warning(
                     "notify: push send failed event=%s user=%s err=%s",
                     event.value, user_id, exc,
                 )
+            else:
+                self._log_sent(log_row)
             return
 
         # Token-aware mode — real FCM. Fan out one send per registered
         # device and evict registrations that FCM reports as dead.
+        #
+        # We DON'T create the pending audit row up front: a user with no
+        # registered device is the expected steady state, not a delivery
+        # failure, so it must leave no row at all (otherwise the failure
+        # bucket fills with the no-token baseline and stops signalling
+        # delivery health). The pending row is created only once we know
+        # there's at least one device to send to.
         try:
             tokens = self._push_tokens.list_for_user(user_id=UUID(user_id))
         except Exception as exc:
+            # The lookup itself errored — a genuine fault worth auditing.
+            # Create a row and immediately mark it failed so the error is
+            # captured (no row existed yet at this point).
+            log_row = self._log_pending(
+                user_id=user_id, event=event,
+                channel=NotificationChannel.push, provider="fcm",
+            )
+            self._log_failed(log_row, error=str(exc))
             log.warning(
                 "notify: push device lookup failed event=%s user=%s err=%s",
                 event.value, user_id, exc,
             )
             return
         if not tokens:
+            # No devices to send to — nothing was attempted at the provider,
+            # so there's nothing to audit. Write NO row (see comment above).
             return
+
+        # One push audit row per dispatch (not per device): pending before
+        # the send(s), sent if ≥1 device succeeds, failed if every device
+        # fails.
+        log_row = self._log_pending(
+            user_id=user_id, event=event,
+            channel=NotificationChannel.push, provider="fcm",
+        )
 
         # Imported lazily so the legacy Sprint 3 tests (which never
         # exercise FCM) don't pay the google-auth import cost.
         from app.integrations.push.fcm import DeadFCMToken  # noqa: PLC0415
 
+        any_sent = False
+        last_error: str | None = None
         for row in tokens:
             try:
                 await self._push.send(
@@ -265,7 +521,8 @@ class NotificationService:
                     fcm_token=row.fcm_token,
                     title=copy.title, body=copy.body, data=data,
                 )
-            except DeadFCMToken:
+            except DeadFCMToken as exc:
+                last_error = str(exc) or "dead fcm token"
                 try:
                     self._push_tokens.delete_by_fcm_token(fcm_token=row.fcm_token)
                 except Exception as exc:
@@ -274,10 +531,18 @@ class NotificationService:
                         user_id, exc,
                     )
             except Exception as exc:
+                last_error = str(exc)
                 log.warning(
                     "notify: push send failed event=%s user=%s err=%s",
                     event.value, user_id, exc,
                 )
+            else:
+                any_sent = True
+
+        if any_sent:
+            self._log_sent(log_row)
+        else:
+            self._log_failed(log_row, error=last_error or "all device sends failed")
 
 
 def _email_subject(event: NotificationEvent, ctx: dict[str, Any]) -> str:
