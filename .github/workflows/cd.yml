@@ -240,17 +240,14 @@ jobs:
         env:
           E2E_BASE_URL: ${{ secrets.APP_URL }}
           E2E_TIMEOUT_SECONDS: '60'
-          # tests/conftest.py imports app.core.config at module load,
-          # which instantiates Settings() and validates required fields.
-          # E2E hits the deployed staging API (no local DB / superuser),
-          # so these are placeholders just to satisfy pydantic at import.
+          # tests/conftest.py imports app.core.config at module load, which
+          # instantiates Settings() and validates required fields. E2E hits the
+          # deployed staging API (no local DB), so these are inert placeholders
+          # just to satisfy pydantic at import. FIRST_SUPERUSER_* is no longer a
+          # setting (admins come from scripts/create_admin.py), so it's gone —
+          # which is what permanently fixes the .test-TLD email-validator crash.
           SECRET_KEY: e2e-staging-conftest-placeholder
           DATABASE_URL: postgresql://unused:unused@localhost:5432/unused
-          # NOTE: must be a real, non-special-use domain — email-validator
-          # rejects reserved TLDs like .test/.example/.invalid, which made
-          # Settings() raise at conftest import and failed the whole E2E job.
-          FIRST_SUPERUSER_EMAIL: e2e@example.com
-          FIRST_SUPERUSER_PASSWORD: unused-e2e
         run: |
           # Runs tests under tests/e2e marked with -m e2e.
           # If your project has no e2e suite, this job no-ops and production-deploy
