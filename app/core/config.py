@@ -225,11 +225,13 @@ class Settings(BaseSettings):
     SENTRY_TRACES_SAMPLE_RATE: float = 0.05
     SENTRY_PROFILES_SAMPLE_RATE: float = 0.0
 
-    # Admin
-    FIRST_SUPERUSER_EMAIL: EmailStr
-    FIRST_SUPERUSER_PASSWORD: str
-
     # --- Admin dashboard auth (opaque session cookie) ---
+    # NOTE: there is intentionally no FIRST_SUPERUSER_* setting. Admin users
+    # are created out-of-band via `scripts/create_admin.py` (writes the
+    # admin_users table directly). The old cookiecutter-template superuser
+    # seeding was removed; keeping a required EmailStr here only ever broke
+    # startup in contexts that don't need an admin (e.g. the live-API E2E
+    # suite). Any leftover FIRST_SUPERUSER_* in a .env is ignored (extra="ignore").
     ADMIN_SESSION_TTL_SECONDS: int = 8 * 3600
     ADMIN_SESSION_COOKIE_NAME: str = "admin_session"
     ADMIN_CSRF_COOKIE_NAME: str = "admin_csrf"

@@ -39,10 +39,17 @@ jobs:
     concurrency:
       group: timpbills-staging-deploy
       cancel-in-progress: false
+    # SECURITY: the workflow_run clause requires head_repository == this repo.
+    # CI runs on `pull_request`, and a workflow_run job carries full base-repo
+    # secrets. Without this guard a fork PR from a branch named `develop` would
+    # satisfy the branch check and reach the head_sha checkout/build below —
+    # a "pwn request" secret-exfiltration path. The guard restricts deploys to
+    # internal branches only.
     if: >
       (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging') ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        github.event.workflow_run.head_branch == 'develop')
     environment:
       name: staging
@@ -181,6 +188,15 @@ jobs:
       name: staging
 
     steps:
+      # SECURITY: do NOT pin this checkout to workflow_run.head_sha. CI runs
+      # on `pull_request`, and a workflow_run job executes with full base-repo
+      # secrets (this job's `environment: staging` exposes the VPS SSH key in
+      # the rate-limit-reset step). Checking out + running the triggering SHA
+      # (poetry install / pytest) would let a fork PR exfiltrate those secrets
+      # (classic "pwn request"). We deliberately run the trusted default-branch
+      # checkout here. The E2E suite is black-box HTTP against E2E_BASE_URL, so
+      # the default-branch test code is sufficient — version-matching is not
+      # worth the secret-exposure risk.
       - uses: actions/checkout@v4
 
       - name: Set up Python
@@ -272,10 +288,13 @@ jobs:
       cancel-in-progress: false
     # Production deploys ONLY on main, OR via manual workflow_dispatch
     # with environment=production. The develop chain does NOT reach prod.
+    # SECURITY: head_repository guard — see staging-deploy note. Restricts
+    # production deploys to internal `main` only, never a fork PR branch.
     if: |
       (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production') ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        github.event.workflow_run.head_branch == 'main')
     environment:
       name: production

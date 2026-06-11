@@ -24,8 +24,6 @@ from app.core.config import Settings
 _REQUIRED_ENV = {
     "SECRET_KEY": "test-secret",
     "DATABASE_URL": "sqlite:///:memory:",
-    "FIRST_SUPERUSER_EMAIL": "admin@example.com",
-    "FIRST_SUPERUSER_PASSWORD": "super-secret",
 }
 
 
