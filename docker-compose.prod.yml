@@ -15,7 +15,7 @@ services:
       - -k
       - uvicorn.workers.UvicornWorker
       - -w
-      - "${WEB_CONCURRENCY:-2}"
+      - "${WEB_CONCURRENCY:-4}"
       - -b
       - "0.0.0.0:8000"
       - --graceful-timeout
@@ -42,10 +42,12 @@ services:
     # gunicorn master never leaves <defunct> processes behind.
     init: true
     restart: unless-stopped
-    # mem_limit is a CEILING, not a reservation — the container only consumes
-    # the pages it actually touches. Sized for WEB_CONCURRENCY=2 uvicorn
-    # workers (~150-200MB RSS each). Raise via API_MEM_LIMIT on a larger host.
-    mem_limit: ${API_MEM_LIMIT:-512m}
+    # mem_limit is a per-container cgroup CEILING (a container hitting it is
+    # OOM-killed even when the host has free RAM) — not a reservation. These
+    # DEFAULTS are sized for PRODUCTION (WEB_CONCURRENCY=4, ~800MB + headroom)
+    # on the shared 8GB host. Staging overrides every limit far lower via
+    # .env.staging so the two stacks coexist; see that file.
+    mem_limit: ${API_MEM_LIMIT:-1536m}
     cpus: ${API_CPUS:-1.5}
     healthcheck:
       test:
@@ -90,7 +92,7 @@ services:
         condition: service_healthy
     init: true
     restart: unless-stopped
-    mem_limit: ${WORKER_MEM_LIMIT:-384m}
+    mem_limit: ${WORKER_MEM_LIMIT:-768m}
     cpus: ${WORKER_CPUS:-1.0}
     healthcheck:
       test:
@@ -162,19 +164,19 @@ services:
     command:
       - postgres
       - -c
-      # Tuned for a small co-located host. shared_buffers ~25% of the DB's
-      # mem_limit; effective_cache_size is only a planner hint (no allocation).
-      # max_connections=50 is ample given the app pool is 5+10 per process.
-      # Override all of these via PG_* env on a larger / dedicated DB host.
-      - shared_buffers=${PG_SHARED_BUFFERS:-128MB}
+      # DEFAULTS are PRODUCTION-sized for the shared 8GB host. shared_buffers
+      # ~25-50% of the DB mem_limit; effective_cache_size is a planner hint
+      # (no allocation) reflecting RAM available for caching. Staging shrinks
+      # all of these via PG_* in .env.staging.
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
       - -c
-      - max_connections=${PG_MAX_CONNECTIONS:-50}
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
       - -c
       - work_mem=${PG_WORK_MEM:-8MB}
       - -c
-      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-512MB}
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-4GB}
     restart: unless-stopped
-    mem_limit: ${DB_MEM_LIMIT:-640m}
+    mem_limit: ${DB_MEM_LIMIT:-2048m}
     cpus: ${DB_CPUS:-1.5}
     healthcheck:
       test:
@@ -196,7 +198,7 @@ services:
     command:
       - redis-server
       - --maxmemory
-      - ${REDIS_MAX_MEMORY:-200mb}
+      - ${REDIS_MAX_MEMORY:-256mb}
       - --maxmemory-policy
       - noeviction
       - --requirepass
@@ -206,7 +208,7 @@ services:
     volumes:
       - redis_data:/data
     restart: unless-stopped
-    mem_limit: ${REDIS_MEM_LIMIT:-256m}
+    mem_limit: ${REDIS_MEM_LIMIT:-512m}
     cpus: ${REDIS_CPUS:-0.5}
     healthcheck:
       # Compose interpolates ${REDIS_PASSWORD} from .env at parse time and
