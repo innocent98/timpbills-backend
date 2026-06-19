@@ -59,7 +59,7 @@ class Settings(BaseSettings):
 
     # Termii SMS
     TERMII_API_KEY: str | None = None
-    TERMII_SENDER_ID: str | None = "Timpbills"
+    TERMII_SENDER_ID: str | None = "N-Alert"
     TERMII_BASE_URL: str = "https://api.ng.termii.com/api"
 
     # Paystack
@@ -218,6 +218,12 @@ class Settings(BaseSettings):
     OTP_RESEND_DAILY_CAP: int = 10
     """Maximum OTPs per phone per day (covers all purposes combined).
     Defense against SMS-bombing of a single number."""
+
+    OTP_EXPIRE_MINUTES: int = 30
+    """How long an OTP stays valid. Coupled to the Termii-approved N-Alert
+    SMS template text ("It expires in 30 minutes") — the DND route validates
+    sends against the approved wording, so the real TTL and the message must
+    agree. Changing this requires re-approving the template with Termii."""
 
     # Observability — Sentry (optional; no-op when DSN unset)
     SENTRY_DSN: str | None = None

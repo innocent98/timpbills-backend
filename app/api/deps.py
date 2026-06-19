@@ -16,16 +16,12 @@ from app.integrations.base import SmsProvider
 from app.integrations.email.base import EmailProvider
 from app.integrations.email.fake import FakeEmailClient
 from app.integrations.email.resend import ResendClient
-from app.integrations.termii.client import TermiiClient
-from app.integrations.termii.fake import FakeTermiiClient
+from app.integrations.termii import factory as _termii_factory
 from app.services.admin_session_store import AdminSessionStore
 from app.services.auth_service import AuthService
 from app.services.token_store import RedisTokenStore, TokenStore
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
-
-# Singleton fake SMS client so tests can inspect .sent
-_fake_sms_singleton = FakeTermiiClient()
 
 # Singleton fake email client so tests can inspect .sent
 _fake_email_singleton = FakeEmailClient()
@@ -53,7 +49,7 @@ def get_token_store(redis: Redis = Depends(get_redis)) -> TokenStore:
 
 def reset_fake_sms() -> None:
     """Clear the fake SMS singleton's sent messages (for test isolation)."""
-    _fake_sms_singleton.sent.clear()
+    _termii_factory.get_fake_singleton().sent.clear()
 
 
 def reset_fake_email() -> None:
@@ -76,10 +72,7 @@ def get_db():
 
 
 def get_sms_provider() -> SmsProvider:
-    env = getattr(settings, "ENVIRONMENT", "dev")
-    if settings.FORCE_FAKE_PROVIDERS or env in ("dev", "test", "development"):
-        return _fake_sms_singleton
-    return TermiiClient()
+    return _termii_factory.select_sms_client()
 
 
 def get_email_provider() -> EmailProvider:
@@ -387,6 +380,8 @@ def reset_fake_paystack() -> None:
 def __getattr__(name: str):  # pragma: no cover - import plumbing
     if name == "_fake_paystack_singleton":
         return _paystack_factory.get_fake_singleton()
+    if name == "_fake_sms_singleton":
+        return _termii_factory.get_fake_singleton()
     raise AttributeError(name)
 
 

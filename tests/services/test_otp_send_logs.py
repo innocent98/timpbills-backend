@@ -13,6 +13,7 @@ from app.db.models.notification_log import (
     NotificationLogStatus,
 )
 from app.db.models.otp import OtpPurpose  # noqa: F401  (parallels existing tests)
+from app.integrations.base import SmsSendError
 from app.integrations.email.fake import FakeEmailClient
 from app.integrations.termii.fake import FakeTermiiClient
 from app.schemas.auth import RegisterRequest, VerifyEmailOtpRequest
@@ -86,3 +87,35 @@ async def test_forgot_password_writes_otp_sms_log(db_session):
     assert row.provider == "termii"
     assert row.status is NotificationLogStatus.sent
     assert row.sent_at is not None
+
+
+class _FailingSms(FakeTermiiClient):
+    """SMS provider that raises like the real Termii client does on an
+    in-band failure (insufficient balance / unapproved sender ID)."""
+
+    async def send_otp(self, *, phone: str, code: str) -> None:
+        raise SmsSendError("termii send failed: Insufficient balance")
+
+
+@pytest.mark.asyncio
+async def test_send_failure_marks_log_failed_and_propagates(db_session):
+    """When the provider raises (in-band Termii error), the funnel must
+    mark the notification_logs row failed and re-raise — callers depend
+    on the raise to surface delivery failure."""
+    sms = _FailingSms()
+    em = FakeEmailClient()
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
+
+    with pytest.raises(SmsSendError):
+        await svc.register(
+            RegisterRequest(
+                full_name="Fail User", phone="+2348011113333",
+                email="faillog@test.co", password="Secret1!",
+            )
+        )
+
+    rows = _sms_rows(db_session)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.status is NotificationLogStatus.failed
+    assert "Insufficient balance" in (row.error or "")

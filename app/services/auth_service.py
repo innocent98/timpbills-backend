@@ -307,14 +307,14 @@ class AuthService:
             email=user.email,
             code_hash=await hash_pin_async(email_code),
             purpose=OtpPurpose.email_verification,
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
         ))
         self._db.add(OtpCode(
             user_id=user.id,
             phone=user.phone,
             code_hash=await hash_pin_async(phone_code),
             purpose=OtpPurpose.phone_verification,
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
         ))
         self._db.commit()
 
@@ -444,7 +444,7 @@ class AuthService:
             email=user.email,
             code_hash=await hash_pin_async(code),
             purpose=OtpPurpose.email_verification,
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
         )
         self._db.add(otp)
         self._db.commit()
@@ -621,7 +621,7 @@ class AuthService:
             phone=user.phone,
             code_hash=await hash_pin_async(code),
             purpose=OtpPurpose.phone_verification,
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
         )
         self._db.add(otp)
         self._db.commit()
@@ -778,7 +778,7 @@ class AuthService:
                     user_id=user.id, phone=user.phone,
                     code_hash=await hash_pin_async(code),
                     purpose=OtpPurpose.phone_verification,
-                    expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                    expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
                 ))
                 self._db.commit()
                 await self._send_otp_sms(
@@ -1129,9 +1129,16 @@ class AuthService:
         self._db.commit()
 
     async def forgot_password(self, identifier: str) -> None:
+        from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
+        try:
+            # Phones are stored E.164; normalise a local/intl number so a
+            # reset with "09066128757" matches the stored "+2349066128757".
+            phone = normalize_to_e164(identifier)
+        except InvalidPhoneFormat:
+            phone = identifier  # an email — matched on the email column
         user = (
             self._db.query(User)
-            .filter((User.email == identifier) | (User.phone == identifier))
+            .filter((User.email == identifier) | (User.phone == phone))
             .first()
         )
         if not user:
@@ -1144,7 +1151,7 @@ class AuthService:
             phone=user.phone,
             code_hash=await hash_pin_async(code),
             purpose=OtpPurpose.password_reset,
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
         )
         self._db.add(otp)
         self._db.commit()
@@ -1152,9 +1159,14 @@ class AuthService:
         await self._send_otp_sms(phone=user.phone, code=code, user_id=user.id)
 
     async def reset_password(self, identifier: str, code: str, new_password: str) -> None:
+        from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
+        try:
+            phone = normalize_to_e164(identifier)
+        except InvalidPhoneFormat:
+            phone = identifier  # an email — matched on the email column
         user = (
             self._db.query(User)
-            .filter((User.email == identifier) | (User.phone == identifier))
+            .filter((User.email == identifier) | (User.phone == phone))
             .first()
         )
         if not user:
