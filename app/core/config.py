@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     PAYSTACK_CARD_FEE_FIXED_THRESHOLD_NAIRA: int = 2500
     PAYSTACK_CARD_FEE_CAP_NAIRA: int = 2000
 
+    # Reconcile abandon sweep (S3C-P-abandon): a payment that is still PENDING
+    # this long after creation is treated as an abandoned checkout the user
+    # never completed. The reconciler stops polling Paystack verify for it and
+    # closes it out terminally (Payment->failed, Transaction->failed) instead
+    # of re-verifying it every 2 minutes forever. Paystack itself expires a
+    # checkout session well within a day, so 24h is a safe terminal horizon.
+    PAYMENT_ABANDON_AFTER_HOURS: int = 24
+
     # Resend Email
     RESEND_API_KEY: str | None = None
     EMAIL_FROM_ADDRESS: str = "noreply@timpbills.com"

@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
+from app.core.config import settings
 from app.core.logger import log
 from app.db.models._enums import TransactionStatus
 from app.db.models.payment import Payment, PaymentStatus
@@ -61,7 +62,11 @@ def reconcile_pending_payments() -> dict:
 async def _reconcile() -> dict:
     db = SessionLocal()
     try:
-        cutoff = datetime.now(UTC) - timedelta(seconds=30)
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=30)
+        # Anything still pending older than this is an abandoned checkout the
+        # user never completed: stop polling Paystack and close it out.
+        abandon_cutoff = now - timedelta(hours=settings.PAYMENT_ABANDON_AFTER_HOURS)
         pending = (
             db.query(Payment, Transaction)
             .join(Transaction, Transaction.id == Payment.transaction_id)
@@ -76,14 +81,47 @@ async def _reconcile() -> dict:
             .all()
         )
         if not pending:
-            return {"checked": 0, "settled": 0}
+            return {"checked": 0, "settled": 0, "deferred": 0, "abandoned": 0}
 
         client = select_paystack_client()
         wallet_svc = WalletService(db=db)
         tx_svc = TransactionService(db=db)
         settled = 0
         deferred = 0
+        abandoned = 0
         for payment, tx in pending:
+            # Over-age abandon sweep: a still-pending payment past the abandon
+            # horizon is a checkout the user never finished. Close it out
+            # terminally WITHOUT calling Paystack verify — the whole point is
+            # to stop the unbounded re-poll. Same _claim_payment race guard +
+            # tx_svc.transition pattern as the verify-driven branches below.
+            # created_at is a DateTime(timezone=True) column; normalise to
+            # UTC-aware defensively since some drivers (e.g. SQLite) hand back
+            # naive datetimes, which can't be compared to abandon_cutoff.
+            created_at = payment.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            if created_at < abandon_cutoff:
+                if _claim_payment(db, payment.id, PaymentStatus.failed):
+                    tx_svc.transition(
+                        tx, to_status=TransactionStatus.failed,
+                        reason="reconcile.abandoned",
+                    )
+                    # Refund only outbound tx types, reusing the same
+                    # idempotency guard as the verify.failed branch so a
+                    # webhook that already refunded isn't double-credited.
+                    if tx.type in _REFUNDABLE_ON_FAILURE:
+                        refund, was_created = tx_svc.create_refund(
+                            original_tx=tx,
+                            amount=tx.amount,
+                            reason="reconcile.abandoned",
+                        )
+                        if was_created:
+                            wallet_svc.credit(
+                                user_id=tx.user_id, amount=refund.amount,
+                            )
+                    abandoned += 1
+                continue
             try:
                 v = await client.verify(reference=payment.provider_reference)
             except (httpx.HTTPError, TimeoutError) as exc:
@@ -146,9 +184,14 @@ async def _reconcile() -> dict:
                                 user_id=tx.user_id, amount=refund.amount,
                             )
                     settled += 1
-            # abandoned → leave pending for next poll
+            # verify=="abandoned" but still within the abandon horizon →
+            # leave pending; the over-age sweep above will close it out once
+            # it crosses PAYMENT_ABANDON_AFTER_HOURS.
         db.commit()
-        return {"checked": len(pending), "settled": settled, "deferred": deferred}
+        return {
+            "checked": len(pending), "settled": settled,
+            "deferred": deferred, "abandoned": abandoned,
+        }
     finally:
         db.close()
 
