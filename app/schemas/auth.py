@@ -91,6 +91,12 @@ class EmailVerifiedResponse(BaseModel):
     ]
     pin_setup_token: str | None = None
     tokens: AuthTokens | None = None
+    # Populated only on the ``phone_verification_required`` branch: True
+    # when the lazy phone OTP was dispatched at this step, False when the
+    # cooldown / daily-cap helper blocked the send (mobile then shows the
+    # existing-OTP countdown instead of a "we just sent it" toast). Left
+    # at the default for the pin_setup_required / tokens_issued branches.
+    phone_otp_sent: bool = False
 
 
 # --- Phone verification (signup + existing-user migration; unauthenticated) ---

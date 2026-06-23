@@ -1,9 +1,11 @@
-"""B8: /auth/register sends both OTPs, returns no tokens, normalises phone.
+"""/auth/register sends ONLY the email OTP, returns no tokens, normalises phone.
 
-Covers the new register contract:
-- The endpoint emits BOTH an email OTP and a phone OTP (one row per
-  purpose in ``otp_codes``) and dispatches both through the fake email
-  + SMS providers.
+Covers the register contract:
+- The endpoint emits ONLY an email OTP (one ``email_verification`` row in
+  ``otp_codes``) and dispatches it through the fake email provider. The
+  phone OTP is sent lazily once the phone gate becomes active (after
+  email verification) — register dispatches NO SMS and creates NO
+  ``phone_verification`` row.
 - The response carries ``next_action == "verify_email_and_phone"`` and
   no ``tokens`` field — tokens come only after both verifications +
   PIN set under the phone-only-auth plan.
@@ -72,9 +74,10 @@ async def client(db_session):
 
 
 @pytest.mark.asyncio
-async def test_register_sends_both_otps_and_no_tokens(client):
-    """POST /auth/register triggers email AND phone OTPs, returns 201 with
-    next_action=verify_email_and_phone, no tokens in the response."""
+async def test_register_sends_only_email_otp_and_no_tokens(client):
+    """POST /auth/register triggers ONLY the email OTP, returns 201 with
+    next_action=verify_email_and_phone, no tokens in the response, and
+    NO SMS (phone OTP is deferred to the email-verify step)."""
     pre_email = len(_test_email_client.sent)
     pre_sms = len(_fake_sms_singleton.sent)
 
@@ -94,11 +97,10 @@ async def test_register_sends_both_otps_and_no_tokens(client):
     assert body["phone"] == "+2348011111111"  # normalised
     assert body["email"] == "regdual-a@example.com"
 
-    # Both providers received exactly one OTP for this register call.
+    # Email got exactly one OTP; SMS got none for this register call.
     assert len(_test_email_client.sent) == pre_email + 1
-    assert len(_fake_sms_singleton.sent) == pre_sms + 1
+    assert len(_fake_sms_singleton.sent) == pre_sms
     assert _test_email_client.sent[-1].to == "regdual-a@example.com"
-    assert _fake_sms_singleton.sent[-1].phone == "+2348011111111"
 
 
 @pytest.mark.asyncio
@@ -144,8 +146,9 @@ async def test_register_bad_phone_format_returns_400(client):
 
 
 @pytest.mark.asyncio
-async def test_register_persists_two_otp_rows(client, db_session):
-    """One row per purpose (email + phone) in the otp_codes table."""
+async def test_register_persists_only_email_otp_row(client, db_session):
+    """Only the email_verification row exists after register — the phone
+    OTP is deferred to the email-verify step."""
     from app.db.models.otp import OtpCode, OtpPurpose
     from app.db.models.user import User
 
@@ -164,5 +167,4 @@ async def test_register_persists_two_otp_rows(client, db_session):
     assert user is not None
     rows = db_session.query(OtpCode).filter(OtpCode.user_id == user.id).all()
     purposes = {row.purpose for row in rows}
-    assert OtpPurpose.email_verification in purposes
-    assert OtpPurpose.phone_verification in purposes
+    assert purposes == {OtpPurpose.email_verification}

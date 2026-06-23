@@ -8,13 +8,17 @@ from app.services.token_store import NullTokenStore
 
 
 @pytest.mark.asyncio
-async def test_register_creates_user_and_sends_email_and_phone_otp(db_session):
-    """B8 update: register now emits BOTH an email and a phone OTP.
+async def test_register_sends_only_email_otp_no_sms(db_session):
+    """Register now emits ONLY the email OTP.
 
-    The signup contract is dual-OTP under the phone-only-auth plan;
-    the response carries ``next_action == "verify_email_and_phone"``
-    and *no tokens* (tokens come after both verifications + pin/set).
+    The phone OTP is sent lazily once the phone gate becomes active
+    (after email verification), not at registration — so a register
+    call must NOT dispatch an SMS and must NOT create a phone_verification
+    OtpCode row. The response still carries
+    ``next_action == "verify_email_and_phone"`` and *no tokens*.
     """
+    from app.db.models.otp import OtpCode, OtpPurpose
+
     sms = FakeTermiiClient()
     email = FakeEmailClient()
     svc = AuthService(db=db_session, sms=sms, email=email, token_store=NullTokenStore())
@@ -24,15 +28,18 @@ async def test_register_creates_user_and_sends_email_and_phone_otp(db_session):
     assert res.phone == "+2348011111111"
     assert res.email == "t@t.co"
     assert res.next_action == "verify_email_and_phone"
-    assert db_session.query(User).filter_by(phone="+2348011111111").one()
+    user = db_session.query(User).filter_by(phone="+2348011111111").one()
 
-    # Both providers dispatched a 6-digit code.
+    # Only the email OTP went out — no SMS at registration.
     assert len(email.sent) == 1
     assert len(email.sent[0].code_or_body) == 6
     assert email.sent[0].to == "t@t.co"
-    assert len(sms.sent) == 1
-    assert len(sms.sent[0].code_or_message) == 6
-    assert sms.sent[0].phone == "+2348011111111"
+    assert len(sms.sent) == 0
+
+    # Exactly one OtpCode row (email), no phone_verification row yet.
+    rows = db_session.query(OtpCode).filter(OtpCode.user_id == user.id).all()
+    purposes = [r.purpose for r in rows]
+    assert purposes == [OtpPurpose.email_verification]
 
 
 @pytest.mark.asyncio

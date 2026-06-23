@@ -222,7 +222,14 @@ class AuthService:
                 log.warning("auth: otp log mark_sent failed err=%s", exc)
 
     async def register(self, req: RegisterRequest) -> RegisterResponse:
-        """Phase A: register the user and emit BOTH email and phone OTPs.
+        """Phase A: register the user and emit ONLY the email OTP.
+
+        The phone OTP is NOT sent here — it is sent lazily once the phone
+        gate becomes active (after email verification, in
+        ``verify_email_otp``), mirroring how ``login`` sends the phone OTP
+        inline when phone is the first unverified gate. Sending it at
+        registration wasted/expired an SMS before the user reached the
+        phone step.
 
         No tokens issued — they come after both verifications + pin/set
         under the phone-only-auth plan (B8 → B9 → B10 → B11).
@@ -297,11 +304,11 @@ class AuthService:
             referee=user, raw_code=req.referral_code,
         )
 
-        # Two OTPs: email + phone. Both first-sends so no cooldown check
-        # (the cooldown helper exists for resend paths, not the initial
-        # register emission).
+        # Email OTP only. First-send, so no cooldown check (the cooldown
+        # helper exists for resend paths, not the initial register
+        # emission). The phone OTP is deferred to verify_email_otp, where
+        # the phone gate becomes active.
         email_code = f"{secrets.randbelow(1_000_000):06d}"
-        phone_code = f"{secrets.randbelow(1_000_000):06d}"
         self._db.add(OtpCode(
             user_id=user.id,
             email=user.email,
@@ -309,17 +316,9 @@ class AuthService:
             purpose=OtpPurpose.email_verification,
             expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
         ))
-        self._db.add(OtpCode(
-            user_id=user.id,
-            phone=user.phone,
-            code_hash=await hash_pin_async(phone_code),
-            purpose=OtpPurpose.phone_verification,
-            expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
-        ))
         self._db.commit()
 
         await self._email.send_otp(to=user.email, code=email_code)
-        await self._send_otp_sms(phone=user.phone, code=phone_code, user_id=user.id)
 
         return RegisterResponse(
             user_id=str(user.id),
@@ -493,11 +492,40 @@ class AuthService:
         #   - phone verified + PIN already set (existing-user migration
         #     path) → all three gates pass; issue the regular token pair.
         if not user.is_phone_verified:
+            # The phone gate just became active — send the phone OTP now
+            # (deferred from register). Same inline-send shape login() uses:
+            # keyed on the shared cooldown / daily-cap helper so a caller
+            # can't bypass the resend window, and blocks of either kind are
+            # swallowed and reflected via ``phone_otp_sent=False`` (mobile
+            # then shows the existing-OTP countdown instead of a "we just
+            # sent it" toast).
+            phone_otp_sent = False
+            try:
+                _check_otp_cooldown(
+                    self._db,
+                    user_id=user.id,
+                    purpose=OtpPurpose.phone_verification,
+                )
+                code = f"{secrets.randbelow(1_000_000):06d}"
+                self._db.add(OtpCode(
+                    user_id=user.id, phone=user.phone,
+                    code_hash=await hash_pin_async(code),
+                    purpose=OtpPurpose.phone_verification,
+                    expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
+                ))
+                self._db.commit()
+                await self._send_otp_sms(
+                    phone=user.phone, code=code, user_id=user.id,
+                )
+                phone_otp_sent = True
+            except (OtpCooldownActive, OtpDailyCapExceeded):
+                pass
             return EmailVerifiedResponse(
                 email_verified=True,
                 phone_verified=False,
                 pin_set=user.pin_hash is not None,
                 next_action="phone_verification_required",
+                phone_otp_sent=phone_otp_sent,
             )
 
         if user.pin_hash is None:
