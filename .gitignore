@@ -94,3 +94,8 @@ dmypy.json
 
 # Pytest
 .pytest_cache/
+
+note.txt
+
+# Local DB dumps (e.g. pre-wipe pg_dump) — never commit
+backups/
