@@ -152,14 +152,14 @@ def _resolve_clients() -> tuple[EmailProvider, BasePushClient]:
 
     Imports are inside the function so importing this module at Celery
     boot doesn't drag provider SDKs into the worker until a task runs."""
-    from app.api.deps import _fake_email_singleton  # noqa: PLC0415
-    from app.core.config import settings
-    from app.integrations.email.resend import ResendClient
+    from app.integrations.email.factory import select_email_client  # noqa: PLC0415
     from app.integrations.push.factory import select_push_client
 
-    if settings.FORCE_FAKE_PROVIDERS or not settings.RESEND_API_KEY:
-        email: EmailProvider = _fake_email_singleton
-    else:
-        email = ResendClient()
+    # Delegate to the shared key-based selection rule (same one
+    # ``deps.get_email_provider`` uses). In an eligible env it returns the
+    # module singleton tests inspect via ``deps._fake_email_singleton``
+    # (same object); in staging/prod it raises rather than silently
+    # selecting the OTP-logging fake.
+    email: EmailProvider = select_email_client()
     push = select_push_client()
     return email, push

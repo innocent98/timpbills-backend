@@ -13,9 +13,8 @@ from app.db.models.admin_user import AdminUser
 from app.db.models.user import User
 from app.db.session import SessionLocal
 from app.integrations.base import SmsProvider
+from app.integrations.email import factory as _email_factory
 from app.integrations.email.base import EmailProvider
-from app.integrations.email.fake import FakeEmailClient
-from app.integrations.email.resend import ResendClient
 from app.integrations.termii import factory as _termii_factory
 from app.services.admin_session_store import AdminSessionStore
 from app.services.auth_service import AuthService
@@ -23,8 +22,11 @@ from app.services.token_store import RedisTokenStore, TokenStore
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
-# Singleton fake email client so tests can inspect .sent
-_fake_email_singleton = FakeEmailClient()
+# Singleton fake email client so tests can inspect .sent. This is the SAME
+# object the email factory selects, so the Celery worker
+# (notification_tasks._resolve_clients) and tests reaching in via this name
+# all share one ``.sent`` buffer regardless of which path appended to it.
+_fake_email_singleton = _email_factory.get_fake_singleton()
 
 # Singleton fake push client — tests inspect .sent; real FCM HTTP v1 is
 # a Sprint 4 follow-up (see app/integrations/push/factory.py).
@@ -54,7 +56,7 @@ def reset_fake_sms() -> None:
 
 def reset_fake_email() -> None:
     """Clear the fake email singleton's sent messages (for test isolation)."""
-    _fake_email_singleton.sent.clear()
+    _email_factory.reset_fake_singleton()
 
 
 def reset_fake_push() -> None:
@@ -76,10 +78,7 @@ def get_sms_provider() -> SmsProvider:
 
 
 def get_email_provider() -> EmailProvider:
-    env = getattr(settings, "ENVIRONMENT", "dev")
-    if settings.FORCE_FAKE_PROVIDERS or env in ("dev", "test", "development"):
-        return _fake_email_singleton
-    return ResendClient()
+    return _email_factory.select_email_client()
 
 
 def get_auth_service(
