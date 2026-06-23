@@ -111,6 +111,12 @@ class PhoneVerifyRequest(BaseModel):
     code: str = Field(min_length=6, max_length=6)
 
 
+class PhoneResendRequest(BaseModel):
+    # Public signup resend — no ``code`` (distinct from PhoneVerifyRequest):
+    # the user is re-requesting an OTP, not submitting one.
+    phone: str
+
+
 class PhoneVerifiedResponse(BaseModel):
     email_verified: bool
     phone_verified: bool

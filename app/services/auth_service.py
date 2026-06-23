@@ -493,33 +493,13 @@ class AuthService:
         #     path) → all three gates pass; issue the regular token pair.
         if not user.is_phone_verified:
             # The phone gate just became active — send the phone OTP now
-            # (deferred from register). Same inline-send shape login() uses:
-            # keyed on the shared cooldown / daily-cap helper so a caller
-            # can't bypass the resend window, and blocks of either kind are
-            # swallowed and reflected via ``phone_otp_sent=False`` (mobile
+            # (deferred from register). Shared with login() / the public
+            # resend via _mint_and_send_phone_otp: keyed on the cooldown /
+            # daily-cap helper so a caller can't bypass the resend window,
+            # and a block is reflected via ``phone_otp_sent=False`` (mobile
             # then shows the existing-OTP countdown instead of a "we just
             # sent it" toast).
-            phone_otp_sent = False
-            try:
-                _check_otp_cooldown(
-                    self._db,
-                    user_id=user.id,
-                    purpose=OtpPurpose.phone_verification,
-                )
-                code = f"{secrets.randbelow(1_000_000):06d}"
-                self._db.add(OtpCode(
-                    user_id=user.id, phone=user.phone,
-                    code_hash=await hash_pin_async(code),
-                    purpose=OtpPurpose.phone_verification,
-                    expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
-                ))
-                self._db.commit()
-                await self._send_otp_sms(
-                    phone=user.phone, code=code, user_id=user.id,
-                )
-                phone_otp_sent = True
-            except (OtpCooldownActive, OtpDailyCapExceeded):
-                pass
+            phone_otp_sent = await self._mint_and_send_phone_otp(user)
             return EmailVerifiedResponse(
                 email_verified=True,
                 phone_verified=False,
@@ -633,6 +613,68 @@ class AuthService:
             next_action="tokens_issued",
             tokens=tokens,
         )
+
+    async def resend_phone_otp_unauthed(self, phone: str) -> dict:
+        """Public phone-OTP resend used during signup (no tokens yet).
+
+        Distinct from ``send_phone_otp`` (authed, in-session Tier 1 upgrade).
+        Mobile posts the bare phone before any access token exists, so this
+        route is unauthenticated. The actual send goes through the shared
+        ``_mint_and_send_phone_otp`` helper, which is keyed on the same
+        cooldown / daily-cap gate every OTP path uses — a rapid-tap caller
+        can't bypass the resend window. A blocked send is reflected via
+        ``phone_otp_sent=False`` rather than an error (mobile then shows the
+        existing-OTP countdown).
+        """
+        from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
+
+        try:
+            phone = normalize_to_e164(phone)
+        except InvalidPhoneFormat:
+            raise ValueError("INVALID_PHONE_FORMAT")
+
+        user = self._db.query(User).filter(User.phone == phone).first()
+        if not user:
+            raise ValueError("USER_NOT_FOUND")
+        if user.is_phone_verified:
+            raise ValueError("PHONE_ALREADY_VERIFIED")
+
+        phone_otp_sent = await self._mint_and_send_phone_otp(user)
+        return {"phone_otp_sent": phone_otp_sent}
+
+    async def _mint_and_send_phone_otp(self, user: User) -> bool:
+        """Mint a phone_verification OTP for ``user`` and SMS it.
+
+        Shared by the lazy inline sends in ``verify_email_otp`` / ``login``
+        and by the public ``resend_phone_otp_unauthed``. Keyed on the
+        cooldown / daily-cap helper so no caller can bypass the resend
+        window; a cooldown or daily-cap block is swallowed and reflected in
+        the return value (``False``) rather than raised — every caller maps
+        that onto a ``phone_otp_sent=False`` response so mobile shows the
+        existing-OTP countdown instead of a "we just sent it" toast.
+        """
+        phone_otp_sent = False
+        try:
+            _check_otp_cooldown(
+                self._db,
+                user_id=user.id,
+                purpose=OtpPurpose.phone_verification,
+            )
+            code = f"{secrets.randbelow(1_000_000):06d}"
+            self._db.add(OtpCode(
+                user_id=user.id, phone=user.phone,
+                code_hash=await hash_pin_async(code),
+                purpose=OtpPurpose.phone_verification,
+                expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
+            ))
+            self._db.commit()
+            await self._send_otp_sms(
+                phone=user.phone, code=code, user_id=user.id,
+            )
+            phone_otp_sent = True
+        except (OtpCooldownActive, OtpDailyCapExceeded):
+            pass
+        return phone_otp_sent
 
     async def send_phone_otp(self, user_id: UUID) -> None:
         """Send a phone OTP for an authenticated user (on-demand upgrade to Tier 1)."""
@@ -787,34 +829,14 @@ class AuthService:
             )
 
         if not user.is_phone_verified:
-            # Inline OTP send — keyed on the same cooldown / daily-cap
-            # helper every other OTP-emitting path uses, so a rapid-tap
-            # caller can't bypass the resend window by hitting /login
-            # repeatedly. Blocks of either kind are swallowed and
-            # reflected via ``phone_otp_sent=False`` — mobile then shows
-            # the existing-OTP countdown instead of a "we just sent it"
-            # toast.
-            phone_otp_sent = False
-            try:
-                _check_otp_cooldown(
-                    self._db,
-                    user_id=user.id,
-                    purpose=OtpPurpose.phone_verification,
-                )
-                code = f"{secrets.randbelow(1_000_000):06d}"
-                self._db.add(OtpCode(
-                    user_id=user.id, phone=user.phone,
-                    code_hash=await hash_pin_async(code),
-                    purpose=OtpPurpose.phone_verification,
-                    expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
-                ))
-                self._db.commit()
-                await self._send_otp_sms(
-                    phone=user.phone, code=code, user_id=user.id,
-                )
-                phone_otp_sent = True
-            except (OtpCooldownActive, OtpDailyCapExceeded):
-                pass
+            # Inline OTP send — shared with verify_email_otp() / the public
+            # resend via _mint_and_send_phone_otp. Keyed on the same
+            # cooldown / daily-cap helper every other OTP path uses, so a
+            # rapid-tap caller can't bypass the resend window by hitting
+            # /login repeatedly. A block is reflected via
+            # ``phone_otp_sent=False`` — mobile then shows the existing-OTP
+            # countdown instead of a "we just sent it" toast.
+            phone_otp_sent = await self._mint_and_send_phone_otp(user)
             return LoginResponse(
                 next_action="phone_verification_required",
                 pin_set=user.pin_hash is not None,
