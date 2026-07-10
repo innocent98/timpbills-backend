@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db, get_kyc_service
 from app.core.config import settings
+from app.core.limiter import limiter
 from app.core.logger import log
 from app.db.models.kyc_record import KycRecord
 from app.db.models.user import User
@@ -88,20 +89,20 @@ def start_verify(
     except KycTierPrecondition as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": "kyc_tier_precondition", "message": str(exc)},
+            detail={"code": "KYC_TIER_PRECONDITION", "message": str(exc)},
         )
     except DobRequired:
         raise HTTPException(
             status_code=422,
             detail={
-                "code": "date_of_birth_required",
+                "code": "DATE_OF_BIRTH_REQUIRED",
                 "message": "date_of_birth is required",
             },
         )
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
-            detail={"code": "invalid_verification_type", "message": str(exc)},
+            detail={"code": "INVALID_VERIFICATION_TYPE", "message": str(exc)},
         )
     return success(
         KycStartResponse(reference_id=reference_id).model_dump(mode="json"),
@@ -126,14 +127,14 @@ async def confirm_verify(
         raise HTTPException(
             status_code=404,
             detail={
-                "code": "unknown_reference",
+                "code": "UNKNOWN_REFERENCE",
                 "message": "No verification found for that reference",
             },
         )
     except KycProviderError as exc:
         raise HTTPException(
             status_code=502,
-            detail={"code": "kyc_provider_error", "message": str(exc)},
+            detail={"code": "KYC_PROVIDER_ERROR", "message": str(exc)},
         )
     return success(
         _verify_response_from_record(record).model_dump(mode="json"),
@@ -175,6 +176,7 @@ def kyc_status(
 
 
 @router.post("/webhook")
+@limiter.limit("60/minute")
 async def kyc_webhook(
     request: Request,
     svc: KycService = Depends(get_kyc_service),
@@ -185,7 +187,7 @@ async def kyc_webhook(
         raise HTTPException(
             status_code=401,
             detail={
-                "code": "invalid_signature",
+                "code": "INVALID_SIGNATURE",
                 "message": "Bad or missing x-dojah-signature",
             },
         )
@@ -212,6 +214,6 @@ async def kyc_webhook(
         log.error("kyc webhook: provider error ref=%s: %s", reference_id, exc)
         raise HTTPException(
             status_code=502,
-            detail={"code": "kyc_provider_error", "message": str(exc)},
+            detail={"code": "KYC_PROVIDER_ERROR", "message": str(exc)},
         )
     return success({"status": "ok"})

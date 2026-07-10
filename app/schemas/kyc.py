@@ -20,7 +20,7 @@ class KycConfigResponse(BaseModel):
 class KycStartRequest(BaseModel):
     # Not a Literal: an unrecognized value must reach KycService (which
     # raises ValueError) so the endpoint can map it to the spec's
-    # `invalid_verification_type` error code, rather than surfacing
+    # `INVALID_VERIFICATION_TYPE` error code, rather than surfacing
     # FastAPI's generic VALIDATION_ERROR envelope.
     verification_type: str
     date_of_birth: date | None = None

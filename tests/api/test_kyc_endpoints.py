@@ -208,7 +208,7 @@ async def test_start_bvn_tier0_user_returns_409(client):
         headers=headers,
     )
     assert r.status_code == 409
-    assert r.json()["error"]["code"] == "kyc_tier_precondition"
+    assert r.json()["error"]["code"] == "KYC_TIER_PRECONDITION"
 
 
 @pytest.mark.asyncio
@@ -222,7 +222,7 @@ async def test_start_bvn_no_dob_returns_422(client, db_session):
         headers=headers,
     )
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "date_of_birth_required"
+    assert r.json()["error"]["code"] == "DATE_OF_BIRTH_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,7 @@ async def test_start_invalid_verification_type_returns_422(client, db_session):
         headers=headers,
     )
     assert r.status_code == 422
-    assert r.json()["error"]["code"] == "invalid_verification_type"
+    assert r.json()["error"]["code"] == "INVALID_VERIFICATION_TYPE"
 
 
 @pytest.mark.asyncio
@@ -261,7 +261,7 @@ async def test_confirm_someone_elses_reference_returns_404(client, db_session):
         headers=headers_b,
     )
     assert r.status_code == 404
-    assert r.json()["error"]["code"] == "unknown_reference"
+    assert r.json()["error"]["code"] == "UNKNOWN_REFERENCE"
 
 
 @pytest.mark.asyncio
@@ -302,7 +302,7 @@ async def test_webhook_bad_signature_returns_401(client):
         headers={"x-dojah-signature": "wrong"},
     )
     assert r.status_code == 401
-    assert r.json()["error"]["code"] == "invalid_signature"
+    assert r.json()["error"]["code"] == "INVALID_SIGNATURE"
 
 
 @pytest.mark.asyncio
