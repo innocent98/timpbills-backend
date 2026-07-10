@@ -43,6 +43,28 @@ class DojahError(Exception):
     pass
 
 
+_DEFAULT_PROD_HOST = "https://api.dojah.io"
+_SANDBOX_HOST = "https://sandbox.dojah.io"
+
+
+def _resolve_base_url() -> str:
+    """Pick the Dojah host from DOJAH_ENVIRONMENT.
+
+    Sandbox Secret Keys (``test_sk_…``) authenticate ONLY against
+    ``sandbox.dojah.io``; production keys against ``api.dojah.io``. Pointing
+    sandbox creds at the prod host returns a misleading
+    ``401 "Your Secret Key could not be Authorized"`` — a real footgun we hit
+    during go-live. So the environment drives the host. An operator who sets
+    ``DOJAH_BASE_URL`` to something other than the ``api.dojah.io`` default
+    (a proxy, a pinned test host) still overrides.
+    """
+    configured = (settings.DOJAH_BASE_URL or "").rstrip("/")
+    if configured and configured != _DEFAULT_PROD_HOST:
+        return configured
+    env = (settings.DOJAH_ENVIRONMENT or "sandbox").lower()
+    return _SANDBOX_HOST if env == "sandbox" else _DEFAULT_PROD_HOST
+
+
 class DojahClient:
     # Confirmed real path (singular "verification") per Dojah's
     # get-verification-details docs.
@@ -51,7 +73,7 @@ class DojahClient:
     def __init__(self) -> None:
         if not settings.DOJAH_API_KEY:
             raise RuntimeError("DOJAH_API_KEY must be set for real client")
-        self._base = settings.DOJAH_BASE_URL
+        self._base = _resolve_base_url()
         self._headers = {
             "Authorization": settings.DOJAH_API_KEY,
             "AppId": settings.DOJAH_APP_ID or "",
