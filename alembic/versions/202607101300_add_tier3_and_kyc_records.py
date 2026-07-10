@@ -47,7 +47,7 @@ def upgrade() -> None:
         sa.Column("face_match_confidence", sa.Integer(), nullable=True),
         sa.Column("tier_before", sa.Integer(), nullable=False),
         sa.Column("tier_after", sa.Integer(), nullable=True),
-        sa.Column("masked_id", sa.String(length=8), nullable=False),
+        sa.Column("masked_id", sa.String(length=16), nullable=False),
         sa.Column("failure_reason", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),

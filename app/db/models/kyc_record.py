@@ -34,5 +34,5 @@ class KycRecord(TimestampMixin, Base):
     face_match_confidence = Column(Integer, nullable=True)
     tier_before = Column(Integer, nullable=False)
     tier_after = Column(Integer, nullable=True)
-    masked_id = Column(String(8), nullable=False)
+    masked_id = Column(String(16), nullable=False)
     failure_reason = Column(Text, nullable=True)
