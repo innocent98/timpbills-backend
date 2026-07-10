@@ -30,10 +30,11 @@ class KycLevel(str, enum.Enum):
     tier_0 = "tier_0"
     tier_1 = "tier_1"
     tier_2 = "tier_2"
+    tier_3 = "tier_3"
 
     @property
     def numeric(self) -> int:
-        """Tier as an integer (0/1/2) for the public API response.
+        """Tier as an integer (0/1/2/3) for the public API response.
 
         The DB column stores the enum string, but mobile expects a
         numeric tier so it can render labels (Tier 0/1/2/3) and gate
