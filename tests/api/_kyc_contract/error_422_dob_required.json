@@ -1,0 +1,10 @@
+{
+  "data": null,
+  "error": {
+    "code": "DATE_OF_BIRTH_REQUIRED",
+    "details": null,
+    "message": "date_of_birth is required"
+  },
+  "request_id": "194f631624f340bea49e3d7021523da1",
+  "success": false
+}

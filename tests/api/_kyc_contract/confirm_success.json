@@ -1,0 +1,9 @@
+{
+  "face_match": true,
+  "failure_reason": null,
+  "liveness_passed": true,
+  "reference": "KYC-BVN-80055ccc7ee24160",
+  "status": "success",
+  "tier": 2,
+  "verification_type": "bvn"
+}
