@@ -1,4 +1,4 @@
-# KYC — BVN / NIN Verification via Dojah (Tier 1→2→3)
+# KYC — BVN / NIN Verification via Dojah (Tier 1→2→3) with Liveness + Face-Match
 
 **Date:** 2026-07-10
 **Status:** Approved design → implementation
@@ -6,38 +6,62 @@
 
 ## 1. Summary
 
-Phone verification (Tier 0 → Tier 1) is already live. This work delivers the
-remaining KYC upgrades:
+Phone verification (Tier 0 → Tier 1) is already live. This work delivers:
 
 - **Tier 1 → Tier 2** via **BVN** verification (Dojah)
 - **Tier 2 → Tier 3** via **NIN** verification (Dojah)
 
-Verification is **synchronous** — a Dojah BVN/NIN lookup returns a match result
-in ~1–3 seconds. The mobile app shows a brief loading state, then a success or
-failed screen. The handoff's elaborate "pending" screen is retained only as a
-slow-path fallback surfaced via `GET /kyc/status`.
+Each upgrade requires **BVN/NIN + a live selfie with liveness detection and
+1:1 face-match** against the photo on the government record. Number + DOB alone
+is weak assurance (leaked-prone data); biometric proof-of-personhood is what
+protects the higher wallet limits (₦500k, then unlimited) and aligns with CBN
+tiered-KYC. Dojah provides Face Match (selfie vs BVN/NIN photo) and active
+Liveness as first-class products.
 
-**Liveness / selfie checks are out of scope.** BVN/NIN number-match against the
-user's date of birth only.
+**Verification is effectively synchronous** for the user: the Dojah widget
+captures + processes on-device in seconds, then our backend confirms the result
+server-side and returns success/failed. No user-facing polling in the happy path.
+
+### Integration approach
+
+Liveness capture must use **Dojah's on-device active-liveness logic**, so the
+mobile app embeds the **Dojah Flutter SDK / widget**. Consequence:
+
+- The **mobile** widget performs selfie + liveness + face-match (+ the BVN/NIN
+  ID check) and returns a **`reference_id`** (plus a client-side status) via callback.
+- The **backend** never trusts the client's "verified" claim. It takes the
+  `reference_id` and **independently fetches the authoritative result from Dojah
+  server-side**, validates it, and only then upgrades the tier.
+- A **Dojah webhook** is the source-of-truth reconciliation backstop (mirrors the
+  existing Paystack webhook pattern) for the case where the app dies after the
+  widget completes but before it calls us. The synchronous fetch-by-reference is
+  the UX accelerator; the webhook is the safety net. Both write **idempotently**
+  to the same `kyc_records` row.
 
 ### Design decisions (locked)
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 1 | KYC landing screen | Keep + upgrade the existing flat `KycTierPage`; adopt only the net-new handoff screens. Do **not** adopt the handoff's gradient hub (off-brand). |
-| 2 | Verification model | **Synchronous**. No Celery/webhook/polling. Pending screen = slow-path fallback only. |
-| 3 | Limits enforcement | Enforce the 4-tier **max-wallet-balance** cap only. Per-txn + daily are **display-only** this sprint. |
-| 4 | KYC record storage | **Minimal record, no raw PII.** No encryption helper built. Store reference + status + masked id only. |
-| 5 | Provider | Dojah, behind a `KycProvider` protocol + `FakeKycProvider`. Ship on the fake until creds arrive. |
-| 6 | DOB | Required for the Dojah match. Expose a DOB field in the form when the user has none; prefill when set. |
-| 7 | Tier 3 per-txn display value | **₦5,000,000** (PRD.txt §13, authoritative). Handoff's ₦200k treated as a stale copy-paste. |
+| 1 | KYC landing screen | Keep + upgrade the existing flat `KycTierPage`; adopt only the net-new handoff screens. No gradient hub (off-brand). |
+| 2 | Verification model | Synchronous for the user (widget → server-side confirm). Webhook = reconciliation backstop, not user-facing polling. |
+| 3 | Biometrics | **Liveness + face-match on BOTH Tier 2 (BVN) and Tier 3 (NIN).** Built once via the Dojah Flutter SDK. |
+| 4 | Confirm authority | **Server-side** Dojah result (fetch-by-reference / webhook) is the source of truth. The client SDK callback is never trusted as primary. |
+| 5 | Limits enforcement | Enforce the 4-tier **max-wallet-balance** cap only. Per-txn + daily are **display-only** this sprint. |
+| 6 | Record storage | **Minimal record, no raw PII, no selfie stored.** Reference + status + masked id + liveness/face booleans only. |
+| 7 | Provider abstraction | `KycProvider` protocol + `FakeKycProvider`. Ship on the fake until Dojah creds land. |
+| 8 | DOB | Required before verification (user instruction). Expose a DOB field when the user has none; prefill when set. Passed to Dojah + persisted to profile. |
+| 9 | Tier 3 per-txn display value | **₦5,000,000** (PRD.txt §13, authoritative). |
 
-### Flagged open items (non-blocking)
+### Flagged open items (non-blocking; isolated in adapters)
 
-- Exact Dojah endpoint paths + response shape — confirm against Dojah docs when
-  creds arrive; fully isolated inside the adapter.
-- Whether Dojah **sandbox** creds are available now. Until then, the factory
-  returns `FakeKycProvider` and the entire flow is exercisable end-to-end.
+- Exact **Dojah Flutter SDK** package name/version, its config surface, whether it
+  accepts a pre-supplied BVN/NIN to skip the widget's own entry step, and the
+  callback payload shape.
+- Dojah's **verification-fetch-by-reference** endpoint path + response schema, and
+  webhook payload/signature scheme.
+- Whether Dojah **sandbox** creds/app-id/public-key are available now. Until then
+  the factory returns `FakeKycProvider` and the mobile SDK wrapper is mocked, so
+  the full flow is exercisable end-to-end.
 
 ## 2. Tier model
 
@@ -45,59 +69,67 @@ user's date of birth only.
 |------|-------------|-------------------|-----------------|----------------------------|
 | 0 | Registration only | ₦50,000 | ₦50,000 | ₦50,000 |
 | 1 | Phone (OTP) — **live** | ₦50,000 | ₦50,000 | **₦300,000** (was ₦200,000) |
-| 2 | BVN (Dojah) | ₦200,000 | ₦200,000 | ₦500,000 |
-| 3 | NIN (Dojah) | ₦5,000,000 | ₦5,000,000 | **Unlimited** (new) |
+| 2 | BVN + selfie/liveness/face-match | ₦200,000 | ₦200,000 | ₦500,000 |
+| 3 | NIN + selfie/liveness/face-match | ₦5,000,000 | ₦5,000,000 | **Unlimited** (new) |
 
-**PRD conflicts resolved (per standing instruction to flag explicitly):**
-- PRD.txt §4 ("BVN/NIN → Tier 2", 3-tier) is stale; §13's 4-tier table governs.
-- Tier 3 per-txn: PRD ₦5M chosen over handoff ₦200k.
+Only **max-balance** is enforced (updated caps); per-txn/daily are display-only.
+
+**PRD conflicts resolved:** §4 (3-tier) is stale; §13's 4-tier table governs.
+Tier 3 per-txn ₦5M chosen over the handoff's ₦200k.
 
 ## 3. Backend design (timpbills-backend)
 
 ### 3.1 Dojah adapter — `app/integrations/dojah/`
 
-Mirrors `app/integrations/paystack/` layout:
+Mirrors `app/integrations/paystack/` (base / client / fake / factory / schemas /
+signature):
 
 - `base.py` — `KycProvider` protocol:
-  - `verify_bvn(*, bvn: str, date_of_birth: date, full_name: str) -> KycMatchResult`
-  - `verify_nin(*, nin: str, date_of_birth: date, full_name: str) -> KycMatchResult`
-- `schemas.py` — `KycMatchResult` (matched: bool, provider_reference: str,
-  failure_reason: str | None), plus internal Dojah request/response models.
-- `client.py` — `DojahClient` (real HTTP; endpoint paths TBD from Dojah docs,
-  isolated here).
-- `fake.py` — `FakeKycProvider`: **deterministic**. Rule: `matched = (dob
-  matches AND id passes a length/checksum rule)`; a designated failing test id
-  returns `matched=False`. No network. Powers tests + dev.
-- `factory.py` — `get_kyc_provider()` returns `FakeKycProvider` when
-  `settings.DOJAH_API_KEY is None` or `settings.FORCE_FAKE_PROVIDERS`, else
-  `DojahClient`.
+  - `fetch_verification(*, reference_id: str) -> KycVerificationResult`
+- `schemas.py` — `KycVerificationResult`:
+  `verification_type` (bvn/nin), `status` (success/pending/failed),
+  `id_verified: bool`, `liveness_passed: bool`, `face_match: bool`,
+  `masked_id: str` (last 2), `provider_reference: str`, `failure_reason: str | None`,
+  plus the identity fields (name/DOB) needed to cross-check against the user.
+- `client.py` — `DojahClient.fetch_verification` (real HTTP to Dojah's
+  verification-status endpoint; path isolated here).
+- `fake.py` — `FakeKycProvider`: **deterministic by reference_id** — e.g.
+  `PASS*` → all-true success, `FAILFACE*` → face_match=False, `FAILLIVE*` →
+  liveness_passed=False, `PENDING*` → pending. No network.
+- `factory.py` — `get_kyc_provider()` → `FakeKycProvider` when
+  `DOJAH_API_KEY is None` or `FORCE_FAKE_PROVIDERS`, else `DojahClient`.
+- `signature.py` — verify the Dojah webhook signature (mirror Paystack's HMAC pattern).
 
 **Config additions** (`app/core/config.py`):
 ```
-DOJAH_API_KEY: str | None = None
-DOJAH_APP_ID: str | None = None
-DOJAH_BASE_URL: str = "https://sandbox.dojah.io"
+DOJAH_API_KEY: str | None = None        # server-side secret
+DOJAH_APP_ID: str | None = None         # widget init (client-shared)
+DOJAH_PUBLIC_KEY: str | None = None     # widget init (client-shared)
+DOJAH_BASE_URL: str = "https://api.dojah.io"
+DOJAH_WEBHOOK_SECRET: str | None = None
 ```
 
 ### 3.2 `KycService` — `app/services/kyc_service.py`
 
-`verify_bvn(user, bvn, date_of_birth)` (and symmetric `verify_nin`):
+`confirm_verification(user, verification_type, reference_id, date_of_birth)`:
 
-1. **Tier gate.** BVN requires `user.kyc_level == tier_1`; NIN requires
-   `tier_2`. Else `409 kyc_tier_precondition` (already at/above, or too low).
-2. **DOB resolution.**
-   - `user.date_of_birth` set → use it (ignore any supplied dob).
-   - null + `date_of_birth` supplied → persist to user, use it.
-   - null + none supplied → `422 date_of_birth_required`.
-3. Insert `kyc_records` row: status=`pending`, type, provider=`dojah`,
-   `tier_before`, `masked_id` (last 2 digits).
-4. Call the adapter. On `matched=True`: set record `status=success`,
-   `tier_after`, upgrade `user.kyc_level`, refresh wallet cap
-   (`WalletService`/`_KYC_CAPS`). On `matched=False`: `status=failed` +
-   `failure_reason`, tier unchanged.
-5. Return the outcome DTO.
+1. **Tier gate.** BVN requires `user.kyc_level == tier_1`; NIN requires `tier_2`.
+   Else `409 kyc_tier_precondition`.
+2. **DOB resolution.** set → use; null + supplied → persist; null + none → `422
+   date_of_birth_required`.
+3. Upsert `kyc_records` (keyed on `provider_reference`): status=`pending`, type,
+   `tier_before`, `masked_id`.
+4. **Fetch authoritative result** via the adapter (server-side).
+5. **Validate:** `status==success` AND `id_verified` AND `liveness_passed` AND
+   `face_match` AND `verification_type` matches AND the returned identity matches
+   the user (name/DOB). Any false → record `failed` + `failure_reason`, tier
+   unchanged.
+6. On full pass → record `success`, `tier_after`, upgrade `user.kyc_level`,
+   refresh wallet cap. **Idempotent:** a second confirm (or the webhook) for the
+   same reference is a no-op if already applied.
 
-Idempotency: a fresh successful record supersedes; re-verifying an already-upgraded tier returns `409`.
+The webhook handler and this endpoint share the same `confirm_verification`
+core so both paths converge on identical validation + idempotency.
 
 ### 3.3 Endpoints — `app/api/v1/endpoints/kyc.py`
 
@@ -105,20 +137,23 @@ Authenticated (`get_current_user`). **No `pin_token`** — KYC is not a money op
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| POST | `/api/v1/kyc/bvn` | `{ "bvn": "<11 digits>", "date_of_birth": "YYYY-MM-DD"? }` | `KycVerifyResponse` |
-| POST | `/api/v1/kyc/nin` | `{ "nin": "<11 digits>", "date_of_birth": "YYYY-MM-DD"? }` | `KycVerifyResponse` |
-| GET | `/api/v1/kyc/status` | — | `KycStatusResponse` |
+| POST | `/api/v1/kyc/verify` | `{ "verification_type": "bvn"\|"nin", "reference_id": str, "date_of_birth": "YYYY-MM-DD"? }` | `KycVerifyResponse` |
+| GET | `/api/v1/kyc/status` | — | `KycStatusResponse` (latest records + tier; slow-path fallback) |
+| POST | `/api/v1/kyc/webhook` | Dojah payload | 200; signature-verified; reconciliation backstop |
 
 ### 3.4 API contract (frozen — both agents build against this)
 
 `KycVerifyResponse` (200):
 ```json
 {
-  "status": "success",              // "success" | "failed" | "pending"
-  "tier": 2,                        // numeric tier AFTER this call
-  "verification_type": "bvn",       // "bvn" | "nin"
+  "status": "success",            // "success" | "failed" | "pending"
+  "tier": 2,                      // numeric tier AFTER this call
+  "verification_type": "bvn",     // "bvn" | "nin"
   "reference": "KYC-7741Q",
-  "failure_reason": null            // string when status == "failed"
+  "liveness_passed": true,
+  "face_match": true,
+  "failure_reason": null          // e.g. "face_mismatch" | "liveness_failed"
+                                  //      | "id_not_verified" when status=="failed"
 }
 ```
 
@@ -128,26 +163,30 @@ Authenticated (`get_current_user`). **No `pin_token`** — KYC is not a money op
   "tier": 2,
   "records": [
     { "verification_type": "bvn", "status": "success", "reference": "KYC-7741Q",
+      "liveness_passed": true, "face_match": true,
       "created_at": "2026-07-10T12:00:00Z", "failure_reason": null }
   ]
 }
 ```
 
-Error envelope (existing project style — `{ "code", "message" }`):
+Error envelope (existing `{ "code", "message" }`):
 
 | HTTP | code | When |
 |------|------|------|
 | 422 | `date_of_birth_required` | DOB missing and not on file |
-| 422 | `invalid_bvn` / `invalid_nin` | Not 11 digits |
+| 422 | `invalid_reference` | Missing/malformed reference_id |
 | 409 | `kyc_tier_precondition` | Wrong current tier for this step |
-| 502 | `kyc_provider_error` | Dojah unreachable/5xx (record left `pending`; retry via status) |
+| 502 | `kyc_provider_error` | Dojah unreachable/5xx (record left `pending`; retry via `GET /kyc/status`) |
+
+Note: a `failed` biometric outcome (face mismatch, liveness fail, id not
+verified) returns **HTTP 200** with `status:"failed"` + `failure_reason` — it is
+a valid result, not an error.
 
 ### 3.5 Migrations — `alembic/versions/`
 
-1. **Add `tier_3` to `kyc_level_enum`.** Postgres `ALTER TYPE ... ADD VALUE`
-   cannot run inside a transaction block — use the non-transactional pattern
-   (`op.execute` with `connection.execution_options(isolation_level=...)` /
-   `COMMIT` bridge as used for enum edits) so alembic doesn't wrap it.
+1. **Add `tier_3` to `kyc_level_enum`** — `ALTER TYPE ... ADD VALUE` cannot run
+   in a transaction block; use the non-transactional pattern so alembic doesn't
+   wrap it.
 2. **Create `kyc_records`:**
 
 | Column | Type | Notes |
@@ -156,15 +195,17 @@ Error envelope (existing project style — `{ "code", "message" }`):
 | user_id | UUID | FK → users, indexed |
 | verification_type | VARCHAR(8) | `bvn` / `nin` |
 | provider | VARCHAR(16) | `dojah` |
-| provider_reference | VARCHAR | Dojah reference / our `KYC-xxxx` |
+| provider_reference | VARCHAR | Dojah reference (unique, idempotency key) |
 | status | VARCHAR(12) | `pending` / `success` / `failed` |
+| liveness_passed | BOOLEAN | nullable |
+| face_match | BOOLEAN | nullable |
 | tier_before | INT | |
-| tier_after | INT | nullable (null while pending/failed) |
-| masked_id | VARCHAR(8) | last 2 digits only, e.g. `•••••••••17` |
+| tier_after | INT | nullable |
+| masked_id | VARCHAR(8) | last 2 digits only |
 | failure_reason | TEXT | nullable |
 | created_at / updated_at | TIMESTAMPTZ | TimestampMixin |
 
-**No raw BVN/NIN, no Dojah raw payload persisted.**
+**No raw BVN/NIN, no selfie, no Dojah raw payload persisted.**
 
 ### 3.6 Wallet cap update — `app/services/wallet_service.py`
 
@@ -176,61 +217,72 @@ _KYC_CAPS = {
   tier_3: None,      # unlimited → skip cap check when None
 }
 ```
-Credit path: when cap is `None`, bypass the `new_balance > cap` check. Existing
-`KycCapExceeded` path unchanged for capped tiers.
-
-`/auth/me` already emits `kyc_level` numeric — `tier_3 → 3`, no change beyond
-the enum supporting the value.
+When cap is `None`, bypass the `new_balance > cap` check. `KycCapExceeded`
+unchanged for capped tiers. `/auth/me` already emits numeric `kyc_level`
+(`tier_3 → 3`); no change beyond the enum supporting the value.
 
 ## 4. Mobile design (timpbills)
 
-### 4.1 Upgrade `KycTierPage` (kept)
+### 4.1 Dojah SDK
+
+- Add the **Dojah Flutter SDK** dependency (confirm exact package/version).
+- Wrap it behind a `DojahKycService` interface (launch widget for a
+  `verification_type` with pre-filled user data → returns `reference_id` +
+  client status). Wrapping keeps the SDK mockable in tests and isolates the
+  open items.
+- **Permissions:** iOS `NSCameraUsageDescription` (Info.plist), Android
+  `CAMERA` (manifest). Handle permission-denied gracefully.
+
+### 4.2 Upgrade `KycTierPage` (kept)
 
 - 4-tier limits (per-txn / daily / max) from §2.
-- Step 3 becomes **actionable**: "Verify BVN" for tier 1 → `/profile/kyc/bvn`;
-  "Verify NIN" for tier 2 → `/profile/kyc/nin`. Remove "Coming soon" lock.
-- Bottom CTA routes to the correct upgrade screen by tier.
+- Step 3 actionable: "Verify BVN" (tier 1 → `/profile/kyc/bvn`), "Verify NIN"
+  (tier 2 → `/profile/kyc/nin`). Remove "Coming soon".
+- Bottom CTA routes by tier.
 
-### 4.2 New screens (from `handoff/src/timpbills-kyc.jsx`, flat aesthetic)
+### 4.3 New screens (from `handoff/src/timpbills-kyc.jsx`, flat aesthetic)
 
-- `KycBvnPage` — step indicator, 11-digit BVN field, NIBSS privacy note, CTA.
-- `KycNinPage` — step indicator, 11-digit NIN field, "What you unlock" table, CTA.
-- Verification **states** folded in-page (loading → success/failed); pending is
-  the slow-path fallback (poll `GET /kyc/status`, "Refresh status" ghost button).
-- `KycLimitReachedSheet` — **full-width** bottom sheet (per standing rule),
-  Now/After tier compare, "Verify BVN to continue" + "Maybe later".
+- `KycBvnPage` / `KycNinPage` — branded entry (step indicator, 11-digit field,
+  privacy/unlock content, DOB field per §4.4). CTA → launch `DojahKycService`
+  widget for selfie + liveness + face-match.
+- On widget callback → `POST /kyc/verify { verification_type, reference_id, date_of_birth? }`
+  → render verification **state** in-page: brief loading → **success** / **failed**.
+  Failed copy is outcome-specific (face mismatch / liveness / id-not-verified /
+  DOB). **Pending** is the slow-path fallback (poll `GET /kyc/status`, "Refresh
+  status" ghost button).
+- `KycLimitReachedSheet` — **full-width** bottom sheet, Now/After compare,
+  "Verify BVN to continue" + "Maybe later".
 
-### 4.3 DOB handling
+### 4.4 DOB handling
 
-Form reads `me.dateOfBirth`:
-- null → render a **required** date-picker field; submit sends `date_of_birth`.
-- set → **prefill** (display, not re-sent unless changed).
+Form reads `me.dateOfBirth`: null → required date-picker field (sent as
+`date_of_birth`, also passed into the widget config); set → prefill.
 
-### 4.4 Wire limit-reached
+### 4.5 Wire limit-reached
 
-Fund-wallet already receives `422 KYC_LIMIT_EXCEEDED`. Catch it → present
+Fund-wallet already receives `422 KYC_LIMIT_EXCEEDED` → present
 `KycLimitReachedSheet` → route to `/profile/kyc/bvn`.
 
-### 4.5 Data layer
+### 4.6 Data layer
 
 - DTOs: `KycVerifyResponse`, `KycStatusResponse` (freezed + json).
-- `KycRepository` (real) + `FakeKycRepository` (mirrors existing
-  `fake_auth_repository` pattern) so FE builds against the contract before BE lands.
-- Riverpod controller; **invalidate `meControllerProvider` on success** so tier
-  updates app-wide.
-- Routes: add `/profile/kyc/bvn`, `/profile/kyc/nin` to `routes.dart` +
-  `app_router.dart`.
+- `KycRepository` (real) + `FakeKycRepository` (mirrors `fake_auth_repository`).
+- Riverpod controller; **invalidate `meControllerProvider` on success**.
+- Routes: add `/profile/kyc/bvn`, `/profile/kyc/nin`.
 
 ## 5. Data flow (BVN happy path)
 
 ```
 KycTierPage → KycBvnPage → [DOB field if me.dateOfBirth == null]
-  → POST /kyc/bvn { bvn, date_of_birth? }
-  → KycService: gate tier_1, resolve DOB, record=pending
-  → Dojah/Fake match
-      matched  → record=success, kyc_level=tier_2, cap=₦500k → success screen
-                 → invalidate me → app-wide tier refresh
-      no-match → record=failed → failed screen ("check number and DOB") → retry
+  → launch Dojah widget (selfie + liveness + face-match + BVN) → reference_id
+  → POST /kyc/verify { "bvn", reference_id, date_of_birth? }
+  → KycService: gate tier_1, resolve DOB, upsert record=pending
+  → fetch_verification(reference_id) server-side (authoritative)
+  → validate id_verified ∧ liveness_passed ∧ face_match ∧ identity-matches-user
+       pass → record=success, kyc_level=tier_2, cap=₦500k → success screen
+              → invalidate me → app-wide tier refresh
+       fail → record=failed(reason) → failed screen → retry
+  (Dojah webhook independently reconciles the same reference, idempotently.)
 ```
 
 NIN path is symmetric (tier_2 → tier_3, cap → unlimited).
@@ -240,28 +292,33 @@ NIN path is symmetric (tier_2 → tier_3, cap → unlimited).
 **Backend**
 - Tier gating (BVN needs tier_1; NIN needs tier_2; wrong tier → 409).
 - DOB: required-when-missing (422), persist-when-supplied, prefill-when-set.
-- Success upgrades tier + refreshes cap; failure preserves tier.
-- `FakeKycProvider` match/no-match determinism.
-- Endpoint auth + validation (11-digit, missing DOB).
-- Wallet-cap tests updated: tier_1 = ₦300k, tier_3 unlimited (no `KycCapExceeded`).
+- Validation matrix: success only when id_verified ∧ liveness ∧ face_match ∧
+  type ∧ identity-match; each false → `failed` with the right `failure_reason`.
+- Idempotency: endpoint + webhook for the same reference apply once.
+- `FakeKycProvider` deterministic by reference (`PASS*`/`FAILFACE*`/`FAILLIVE*`/`PENDING*`).
+- Webhook signature verification (valid/invalid).
+- Wallet-cap tests updated: tier_1 = ₦300k, tier_3 unlimited.
 - Migration smoke: enum has `tier_3`, `kyc_records` present.
 
 **Mobile**
-- `KycTierPage` renders all 4 tiers + correct limits; step 3 actionable per tier.
-- BVN/NIN form: 11-digit validation, conditional DOB field required vs prefilled.
-- State screens (loading/success/failed) render from controller state.
+- `KycTierPage` renders 4 tiers + limits; step 3 actionable per tier.
+- BVN/NIN form: 11-digit validation, conditional DOB required vs prefilled.
+- `DojahKycService` mocked: success/failed/pending callbacks drive the right state.
+- Permission-denied path handled.
 - `KycLimitReachedSheet` full-width; routes to BVN.
 - Controller invalidates `me` on success.
 
 ## 7. Parallel execution
 
-Contract in §3.4 is frozen. Two agents run concurrently:
+Contract (§3.4) is frozen. Two agents run concurrently:
 
-- **backend-engineer:** adapter (base/client/fake/factory/schemas), config,
-  `KycService`, `/kyc` endpoints, migrations (tier_3 + kyc_records), wallet-cap
-  update, tests.
-- **mobile-engineer:** `KycTierPage` upgrade, BVN/NIN pages + state screens, DOB
-  conditional field, `KycLimitReachedSheet` + fund-flow wiring, `KycRepository` +
-  `FakeKycRepository` + controller + DTOs, routes, tests.
+- **backend-engineer:** Dojah adapter (base/client/fake/factory/schemas/signature),
+  config, `KycService.confirm_verification`, `/kyc/verify` + `/kyc/status` +
+  `/kyc/webhook`, migrations (tier_3 + kyc_records), wallet-cap update, tests.
+- **mobile-engineer:** Dojah SDK + `DojahKycService` wrapper + permissions,
+  `KycTierPage` upgrade, BVN/NIN pages + state screens, DOB conditional field,
+  `KycLimitReachedSheet` + fund-flow wiring, `KycRepository` + `FakeKycRepository`
+  + controller + DTOs, routes, tests.
 
-Mobile stubs against `FakeKycRepository`, so neither side blocks the other.
+Mobile mocks the Dojah SDK behind `DojahKycService` and stubs `FakeKycRepository`
+against the frozen contract, so neither side blocks the other.
