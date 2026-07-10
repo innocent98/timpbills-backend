@@ -1,17 +1,20 @@
 """In-memory fake Dojah KYC provider — deterministic by `reference_id`
-prefix. TEST-ONLY: never wired into the real DI/factory. The real Dojah
-client (calling api.dojah.io) ships in A3."""
+substring. TEST-ONLY: never wired into the real DI/factory. The real Dojah
+client (calling api.dojah.io) ships in A3.
+
+Unrecognized reference prefixes (e.g. a real backend-minted
+`KYC-BVN-<token>`) default to a **success** result rather than raising —
+this lets `KycService.start_verification`'s minted references round-trip
+through `confirm_verification` end-to-end in tests without needing a
+dedicated `PASS*` prefix. The explicit `FAILFACE*` / `FAILLIVE*` /
+`PENDING*` markers still short-circuit to their deterministic outcomes."""
 from typing import Literal
 
 from app.integrations.dojah.schemas import KycVerificationResult
 
 
 def _verification_type(reference_id: str) -> Literal["bvn", "nin"]:
-    if "-BVN-" in reference_id:
-        return "bvn"
-    if "-NIN-" in reference_id:
-        return "nin"
-    return "bvn"
+    return "nin" if "NIN" in reference_id else "bvn"
 
 
 def _masked_id(reference_id: str) -> str:
@@ -26,19 +29,7 @@ class FakeKycProvider:
         verification_type = _verification_type(reference_id)
         masked_id = _masked_id(reference_id)
 
-        if reference_id.startswith("PASS"):
-            return KycVerificationResult(
-                verification_type=verification_type,
-                status="success",
-                id_verified=True,
-                liveness_passed=True,
-                face_match=True,
-                face_match_confidence=95,
-                masked_id=masked_id,
-                provider_reference=reference_id,
-                failure_reason=None,
-            )
-        if reference_id.startswith("FAILFACE"):
+        if "FAILFACE" in reference_id:
             return KycVerificationResult(
                 verification_type=verification_type,
                 status="failed",
@@ -50,7 +41,7 @@ class FakeKycProvider:
                 provider_reference=reference_id,
                 failure_reason="face_mismatch",
             )
-        if reference_id.startswith("FAILLIVE"):
+        if "FAILLIVE" in reference_id:
             return KycVerificationResult(
                 verification_type=verification_type,
                 status="failed",
@@ -62,7 +53,7 @@ class FakeKycProvider:
                 provider_reference=reference_id,
                 failure_reason="liveness_failed",
             )
-        if reference_id.startswith("PENDING"):
+        if "PENDING" in reference_id:
             return KycVerificationResult(
                 verification_type=verification_type,
                 status="pending",
@@ -74,6 +65,16 @@ class FakeKycProvider:
                 provider_reference=reference_id,
                 failure_reason=None,
             )
-        raise ValueError(
-            f"FakeKycProvider: unrecognized reference_id prefix: {reference_id!r}"
+        # Default (includes explicit "PASS*" refs and any unrecognized —
+        # e.g. real backend-minted — reference): success, all-true.
+        return KycVerificationResult(
+            verification_type=verification_type,
+            status="success",
+            id_verified=True,
+            liveness_passed=True,
+            face_match=True,
+            face_match_confidence=95,
+            masked_id=masked_id,
+            provider_reference=reference_id,
+            failure_reason=None,
         )

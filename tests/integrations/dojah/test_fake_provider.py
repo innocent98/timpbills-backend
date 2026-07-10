@@ -22,3 +22,14 @@ async def test_fake_face_fail():
 async def test_fake_pending():
     r = await FakeKycProvider().fetch_verification(reference_id="PENDING-BVN-1")
     assert r.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_fake_unrecognized_reference_defaults_to_success():
+    """A real backend-minted reference (no PASS/FAIL*/PENDING marker) must
+    succeed, not raise — this lets KycService.start_verification's minted
+    references round-trip through confirm_verification end-to-end."""
+    r = await FakeKycProvider().fetch_verification(reference_id="KYC-BVN-xyz")
+    assert r.status == "success"
+    assert r.id_verified and r.liveness_passed and r.face_match
+    assert r.verification_type == "bvn"
