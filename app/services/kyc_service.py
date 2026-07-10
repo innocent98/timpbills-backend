@@ -13,6 +13,7 @@ result) lands on the record.
 """
 import secrets
 from datetime import date
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -106,6 +107,7 @@ class KycService:
 
     async def confirm_verification(
         self, *, reference_id: str, source: str = "api",
+        expected_user_id: UUID | None = None,
     ) -> KycRecord:
         """Fetch the provider's authoritative result and apply it.
 
@@ -114,6 +116,13 @@ class KycService:
         the webhook race safely on the same reference. The row lock below
         serializes the two callers so only one of them applies the
         upgrade.
+
+        ``expected_user_id`` lets the authenticated `/kyc/verify/confirm`
+        endpoint (A7) enforce ownership: a reference that exists but
+        belongs to a different user is treated identically to an unknown
+        reference, so the API never confirms — or leaks the existence of
+        — another user's verification. The webhook has no authenticated
+        user to compare against and passes ``None``.
         """
         record = self._db.execute(
             select(KycRecord)
@@ -121,6 +130,8 @@ class KycService:
             .with_for_update()
         ).scalar_one_or_none()
         if record is None:
+            raise UnknownReference(reference_id)
+        if expected_user_id is not None and record.user_id != expected_user_id:
             raise UnknownReference(reference_id)
 
         if record.status == "success":

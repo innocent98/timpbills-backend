@@ -432,6 +432,14 @@ def get_push_tokens_service(db: Session = Depends(get_db)) -> PushTokensService:
     return PushTokensService(db=db)
 
 
+# --- Task A7: KycService (config / verify start+confirm / status / webhook) ---
+from app.services.kyc_service import KycService
+
+
+def get_kyc_service(db: Session = Depends(get_db)) -> KycService:
+    return KycService(db=db)
+
+
 # --- Sprint 5c · Task 3.2: AvatarService ---
 from app.services.avatar_service import AvatarService
 

@@ -303,6 +303,23 @@ class TestConfirmVerification:
         assert user.kyc_level == KycLevel.tier_1
 
     @pytest.mark.asyncio
+    async def test_confirm_wrong_expected_user_raises_unknown_reference(
+        self, db_session,
+    ):
+        """The API path (A7) passes ``expected_user_id`` so a confirm call
+        for a reference owned by a different user is indistinguishable from
+        an unknown reference — no cross-user existence leak. The webhook
+        passes ``expected_user_id=None`` and is unaffected by this check."""
+        user = _seed_user(db_session, kyc=KycLevel.tier_1, dob=date(1990, 1, 1))
+        _seed_record(db_session, user=user, reference_id="PASS-BVN-owner-1")
+
+        svc = KycService(db=db_session)
+        with pytest.raises(UnknownReference):
+            await svc.confirm_verification(
+                reference_id="PASS-BVN-owner-1", expected_user_id=uuid4(),
+            )
+
+    @pytest.mark.asyncio
     async def test_confirm_absent_identity_dob_does_not_fail(self, db_session):
         """The fake never populates identity_dob — absent identity data must
         NOT fail the match (lenient identity check)."""

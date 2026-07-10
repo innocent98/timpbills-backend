@@ -6,6 +6,7 @@ from app.api.v1.endpoints import (
     auth,
     bills,
     health,
+    kyc,
     push_tokens,
     referrals,
     transactions,
@@ -27,3 +28,4 @@ api_router.include_router(referrals.router)
 api_router.include_router(users.router)
 api_router.include_router(admin.router)
 api_router.include_router(admin_auth.router)
+api_router.include_router(kyc.router)
