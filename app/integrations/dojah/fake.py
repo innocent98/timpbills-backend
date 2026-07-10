@@ -22,7 +22,7 @@ def _masked_id(reference_id: str) -> str:
 
 
 class FakeKycProvider:
-    def fetch_verification(self, *, reference_id: str) -> KycVerificationResult:
+    async def fetch_verification(self, *, reference_id: str) -> KycVerificationResult:
         verification_type = _verification_type(reference_id)
         masked_id = _masked_id(reference_id)
 
