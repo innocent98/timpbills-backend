@@ -183,10 +183,16 @@ Error envelope (existing `{ "code", "message" }`):
 
 | HTTP | code | When |
 |------|------|------|
-| 422 | `date_of_birth_required` | DOB missing and not on file (at `/start`) |
-| 409 | `kyc_tier_precondition` | Wrong current tier for this step |
-| 404 | `unknown_reference` | reference_id not found / not this user (at `/confirm`) |
-| 502 | `kyc_provider_error` | Dojah unreachable/5xx (record left `pending`; retry via `/status`) |
+| 422 | `DATE_OF_BIRTH_REQUIRED` | DOB missing and not on file (at `/start`) |
+| 422 | `INVALID_VERIFICATION_TYPE` | verification_type not bvn/nin |
+| 409 | `KYC_TIER_PRECONDITION` | Wrong current tier for this step |
+| 404 | `UNKNOWN_REFERENCE` | reference_id not found / not this user (at `/confirm`) |
+| 401 | `INVALID_SIGNATURE` | Bad `x-dojah-signature` (webhook) |
+| 502 | `KYC_PROVIDER_ERROR` | Dojah unreachable/5xx (record left `pending`; retry via `/status`) |
+
+(Error codes are UPPER_SNAKE to match the rest of the API. Response-body
+`failure_reason` values remain lowercase domain strings — `face_mismatch`,
+`liveness_failed`, `id_not_verified`, `identity_mismatch`.)
 
 A `failed` biometric outcome returns **HTTP 200** `status:"failed"` +
 `failure_reason` — a valid result, not an error.
