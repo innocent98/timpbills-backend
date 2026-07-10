@@ -13,12 +13,23 @@ webhook) should need to change.
 from typing import Any, Literal
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
 from app.integrations.dojah.schemas import KycVerificationResult
 
 _KycStatus = Literal["success", "pending", "failed"]
+
+
+def _is_retryable_dojah_error(exc: BaseException) -> bool:
+    """5xx and genuine transport failures (timeouts, connection errors) are
+    worth retrying — the request may simply need to land again. A 4xx
+    (bad reference, malformed params, auth failure) will fail identically
+    on every attempt, so retrying it only wastes the 3-attempt budget and
+    delays surfacing the real error."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, httpx.TransportError)
 
 # Dojah's documented verification statuses, mapped to our tri-state status.
 # Unknown/unrecognized values default to "pending" rather than raising —
@@ -54,7 +65,7 @@ class DojahClient:
 
     @retry(
         reraise=True,
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        retry=retry_if_exception(_is_retryable_dojah_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )

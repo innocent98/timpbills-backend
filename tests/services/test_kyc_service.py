@@ -330,3 +330,83 @@ class TestConfirmVerification:
         record = await svc.confirm_verification(reference_id="PASS-BVN-5")
 
         assert record.status == "success"
+
+    @pytest.mark.asyncio
+    async def test_confirm_pass_never_downgrades_user_already_at_higher_tier(
+        self, db_session,
+    ):
+        """A stale/duplicate PENDING record confirmed late (e.g. a webhook
+        arriving after the user already progressed past this tier via
+        another record) must NOT downgrade the user. The audit row still
+        records the pass; only the user's live tier is guarded."""
+        user = _seed_user(db_session, kyc=KycLevel.tier_3, dob=date(1990, 1, 1))
+        _seed_record(db_session, user=user, reference_id="PASS-BVN-stale")
+
+        svc = KycService(db=db_session)
+        record = await svc.confirm_verification(reference_id="PASS-BVN-stale")
+
+        assert record.status == "success"
+        assert record.tier_after == 2  # bvn's ceiling, recorded as-is
+        db_session.refresh(user)
+        assert user.kyc_level == KycLevel.tier_3  # unchanged — no downgrade
+
+    @pytest.mark.asyncio
+    async def test_confirm_recheck_after_relock_is_noop_when_won_concurrently(
+        self, db_session, monkeypatch,
+    ):
+        """Fix 2 regression: the row lock is now acquired AFTER the Dojah
+        fetch, not before. Simulate a concurrent caller (the other of
+        api-confirm/webhook) applying success to the record WHILE this
+        call's own fetch is in flight, and have THIS call's own (stale)
+        fetch result disagree (a failure) — if the post-fetch re-lock
+        didn't re-check and short-circuit, this call would clobber the
+        already-applied success with its own stale failing result."""
+        user = _seed_user(db_session, kyc=KycLevel.tier_1, dob=date(1990, 1, 1))
+        record = _seed_record(db_session, user=user, reference_id="PASS-BVN-race")
+
+        import app.services.kyc_service as kyc_service_module
+
+        class _ConcurrentWinnerThenStaleResultProvider:
+            async def fetch_verification(self, *, reference_id):
+                # The "other" caller (api-confirm vs webhook) wins the
+                # race and commits success while we're still awaiting
+                # Dojah for our own copy of the result.
+                record.liveness_passed = True
+                record.face_match = True
+                record.face_match_confidence = 95
+                record.masked_id = "•••••••••99"
+                record.status = "success"
+                record.tier_after = KycLevel.tier_2.numeric
+                record.failure_reason = None
+                user.kyc_level = KycLevel.tier_2
+                db_session.commit()
+                # Our own in-flight round-trip (already dispatched before
+                # the winner committed) comes back stale/failing.
+                return KycVerificationResult(
+                    verification_type="bvn",
+                    status="failed",
+                    id_verified=True,
+                    liveness_passed=True,
+                    face_match=False,
+                    face_match_confidence=10,
+                    masked_id="•••••••••11",
+                    provider_reference=reference_id,
+                    failure_reason="face_mismatch",
+                )
+
+        monkeypatch.setattr(
+            kyc_service_module,
+            "get_kyc_provider",
+            lambda: _ConcurrentWinnerThenStaleResultProvider(),
+        )
+
+        svc = KycService(db=db_session)
+        result = await svc.confirm_verification(reference_id="PASS-BVN-race")
+
+        # The re-lock + re-check discards our own stale fetch result
+        # entirely — the already-committed success stands untouched.
+        assert result.status == "success"
+        assert result.face_match is True
+        assert result.tier_after == 2
+        db_session.refresh(user)
+        assert user.kyc_level == KycLevel.tier_2

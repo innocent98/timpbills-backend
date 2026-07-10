@@ -113,9 +113,20 @@ class KycService:
 
         Idempotent: a record already `success` is returned unchanged (no
         re-fetch, no re-upgrade) — this is what lets the api-confirm and
-        the webhook race safely on the same reference. The row lock below
-        serializes the two callers so only one of them applies the
-        upgrade.
+        the webhook race safely on the same reference.
+
+        The row lock is deliberately NOT held across the Dojah HTTP call:
+        we look the record up unlocked, do the (potentially slow) network
+        round-trip, and only THEN take `.with_for_update()` to persist the
+        result — holding a Postgres row lock for the duration of an
+        external HTTP call would serialize every other reader of that row
+        (e.g. `/kyc/status` polling) behind Dojah's latency. Because the
+        lock is acquired after the fetch, a concurrent caller (the other
+        of api-confirm/webhook) may have already applied success while we
+        were awaiting the provider — we re-check `status == "success"`
+        immediately after re-acquiring the lock and discard our own
+        (now-stale) fetch result in that case, so only one caller's result
+        ever gets applied.
 
         ``expected_user_id`` lets the authenticated `/kyc/verify/confirm`
         endpoint (A7) enforce ownership: a reference that exists but
@@ -125,9 +136,7 @@ class KycService:
         user to compare against and passes ``None``.
         """
         record = self._db.execute(
-            select(KycRecord)
-            .where(KycRecord.provider_reference == reference_id)
-            .with_for_update()
+            select(KycRecord).where(KycRecord.provider_reference == reference_id)
         ).scalar_one_or_none()
         if record is None:
             raise UnknownReference(reference_id)
@@ -147,6 +156,19 @@ class KycService:
                 reference_id, source, exc,
             )
             raise KycProviderError(str(exc)) from exc
+
+        # Only now take the row lock — the network call above ran with no
+        # lock held. Re-check under the lock: a concurrent caller may have
+        # already applied success while we were awaiting the provider.
+        record = self._db.execute(
+            select(KycRecord)
+            .where(KycRecord.provider_reference == reference_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if record is None:
+            raise UnknownReference(reference_id)
+        if record.status == "success":
+            return record
 
         # Persist the component fields regardless of outcome — pending
         # results still carry (empty) liveness/face/masked_id state, and
@@ -176,7 +198,12 @@ class KycService:
         record.status = "success"
         record.tier_after = next_tier.numeric
         record.failure_reason = None
-        if user is not None:
+        # Only ever upgrade — never apply a lower/equal tier over a user
+        # who has already progressed past it (e.g. a stale/duplicate
+        # PENDING record confirmed late, after a webhook or a fresh
+        # verification already advanced the user further). The audit row
+        # above still records the pass regardless.
+        if user is not None and next_tier.numeric > user.kyc_level.numeric:
             user.kyc_level = next_tier
         self._db.commit()
         return record
