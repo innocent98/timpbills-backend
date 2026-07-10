@@ -266,14 +266,14 @@ async def test_confirm_someone_elses_reference_returns_404(client, db_session):
 
 @pytest.mark.asyncio
 async def test_status_returns_records_and_tier(client, db_session):
+    # A genuinely-pending record (Dojah still processing) stays pending on a
+    # status poll: the re-confirm the endpoint runs sees the fake's PENDING-*
+    # result and leaves it untouched.
     _, headers = await _seed_logged_in_user(client)
-    _bump_tier(db_session, email="e@e.co", tier=KycLevel.tier_1, dob=date(1990, 1, 1))
-    start_r = await client.post(
-        "/api/v1/kyc/verify/start",
-        json={"verification_type": "bvn"},
-        headers=headers,
+    user = _bump_tier(
+        db_session, email="e@e.co", tier=KycLevel.tier_1, dob=date(1990, 1, 1)
     )
-    ref = start_r.json()["data"]["reference_id"]
+    _seed_pending_record(db_session, user=user, reference_id="PENDING-BVN-1")
 
     r = await client.get("/api/v1/kyc/status", headers=headers)
     assert r.status_code == 200
@@ -281,11 +281,30 @@ async def test_status_returns_records_and_tier(client, db_session):
     assert data["tier"] == 1
     assert len(data["records"]) == 1
     rec = data["records"][0]
-    assert rec["reference"] == ref
+    assert rec["reference"] == "PENDING-BVN-1"
     assert rec["status"] == "pending"
     assert rec["verification_type"] == "bvn"
-    assert rec["liveness_passed"] is False
-    assert rec["face_match"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_reconciles_pending_to_success(client, db_session):
+    # GET /kyc/status re-confirms pending records so polling advances them:
+    # a record whose Dojah result has since become "Completed" flips to
+    # success and the user's tier upgrades — without needing the webhook.
+    _, headers = await _seed_logged_in_user(client)
+    user = _bump_tier(
+        db_session, email="e@e.co", tier=KycLevel.tier_1, dob=date(1990, 1, 1)
+    )
+    _seed_pending_record(db_session, user=user, reference_id="PASS-BVN-1")
+
+    r = await client.get("/api/v1/kyc/status", headers=headers)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["tier"] == 2
+    rec = next(x for x in data["records"] if x["reference"] == "PASS-BVN-1")
+    assert rec["status"] == "success"
+    assert rec["liveness_passed"] is True
+    assert rec["face_match"] is True
 
 
 @pytest.mark.asyncio

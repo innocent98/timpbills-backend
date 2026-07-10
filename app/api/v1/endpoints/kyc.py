@@ -143,11 +143,38 @@ async def confirm_verify(
 
 
 @router.get("/status")
-def kyc_status(
+async def kyc_status(
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    svc: KycService = Depends(get_kyc_service),
 ):
+    # Re-confirm any still-pending records before returning so polling this
+    # endpoint actually advances them. The initial /verify/confirm can land on
+    # "pending" when Dojah is still processing in the moment the widget closes;
+    # Dojah's result becomes final a beat later. Re-fetching here (and via the
+    # webhook backstop) is what moves the record to success/failed. Best-effort:
+    # a provider hiccup must never break the read — we return the stored record
+    # as-is and the next poll (or the webhook) reconciles it.
+    pending = (
+        db.query(KycRecord)
+        .filter(KycRecord.user_id == user.id, KycRecord.status == "pending")
+        .all()
+    )
+    for rec in pending:
+        try:
+            await svc.confirm_verification(
+                reference_id=rec.provider_reference,
+                source="status",
+                expected_user_id=user.id,
+            )
+        except (KycProviderError, UnknownReference) as exc:
+            log.info(
+                "kyc_status: pending re-confirm skipped ref=%s: %s",
+                rec.provider_reference, exc,
+            )
+    db.refresh(user)
+
     records = (
         db.query(KycRecord)
         .filter(KycRecord.user_id == user.id)
