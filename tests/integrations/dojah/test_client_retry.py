@@ -30,12 +30,14 @@ def _client(monkeypatch) -> DojahClient:
 def _success_payload(reference_id: str = "KYC-BVN-1") -> dict:
     return {
         "reference_id": reference_id,
-        "status": "Completed",
-        "verification_type": "bvn",
-        "id_verification": {"verified": True},
-        "liveness": {"passed": True},
-        "face_match": {"match": True, "confidence": 95},
-        "masked_id": "•••••••••17",
+        "verification_status": "Completed",
+        "data": {
+            "government_data": {
+                "status": True,
+                "data": {"bvn": {"bvn": "12345678917", "first_name": "Jane", "last_name": "Doe"}},
+            },
+            "selfie": {"status": True},
+        },
     }
 
 

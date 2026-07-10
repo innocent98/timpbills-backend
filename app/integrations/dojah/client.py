@@ -1,14 +1,9 @@
 # app/integrations/dojah/client.py
 """Real Dojah client — HTTPX async + tenacity retry on 5xx.
 
-CONFIRMED-ON-INTEGRATION OPEN ITEM (see
-docs/superpowers/specs/2026-07-10-kyc-bvn-nin-dojah-design.md §1): the exact
-verification-status endpoint path and the Dojah response field names used in
-`_parse_result` below are a best-effort default per public Dojah docs, not
-yet verified against a live sandbox account. When credentials/docs are
-confirmed, revise ONLY `_ENDPOINT_PATH` and `_parse_result` — nothing else
-in this module or its callers (KycService, the confirm endpoint, the
-webhook) should need to change.
+Endpoint path and response shape are confirmed against Dojah's official
+docs (https://docs.dojah.io/docs/technical-reference/get-verification-details),
+2026-07-10. See `_ENDPOINT_PATH` and `_parse_result` below.
 """
 from typing import Any, Literal
 
@@ -31,9 +26,10 @@ def _is_retryable_dojah_error(exc: BaseException) -> bool:
         return exc.response.status_code >= 500
     return isinstance(exc, httpx.TransportError)
 
-# Dojah's documented verification statuses, mapped to our tri-state status.
-# Unknown/unrecognized values default to "pending" rather than raising —
-# a forward-compatible new Dojah status should not crash the reconcile path.
+# Dojah's documented `verification_status` values, mapped to our tri-state
+# status. Unknown/unrecognized values default to "pending" rather than
+# raising — a forward-compatible new Dojah status should not crash the
+# reconcile path.
 _STATUS_MAP: dict[str, _KycStatus] = {
     "Completed": "success",
     "Pending": "pending",
@@ -48,11 +44,9 @@ class DojahError(Exception):
 
 
 class DojahClient:
-    # --- CONFIRMED-ON-INTEGRATION OPEN ITEM ---------------------------------
-    # Reasonable default per Dojah docs; confirm the exact path once a live
-    # sandbox account is available.
-    _ENDPOINT_PATH = "/api/v1/kyc/verification/status"
-    # -------------------------------------------------------------------------
+    # Confirmed real path (singular "verification") per Dojah's
+    # get-verification-details docs.
+    _ENDPOINT_PATH = "/api/v1/kyc/verification"
 
     def __init__(self) -> None:
         if not settings.DOJAH_API_KEY:
@@ -79,39 +73,73 @@ class DojahClient:
             r.raise_for_status()
         return self._parse_result(r.json())
 
-    # --- CONFIRMED-ON-INTEGRATION OPEN ITEM ---------------------------------
-    # The exact Dojah response field names (id_verification.verified,
-    # liveness.passed, face_match.confidence, identity.name/dob, masked_id)
-    # are a best-effort reconstruction from public docs. This is the ONLY
-    # method to revise once the live sandbox account confirms the real
-    # response schema. Deriving the pass/fail *decision* (and the
-    # human-facing failure_reason enum) is KycService's job downstream —
-    # this method only maps raw Dojah fields to our component booleans.
+    # Real Dojah response shape (get-verification-details):
+    #   {
+    #     "verification_status": "Completed" | "Ongoing" | "Pending" | "Failed" | "Abandoned",
+    #     "data": {
+    #       "government_data": {"status": bool, "data": {"bvn": {...}} | {"nin": {...}}},
+    #       "selfie": {"status": bool},
+    #     },
+    #   }
+    # Every access below is a defensive nested .get(...) so a missing branch
+    # (e.g. verification abandoned before the selfie step ran) yields a
+    # "failed"/"pending" result rather than a KeyError. Deriving the
+    # human-facing failure_reason enum is KycService's job downstream — this
+    # method only maps raw Dojah fields to our component booleans.
     def _parse_result(self, payload: dict[str, Any]) -> KycVerificationResult:
-        dojah_status = str(payload.get("status", ""))
+        dojah_status = str(payload.get("verification_status", ""))
         status: _KycStatus = _STATUS_MAP.get(dojah_status, "pending")
 
-        id_verification = payload.get("id_verification") or {}
-        liveness = payload.get("liveness") or {}
-        face_match_data = payload.get("face_match") or {}
-        identity = payload.get("identity") or {}
+        data = payload.get("data") or {}
+        government_data = data.get("government_data") or {}
+        selfie = data.get("selfie") or {}
 
-        id_verified = bool(id_verification.get("verified", False))
-        liveness_passed = bool(liveness.get("passed", False))
-        face_match_confidence = int(face_match_data.get("confidence", 0))
-        face_match = face_match_confidence >= settings.DOJAH_FACE_MATCH_THRESHOLD
+        id_verified = bool(government_data.get("status", False))
+
+        # This is the widget-verification path: Dojah gatekeeps the
+        # liveness/face-match decision itself inside the hosted widget
+        # before this endpoint ever returns a result. There is no numeric
+        # confidence field to compare against DOJAH_FACE_MATCH_THRESHOLD
+        # here — selfie.status IS the pass/fail decision, so the threshold
+        # setting is intentionally unused on this path. The confidence we
+        # report is synthetic (100/0) purely to satisfy the response schema.
+        selfie_passed = bool(selfie.get("status", False))
+        liveness_passed = selfie_passed
+        face_match = selfie_passed
+        face_match_confidence = 100 if selfie_passed else 0
+
+        gov_records = government_data.get("data") or {}
+        verification_type: Literal["bvn", "nin"]
+        if "bvn" in gov_records:
+            verification_type = "bvn"
+        elif "nin" in gov_records:
+            verification_type = "nin"
+        else:
+            verification_type = "bvn"  # no record surfaced yet; harmless default
+        gov_record = gov_records.get(verification_type) or {}
+
+        id_number = gov_record.get(verification_type)
+        masked_id = (
+            f"{'•' * max(len(id_number) - 2, 0)}{id_number[-2:]}"
+            if id_number
+            else "••"
+        )
+
+        first_name = gov_record.get("first_name")
+        last_name = gov_record.get("last_name")
+        identity_name = " ".join(p for p in (first_name, last_name) if p) or None
+        identity_dob = gov_record.get("date_of_birth")
 
         return KycVerificationResult(
-            verification_type=payload.get("verification_type", "bvn"),
+            verification_type=verification_type,
             status=status,
             id_verified=id_verified,
             liveness_passed=liveness_passed,
             face_match=face_match,
             face_match_confidence=face_match_confidence,
-            masked_id=payload.get("masked_id") or "••••••••••",
+            masked_id=masked_id,
             provider_reference=payload.get("reference_id", ""),
-            identity_name=identity.get("name"),
-            identity_dob=identity.get("dob"),
+            identity_name=identity_name,
+            identity_dob=identity_dob,
             failure_reason=payload.get("failure_reason"),
         )
-    # -------------------------------------------------------------------------
