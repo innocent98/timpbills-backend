@@ -115,6 +115,26 @@ class Settings(BaseSettings):
     VTPASS_BASE_URL: str = "https://sandbox.vtpass.com"
     VTPASS_WEBHOOK_SECRET: str | None = None
 
+    # ── Dojah (KYC: BVN/NIN verification, widget + webhook) ──────────────
+    # Sandbox and production both live at api.dojah.io — DOJAH_ENVIRONMENT
+    # selects the mode server-side, it is not a hostname switch like VTPass.
+    # DOJAH_API_KEY is the secret used for server-side verification-status
+    # calls; DOJAH_APP_ID + DOJAH_PUBLIC_KEY are handed to the mobile client
+    # (via GET /kyc/config) to initialize the Dojah widget. The two widget
+    # IDs select the published BVN/NIN + selfie + liveness flows. The
+    # webhook secret validates the x-dojah-signature HMAC-SHA256 header.
+    # Real Dojah is the working path; FakeKycProvider is test-only, selected
+    # by FORCE_FAKE_PROVIDERS or when these keys are unset.
+    DOJAH_API_KEY: str | None = None
+    DOJAH_APP_ID: str | None = None
+    DOJAH_PUBLIC_KEY: str | None = None
+    DOJAH_BVN_WIDGET_ID: str | None = None
+    DOJAH_NIN_WIDGET_ID: str | None = None
+    DOJAH_WEBHOOK_SECRET: str | None = None
+    DOJAH_BASE_URL: str = "https://api.dojah.io"
+    DOJAH_ENVIRONMENT: str = "sandbox"
+    DOJAH_FACE_MATCH_THRESHOLD: int = 70
+
     # ── Firebase Cloud Messaging (push notifications) ────────────────────
     # Either FCM_CREDENTIALS_PATH (service-account JSON file) OR
     # FCM_CREDENTIALS_JSON (inline base64/raw JSON) — one of them. When
