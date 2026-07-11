@@ -9,7 +9,9 @@ request body — Dojah is the source of truth for verification outcomes,
 same pattern as the Paystack/VTPass webhooks in
 app/api/v1/endpoints/webhooks.py.
 """
+import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -40,6 +42,11 @@ from app.services.kyc_service import (
 from app.utils.responses import success
 
 router = APIRouter(prefix="/kyc", tags=["kyc"])
+
+# GET /kyc/status re-confirms only a recent pending record, and bounds the
+# Dojah round-trip, so a stale/slow verification can't make the poll time out.
+_STATUS_RECONFIRM_WINDOW_MIN = 15
+_STATUS_RECONFIRM_TIMEOUT_S = 8
 
 
 def _verify_response_from_record(record: KycRecord) -> KycVerifyResponse:
@@ -149,29 +156,38 @@ async def kyc_status(
     user: User = Depends(get_current_user),
     svc: KycService = Depends(get_kyc_service),
 ):
-    # Re-confirm any still-pending records before returning so polling this
-    # endpoint actually advances them. The initial /verify/confirm can land on
-    # "pending" when Dojah is still processing in the moment the widget closes;
-    # Dojah's result becomes final a beat later. Re-fetching here (and via the
-    # webhook backstop) is what moves the record to success/failed. Best-effort:
-    # a provider hiccup must never break the read — we return the stored record
-    # as-is and the next poll (or the webhook) reconciles it.
-    pending = (
+    # Re-confirm AT MOST the single most-recent, still-fresh pending record so a
+    # status poll can advance a just-completed verification. Deliberately
+    # bounded: re-confirming every pending record — including stale/abandoned
+    # ones Dojah is slow to look up — blocked this endpoint past the client's
+    # timeout. Stale pending records (older than the freshness window) are left
+    # for the webhook backstop. The 8s cap keeps one slow Dojah call from
+    # blowing the read; a hiccup/timeout must never break the read.
+    fresh_cutoff = datetime.now(UTC) - timedelta(minutes=_STATUS_RECONFIRM_WINDOW_MIN)
+    latest_pending = (
         db.query(KycRecord)
-        .filter(KycRecord.user_id == user.id, KycRecord.status == "pending")
-        .all()
+        .filter(
+            KycRecord.user_id == user.id,
+            KycRecord.status == "pending",
+            KycRecord.created_at >= fresh_cutoff,
+        )
+        .order_by(KycRecord.created_at.desc())
+        .first()
     )
-    for rec in pending:
+    if latest_pending is not None:
         try:
-            await svc.confirm_verification(
-                reference_id=rec.provider_reference,
-                source="status",
-                expected_user_id=user.id,
+            await asyncio.wait_for(
+                svc.confirm_verification(
+                    reference_id=latest_pending.provider_reference,
+                    source="status",
+                    expected_user_id=user.id,
+                ),
+                timeout=_STATUS_RECONFIRM_TIMEOUT_S,
             )
-        except (KycProviderError, UnknownReference) as exc:
+        except (KycProviderError, UnknownReference, TimeoutError) as exc:
             log.info(
                 "kyc_status: pending re-confirm skipped ref=%s: %s",
-                rec.provider_reference, exc,
+                latest_pending.provider_reference, exc,
             )
     db.refresh(user)
 

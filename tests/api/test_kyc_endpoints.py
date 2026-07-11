@@ -308,6 +308,30 @@ async def test_status_reconciles_pending_to_success(client, db_session):
 
 
 @pytest.mark.asyncio
+async def test_status_skips_stale_pending_record(client, db_session):
+    # A STALE pending record (older than the freshness window) is NOT
+    # re-confirmed — even though its PASS-* reference would resolve to success,
+    # /status leaves it pending (and makes no Dojah call), so a slow/abandoned
+    # verification can never make the poll time out. The webhook handles stale ones.
+    from datetime import UTC, datetime, timedelta
+
+    _, headers = await _seed_logged_in_user(client)
+    user = _bump_tier(
+        db_session, email="e@e.co", tier=KycLevel.tier_1, dob=date(1990, 1, 1)
+    )
+    rec = _seed_pending_record(db_session, user=user, reference_id="PASS-BVN-stale")
+    rec.created_at = datetime.now(UTC) - timedelta(minutes=30)
+    db_session.commit()
+
+    r = await client.get("/api/v1/kyc/status", headers=headers)
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["tier"] == 1  # not upgraded — stale record left untouched
+    out = next(x for x in data["records"] if x["reference"] == "PASS-BVN-stale")
+    assert out["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_status_requires_auth(client):
     r = await client.get("/api/v1/kyc/status")
     assert r.status_code == 401
