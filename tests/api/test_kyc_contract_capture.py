@@ -195,12 +195,12 @@ async def test_capture_confirm_failed(client, db_session):
 async def test_capture_status(client, db_session):
     _, headers = await _seed_logged_in_user(client)
     _bump_tier(db_session, email="e@e.co", tier=KycLevel.tier_1, dob=date(1990, 1, 1))
-    start_r = await client.post(
-        "/api/v1/kyc/verify/start",
-        json={"verification_type": "bvn"},
-        headers=headers,
-    )
-    ref = start_r.json()["data"]["reference_id"]
+    user = db_session.query(User).filter(User.email == "e@e.co").one()
+    # Seed a genuinely-pending record (Dojah still processing) so /status
+    # captures a pending response. A KYC-BVN-* reference from /verify/start
+    # would now be re-confirmed to success by the status endpoint's reconcile
+    # step (see test_status_reconciles_pending_to_success).
+    _seed_pending_record(db_session, user=user, reference_id="PENDING-BVN-1")
 
     r = await client.get("/api/v1/kyc/status", headers=headers)
     assert r.status_code == 200
@@ -208,7 +208,7 @@ async def test_capture_status(client, db_session):
     assert data["tier"] == 1
     assert len(data["records"]) == 1
     rec = data["records"][0]
-    assert rec["reference"] == ref
+    assert rec["reference"] == "PENDING-BVN-1"
     assert rec["status"] == "pending"
     assert rec["verification_type"] == "bvn"
     assert rec["liveness_passed"] is False
