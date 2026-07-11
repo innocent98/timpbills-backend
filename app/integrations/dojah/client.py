@@ -95,62 +95,62 @@ class DojahClient:
             r.raise_for_status()
         return self._parse_result(r.json())
 
-    # Real Dojah response shape (get-verification-details):
-    #   {
-    #     "verification_status": "Completed" | "Ongoing" | "Pending" | "Failed" | "Abandoned",
+    # REAL Dojah response shape (verified against a live sandbox verification,
+    # 2026-07-11) — the whole verification is nested under `entity`:
+    #   {"entity": {
+    #     "verification_status": "Completed"|"Ongoing"|"Pending"|"Failed"|"Abandoned",
+    #     "verification_type": "BVN" | "NIN",
+    #     "reference_id": "KYC-BVN-...",
     #     "data": {
-    #       "government_data": {"status": bool, "data": {"bvn": {...}} | {"nin": {...}}},
-    #       "selfie": {"status": bool},
+    #       "government_data": {"status": bool,
+    #                           "data": {"bvn": {"entity": {"bvn": "...",
+    #                                    "first_name": "...", "date_of_birth": "01-Jun-1982"}}}},
+    #       "selfie": {"status": bool, "message": "Successfully validated your liveness"},
     #     },
-    #   }
-    # Every access below is a defensive nested .get(...) so a missing branch
-    # (e.g. verification abandoned before the selfie step ran) yields a
-    # "failed"/"pending" result rather than a KeyError. Deriving the
-    # human-facing failure_reason enum is KycService's job downstream — this
-    # method only maps raw Dojah fields to our component booleans.
+    #   }}
+    # (An earlier version read these at the TOP level — so verification_status
+    # was never found and every result defaulted to "pending". That was the
+    # "always in progress" bug.) Every access is a defensive nested .get(...).
+    # liveness_score/match_score come back null on the widget path, so there is
+    # no numeric confidence to threshold — selfie.status IS the combined
+    # liveness+face pass/fail; the confidence we report is synthetic (100/0).
+    # We do NOT surface identity_dob: Dojah's format is non-ISO and Dojah
+    # already validated the ID against a live selfie, so KycService does not
+    # re-gate on DOB (that check stays dormant with identity_dob=None).
     def _parse_result(self, payload: dict[str, Any]) -> KycVerificationResult:
-        dojah_status = str(payload.get("verification_status", ""))
+        entity = payload.get("entity")
+        if not isinstance(entity, dict):
+            entity = payload  # tolerate an already-unwrapped shape (defensive)
+
+        dojah_status = str(entity.get("verification_status", ""))
         status: _KycStatus = _STATUS_MAP.get(dojah_status, "pending")
 
-        data = payload.get("data") or {}
+        data = entity.get("data") or {}
         government_data = data.get("government_data") or {}
         selfie = data.get("selfie") or {}
 
         id_verified = bool(government_data.get("status", False))
 
-        # This is the widget-verification path: Dojah gatekeeps the
-        # liveness/face-match decision itself inside the hosted widget
-        # before this endpoint ever returns a result. There is no numeric
-        # confidence field to compare against DOJAH_FACE_MATCH_THRESHOLD
-        # here — selfie.status IS the pass/fail decision, so the threshold
-        # setting is intentionally unused on this path. The confidence we
-        # report is synthetic (100/0) purely to satisfy the response schema.
         selfie_passed = bool(selfie.get("status", False))
         liveness_passed = selfie_passed
         face_match = selfie_passed
         face_match_confidence = 100 if selfie_passed else 0
 
         gov_records = government_data.get("data") or {}
-        verification_type: Literal["bvn", "nin"]
-        if "bvn" in gov_records:
-            verification_type = "bvn"
-        elif "nin" in gov_records:
-            verification_type = "nin"
-        else:
-            verification_type = "bvn"  # no record surfaced yet; harmless default
-        gov_record = gov_records.get(verification_type) or {}
+        vt = str(entity.get("verification_type", "")).lower()
+        if vt not in ("bvn", "nin"):
+            vt = "nin" if "nin" in gov_records else "bvn"
+        verification_type: Literal["bvn", "nin"] = "nin" if vt == "nin" else "bvn"
 
+        # The government record sits one level deeper, under ["entity"].
+        gov_record = (gov_records.get(verification_type) or {}).get("entity") or {}
         id_number = gov_record.get(verification_type)
-        masked_id = (
-            f"{'•' * max(len(id_number) - 2, 0)}{id_number[-2:]}"
-            if id_number
-            else "••"
-        )
+        id_str = str(id_number) if id_number else ""
+        masked_id = f"{'•' * max(len(id_str) - 2, 0)}{id_str[-2:]}" if id_str else "••"
 
         first_name = gov_record.get("first_name")
         last_name = gov_record.get("last_name")
         identity_name = " ".join(p for p in (first_name, last_name) if p) or None
-        identity_dob = gov_record.get("date_of_birth")
 
         return KycVerificationResult(
             verification_type=verification_type,
@@ -160,8 +160,8 @@ class DojahClient:
             face_match=face_match,
             face_match_confidence=face_match_confidence,
             masked_id=masked_id,
-            provider_reference=payload.get("reference_id", ""),
+            provider_reference=str(entity.get("reference_id", "")),
             identity_name=identity_name,
-            identity_dob=identity_dob,
-            failure_reason=payload.get("failure_reason"),
+            identity_dob=None,
+            failure_reason=None,
         )
