@@ -1,0 +1,7 @@
+We couldn't verify your identity
+
+Your {{ verification_type_label }} verification didn't go through. Please try again from the app and double-check your details.
+
+Need help? Reply to this email.
+
+— Timpbills

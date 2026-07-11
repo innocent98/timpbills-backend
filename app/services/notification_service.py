@@ -71,6 +71,8 @@ class NotificationEvent(str, Enum):
     referrer_signup_notified        = "referrer_signup_notified"
     referral_credited               = "referral_credited"
     welcome_bonus                   = "welcome_bonus"
+    kyc_verification_success        = "kyc_verification_success"
+    kyc_verification_failed         = "kyc_verification_failed"
 
 
 # ─── Notification categories (Sprint 5c · Task 5.2) ─────────────────────────
@@ -107,6 +109,8 @@ EVENT_CATEGORY: dict[NotificationEvent, NotificationCategory] = {
     NotificationEvent.referrer_signup_notified:    NotificationCategory.referral_updates,
     NotificationEvent.referral_credited:           NotificationCategory.referral_updates,
     NotificationEvent.welcome_bonus:               NotificationCategory.referral_updates,
+    NotificationEvent.kyc_verification_success:    NotificationCategory.transaction_alerts,
+    NotificationEvent.kyc_verification_failed:     NotificationCategory.transaction_alerts,
 }
 
 
@@ -198,6 +202,8 @@ _EMAIL_TEMPLATES: dict[NotificationEvent, str | None] = {
     NotificationEvent.referrer_signup_notified:    None,
     NotificationEvent.referral_credited:           None,
     NotificationEvent.welcome_bonus:               None,
+    NotificationEvent.kyc_verification_success:    "kyc_verification_success",
+    NotificationEvent.kyc_verification_failed:     "kyc_verification_failed",
 }
 
 
@@ -248,6 +254,16 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
         return _PushCopy(
             title=f"{ctx.get('provider_label', 'Cable')} {mode_label}",
             body=f"{ctx.get('plan_name', '')} on your smartcard. ₦{ctx.get('amount', '')} paid.",
+        )
+    if event is NotificationEvent.kyc_verification_success:
+        return _PushCopy(
+            title=f"KYC verified — you're now Tier {ctx.get('tier')}",
+            body=f"Your wallet limit is now {ctx.get('wallet_cap_label', '')}.",
+        )
+    if event is NotificationEvent.kyc_verification_failed:
+        return _PushCopy(
+            title="We couldn't verify your identity",
+            body="Please try again from the app — check your BVN/NIN details.",
         )
     if event is NotificationEvent.referrer_signup_notified:
         name = ctx.get("referee_display_name") or "Someone"
@@ -559,6 +575,10 @@ def _email_subject(event: NotificationEvent, ctx: dict[str, Any]) -> str:
     if event is NotificationEvent.cable_activated:
         verb = "renewed" if ctx.get("mode") == "renew" else "activated"
         return f"{ctx.get('provider_label', 'Cable')} {verb} — {ctx.get('plan_name', '')}"
+    if event is NotificationEvent.kyc_verification_success:
+        return "You're verified"
+    if event is NotificationEvent.kyc_verification_failed:
+        return "We couldn't verify your identity"
     return "Timpbills notification"
 
 
@@ -665,3 +685,34 @@ _TX_TYPE_LABELS = {
     "cable":       "cable TV",
     "flight":      "flight",
 }
+
+
+_VERIFICATION_TYPE_LABELS = {
+    "bvn": "BVN",
+    "nin": "NIN",
+}
+
+
+def build_kyc_context(
+    *,
+    verification_type: str,               # "bvn" | "nin"
+    status: str,                          # "success" | "failed"
+    tier: int | None = None,              # numeric tier after (success only)
+    wallet_cap_label: str | None = None,  # e.g. "₦500,000" or "Unlimited" (success only) — fully
+                                           # formatted by the caller so this module has no opinion
+                                           # on currency formatting or the KYC tier-cap table.
+) -> dict[str, Any]:
+    """Shape the context dict for kyc_verification_success / _failed.
+    `tier` and `wallet_cap_label` are only meaningful on success — the
+    caller (KycService) resolves them from the user's actual live tier,
+    not blindly from the record, so a stale/duplicate pending record
+    confirmed late never reports a lower tier than the user already
+    has (see KycService._notify_kyc_verification_result)."""
+    return {
+        "verification_type_label": _VERIFICATION_TYPE_LABELS.get(
+            verification_type, verification_type.upper()
+        ),
+        "status": status,
+        "tier": tier,
+        "wallet_cap_label": wallet_cap_label,
+    }

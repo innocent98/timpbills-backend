@@ -59,6 +59,62 @@ _TIER_AFTER_PASS: dict[str, KycLevel] = {
 }
 
 
+def _notify_kyc_verification_result(*, user: User, record: KycRecord) -> None:
+    """Fire-and-forget email + push for a KYC verification that just
+    resolved out of pending. Callers MUST gate this on `was_pending`
+    (only call when the record was pending before this confirm applied
+    a result) so a verification is notified exactly once no matter how
+    many callers — /verify/confirm, /status polling, the webhook — race
+    to resolve the same reference.
+
+    Unlike BillService's notify helpers (called from a context where the
+    tx is already committed and the caller has no further work to do),
+    a KYC confirm's return value IS the API response body — so on top of
+    NotificationService's own per-channel try/except, we wrap the whole
+    dispatch here too. A notification hiccup must never turn a
+    successful KYC confirm into a 5xx.
+    """
+    from app.services.notification_service import (  # noqa: PLC0415
+        NotificationEvent,
+        build_kyc_context,
+    )
+    from app.services.wallet_service import _resolve_cap  # noqa: PLC0415
+    from app.workers.tasks.notification_tasks import dispatch_delay  # noqa: PLC0415
+
+    try:
+        if record.status == "success":
+            # Report the user's ACTUAL live tier/cap, not record.tier_after —
+            # a stale/duplicate pending record confirmed late (see
+            # test_confirm_pass_never_downgrades_user_already_at_higher_tier)
+            # can carry a lower tier_after than the user has already reached;
+            # notifying with that stale tier would be flat wrong.
+            cap = _resolve_cap(user.kyc_level)
+            wallet_cap_label = "Unlimited" if cap is None else f"₦{cap:,.0f}"
+            ctx = build_kyc_context(
+                verification_type=record.verification_type,
+                status="success",
+                tier=user.kyc_level.numeric,
+                wallet_cap_label=wallet_cap_label,
+            )
+            dispatch_delay(
+                user_id=str(user.id), user_email=user.email,
+                event=NotificationEvent.kyc_verification_success, context=ctx,
+            )
+        elif record.status == "failed":
+            ctx = build_kyc_context(
+                verification_type=record.verification_type, status="failed",
+            )
+            dispatch_delay(
+                user_id=str(user.id), user_email=user.email,
+                event=NotificationEvent.kyc_verification_failed, context=ctx,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "kyc notify: dispatch failed ref=%s status=%s err=%s",
+            record.provider_reference, record.status, exc,
+        )
+
+
 class KycService:
     def __init__(self, *, db: Session) -> None:
         self._db = db
@@ -143,6 +199,8 @@ class KycService:
         if expected_user_id is not None and record.user_id != expected_user_id:
             raise UnknownReference(reference_id)
 
+        was_pending = record.status == "pending"
+
         if record.status == "success":
             return record
 
@@ -192,6 +250,8 @@ class KycService:
             record.status = "failed"
             record.failure_reason = failure_reason
             self._db.commit()
+            if was_pending and user is not None:
+                _notify_kyc_verification_result(user=user, record=record)
             return record
 
         next_tier = _TIER_AFTER_PASS[record.verification_type]
@@ -206,6 +266,8 @@ class KycService:
         if user is not None and next_tier.numeric > user.kyc_level.numeric:
             user.kyc_level = next_tier
         self._db.commit()
+        if was_pending and user is not None:
+            _notify_kyc_verification_result(user=user, record=record)
         return record
 
     @staticmethod

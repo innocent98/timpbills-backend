@@ -17,6 +17,7 @@ from app.services.kyc_service import (
     KycTierPrecondition,
     UnknownReference,
 )
+from app.services.notification_service import NotificationEvent
 
 
 def _seed_user(db, kyc=KycLevel.tier_0, dob=None) -> User:
@@ -410,3 +411,69 @@ class TestConfirmVerification:
         assert result.tier_after == 2
         db_session.refresh(user)
         assert user.kyc_level == KycLevel.tier_2
+
+    @pytest.mark.asyncio
+    async def test_confirm_pass_dispatches_kyc_verification_success_once(
+        self, db_session, monkeypatch,
+    ):
+        user = _seed_user(db_session, kyc=KycLevel.tier_1, dob=date(1990, 1, 1))
+        _seed_record(db_session, user=user, reference_id="PASS-BVN-notify-1")
+
+        import app.workers.tasks.notification_tasks as notification_tasks_module
+        calls = []
+        monkeypatch.setattr(
+            notification_tasks_module, "dispatch_delay",
+            lambda **kw: calls.append(kw),
+        )
+
+        svc = KycService(db=db_session)
+        record = await svc.confirm_verification(reference_id="PASS-BVN-notify-1")
+
+        assert record.status == "success"
+        assert len(calls) == 1
+        assert calls[0]["event"] is NotificationEvent.kyc_verification_success
+        assert calls[0]["user_email"] == user.email
+        assert calls[0]["context"]["tier"] == 2
+
+    @pytest.mark.asyncio
+    async def test_confirm_face_fail_dispatches_kyc_verification_failed_once(
+        self, db_session, monkeypatch,
+    ):
+        user = _seed_user(db_session, kyc=KycLevel.tier_1, dob=date(1990, 1, 1))
+        _seed_record(db_session, user=user, reference_id="FAILFACE-BVN-notify-1")
+
+        import app.workers.tasks.notification_tasks as notification_tasks_module
+        calls = []
+        monkeypatch.setattr(
+            notification_tasks_module, "dispatch_delay",
+            lambda **kw: calls.append(kw),
+        )
+
+        svc = KycService(db=db_session)
+        record = await svc.confirm_verification(reference_id="FAILFACE-BVN-notify-1")
+
+        assert record.status == "failed"
+        assert len(calls) == 1
+        assert calls[0]["event"] is NotificationEvent.kyc_verification_failed
+
+    @pytest.mark.asyncio
+    async def test_confirm_reconfirm_already_success_dispatches_nothing(
+        self, db_session, monkeypatch,
+    ):
+        user = _seed_user(db_session, kyc=KycLevel.tier_1, dob=date(1990, 1, 1))
+        _seed_record(db_session, user=user, reference_id="PASS-BVN-notify-2")
+
+        svc = KycService(db=db_session)
+        first = await svc.confirm_verification(reference_id="PASS-BVN-notify-2")
+        assert first.status == "success"
+
+        import app.workers.tasks.notification_tasks as notification_tasks_module
+        calls = []
+        monkeypatch.setattr(
+            notification_tasks_module, "dispatch_delay",
+            lambda **kw: calls.append(kw),
+        )
+
+        second = await svc.confirm_verification(reference_id="PASS-BVN-notify-2")
+        assert second.status == "success"
+        assert calls == []
