@@ -48,6 +48,12 @@ router = APIRouter(prefix="/kyc", tags=["kyc"])
 _STATUS_RECONFIRM_WINDOW_MIN = 15
 _STATUS_RECONFIRM_TIMEOUT_S = 8
 
+# POST /kyc/verify/confirm bounds the Dojah round-trip so it returns within the
+# mobile client's request timeout: if Dojah is slow to finalize, we return the
+# still-pending record immediately (the /status poll + webhook reconcile it)
+# rather than letting the client abort a verification that succeeds moments later.
+_CONFIRM_TIMEOUT_S = 12
+
 
 def _verify_response_from_record(record: KycRecord) -> KycVerifyResponse:
     tier = record.tier_after if record.status == "success" else record.tier_before
@@ -121,14 +127,18 @@ def start_verify(
 async def confirm_verify(
     request: Request,
     body: KycConfirmRequest,
+    db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     svc: KycService = Depends(get_kyc_service),
 ):
     try:
-        record = await svc.confirm_verification(
-            reference_id=body.reference_id,
-            source="api",
-            expected_user_id=user.id,
+        record = await asyncio.wait_for(
+            svc.confirm_verification(
+                reference_id=body.reference_id,
+                source="api",
+                expected_user_id=user.id,
+            ),
+            timeout=_CONFIRM_TIMEOUT_S,
         )
     except UnknownReference:
         raise HTTPException(
@@ -143,6 +153,28 @@ async def confirm_verify(
             status_code=502,
             detail={"code": "KYC_PROVIDER_ERROR", "message": str(exc)},
         )
+    except TimeoutError:
+        # Dojah didn't finalize in time — leave the record pending and return
+        # it immediately. The mobile shows the pending screen (which auto-polls
+        # /kyc/status) and the webhook reconciles server-side; the verification
+        # is NOT lost. Beats the client aborting a confirm that succeeds a beat
+        # later and showing a false failure.
+        record = (
+            db.query(KycRecord)
+            .filter(
+                KycRecord.provider_reference == body.reference_id,
+                KycRecord.user_id == user.id,
+            )
+            .first()
+        )
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "UNKNOWN_REFERENCE",
+                    "message": "No verification found for that reference",
+                },
+            ) from None
     return success(
         _verify_response_from_record(record).model_dump(mode="json"),
         request_id=getattr(request.state, "request_id", None),
