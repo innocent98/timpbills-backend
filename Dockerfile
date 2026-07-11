@@ -102,6 +102,9 @@ COPY --from=builder-prod /opt/venv /opt/venv
 COPY --chown=appuser:appuser ./app /app/app
 COPY --chown=appuser:appuser ./alembic /app/alembic
 COPY --chown=appuser:appuser ./alembic.ini /app/alembic.ini
+# Operational/management scripts (create_admin, reset_kyc, …) so they can be
+# run in the container via `docker compose exec api python scripts/<name>.py`.
+COPY --chown=appuser:appuser ./scripts /app/scripts
 
 # Pre-create writable runtime dirs owned by appuser. /app itself is
 # root-owned (from the base image), so the non-root appuser can't create
