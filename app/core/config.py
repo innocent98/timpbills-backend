@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     PAYSTACK_CARD_FEE_FIXED_THRESHOLD_NAIRA: int = 2500
     PAYSTACK_CARD_FEE_CAP_NAIRA: int = 2000
 
+    # Paystack Dedicated Virtual Accounts (DVA). Timpbills absorbs the DVA
+    # fee: the wallet is credited GROSS (the full transferred amount). The
+    # fee figures here are for accounting/reporting only and are never
+    # applied to a credit. Use "test-bank" in dev/test.
+    PAYSTACK_DVA_PREFERRED_BANK: str = "wema-bank"
+    PAYSTACK_DVA_FEE_PERCENT: float = 1.0
+    PAYSTACK_DVA_FEE_CAP_NGN: int = 300
+
     # Reconcile abandon sweep (S3C-P-abandon): a payment that is still PENDING
     # this long after creation is treated as an abandoned checkout the user
     # never completed. The reconciler stops polling Paystack verify for it and
