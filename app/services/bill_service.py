@@ -82,7 +82,11 @@ from app.services.notification_service import (
     build_bill_context,
 )
 from app.services.transaction_service import TransactionService
-from app.services.wallet_service import InsufficientBalance, WalletService
+from app.services.wallet_service import (
+    InsufficientBalance,
+    WalletService,
+    WalletSpendLocked,
+)
 from app.utils.references import new_transaction_reference
 
 # ── Result payload returned to the endpoint layer ────────────────────────
@@ -727,6 +731,19 @@ class BillService:
         tx = self._tx.create(
             user_id=user_id, type=tx_type, amount=amount, meta=meta
         )
+
+        # Spend-lock gate: over-cap landed money never blocks inbound credit,
+        # but every outbound move is refused until the next KYC upgrade clears
+        # the lock. Checked before the debit so no money moves. The tx stays
+        # pending with an audit reason so ops can see why we stopped.
+        try:
+            self._wallet.raise_if_spend_locked(user_id=user_id)
+        except WalletSpendLocked:
+            self._tx.transition(
+                tx, to_status=TransactionStatus.failed,
+                reason="wallet_spend_locked_before_provider",
+            )
+            raise
 
         # 2. Debit wallet. Atomic + row-locked. Raises InsufficientBalance.
         try:
