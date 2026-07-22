@@ -22,9 +22,14 @@ from app.api.deps import (
 )
 from app.core.limiter import limiter
 from app.core.logger import log
-from app.db.models._enums import TransactionStatus, TransactionType
+from app.db.models._enums import (
+    TransactionStatus,
+    TransactionType,
+    VirtualAccountStatus,
+)
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
+from app.db.models.virtual_account import VirtualAccount
 from app.db.models.webhook_event import WebhookEvent
 from app.integrations.paystack.base import PaymentProvider
 from app.integrations.vtpass.client import translate_response as vtpass_translate
@@ -35,6 +40,7 @@ from app.integrations.vtpass.signature import (
 from app.services.bill_service import REFUNDABLE_ON_FAILURE, BillService
 from app.services.notification_service import (
     NotificationEvent,
+    build_dva_context,
     build_wallet_funded_context,
 )
 from app.services.transaction_service import InvalidStateTransition, TransactionService
@@ -84,9 +90,9 @@ async def paystack_webhook(
     event_id = str(payload.get("data", {}).get("id", ""))
     reference = payload.get("data", {}).get("reference")
 
-    if not event_id or not reference:
+    if not event_id:
         raise HTTPException(status_code=400, detail={
-            "code": "MALFORMED_WEBHOOK", "message": "Missing data.id or data.reference"
+            "code": "MALFORMED_WEBHOOK", "message": "Missing data.id"
         })
 
     # Dedupe atomically — attempt the insert and let the unique constraint on
@@ -108,6 +114,87 @@ async def paystack_webhook(
     except IntegrityError:
         db.rollback()
         return success({"ok": True, "deduped": True})
+
+    data = payload.get("data", {})
+
+    # ── DVA identity + assign lifecycle (resolved by customer_code) ──────
+    # These events carry no reference we minted, so they are handled BEFORE
+    # the reference-mandatory MALFORMED check below.
+    if event_type in (
+        "customeridentification.success",
+        "customeridentification.failed",
+        "dedicatedaccount.assign.success",
+        "dedicatedaccount.assign.failed",
+    ):
+        customer_code = (
+            data.get("customer_code")
+            or (data.get("customer") or {}).get("customer_code")
+        )
+        va = (
+            db.query(VirtualAccount)
+            .filter(VirtualAccount.paystack_customer_code == customer_code)
+            .first()
+        )
+        if va is None:
+            log.warning(
+                "paystack webhook: DVA event for unknown customer_code=%s event=%s",
+                customer_code, event_id,
+            )
+            we.processed = True
+            db.commit()
+            return success({"ok": True, "note": "unknown_customer"})
+
+        notify_event: NotificationEvent | None = None
+        notify_ctx: dict | None = None
+
+        if event_type == "customeridentification.success":
+            va.status = VirtualAccountStatus.pending_assign
+        elif event_type == "customeridentification.failed":
+            va.status = VirtualAccountStatus.failed
+            va.failure_reason = data.get("reason") or "Identity verification failed"
+            notify_event = NotificationEvent.dva_failed
+            notify_ctx = build_dva_context(status="failed", reason=va.failure_reason)
+        elif event_type == "dedicatedaccount.assign.success":
+            acct = data.get("dedicated_account") or {}
+            bank = acct.get("bank") or {}
+            va.account_number = acct.get("account_number")
+            va.account_name = acct.get("account_name")
+            va.bank_name = bank.get("name")
+            va.bank_slug = bank.get("slug")
+            va.dedicated_account_id = str(acct.get("id") or "") or None
+            va.status = VirtualAccountStatus.active
+            va.failure_reason = None
+            notify_event = NotificationEvent.dva_ready
+            notify_ctx = build_dva_context(
+                status="active",
+                account_number=va.account_number,
+                bank_name=va.bank_name,
+            )
+        else:  # dedicatedaccount.assign.failed
+            va.status = VirtualAccountStatus.failed
+            va.failure_reason = data.get("reason") or "Account assignment failed"
+            notify_event = NotificationEvent.dva_failed
+            notify_ctx = build_dva_context(status="failed", reason=va.failure_reason)
+
+        we.processed = True
+        db.commit()
+
+        if notify_event is not None:
+            from app.db.models.user import User  # local import, mirrors existing style
+            user = db.query(User).filter(User.id == va.user_id).first()
+            if user is not None:
+                dispatch_delay(
+                    user_id=str(va.user_id),
+                    user_email=user.email,
+                    event=notify_event,
+                    context=notify_ctx,
+                )
+        return success({"ok": True})
+
+    if not reference:
+        raise HTTPException(status_code=400, detail={
+            "code": "MALFORMED_WEBHOOK", "message": "Missing data.reference"
+        })
 
     # Lookup payment → transaction
     payment = (
