@@ -263,9 +263,17 @@ class KycService:
         # PENDING record confirmed late, after a webhook or a fresh
         # verification already advanced the user further). The audit row
         # above still records the pass regardless.
-        if user is not None and next_tier.numeric > user.kyc_level.numeric:
+        upgraded = user is not None and next_tier.numeric > user.kyc_level.numeric
+        if upgraded:
             user.kyc_level = next_tier
         self._db.commit()
+        # Over-cap spend-lock unlock (DVA): a tier upgrade may now cover a
+        # balance that landed over the old cap. Clear the lock iff the new
+        # cap covers the balance; leave it locked otherwise. Never mutate the
+        # wallet outside WalletService.
+        if upgraded and user is not None:
+            from app.services.wallet_service import WalletService  # noqa: PLC0415
+            WalletService(db=self._db).clear_spend_lock_if_within_cap(user_id=user.id)
         if was_pending and user is not None:
             _notify_kyc_verification_result(user=user, record=record)
         return record
