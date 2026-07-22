@@ -9,6 +9,7 @@
    for wallet_funding we must NOT refund — the user was never debited.
 """
 import json
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
@@ -44,7 +45,7 @@ from app.services.notification_service import (
     build_wallet_funded_context,
 )
 from app.services.transaction_service import InvalidStateTransition, TransactionService
-from app.services.wallet_service import KycCapExceeded, WalletService
+from app.services.wallet_service import KycCapExceeded, OverCapPolicy, WalletService
 from app.utils.responses import success
 from app.workers.tasks.notification_tasks import dispatch_delay
 
@@ -189,6 +190,77 @@ async def paystack_webhook(
                     event=notify_event,
                     context=notify_ctx,
                 )
+        return success({"ok": True})
+
+    # ── DVA inbound transfer funding (resolved by receiver account) ──────
+    # A dedicated_nuban charge.success carries Paystack's own reference, not
+    # one we minted, so it is handled BEFORE the reference-mandatory check.
+    # There is no pre-existing Payment row for a DVA inflow; the WebhookEvent
+    # unique insert (flushed above) is the sole idempotency guard — a replayed
+    # data.id short-circuits at the dedupe block and never re-credits.
+    authorization = data.get("authorization") or {}
+    if event_type == "charge.success" and authorization.get("channel") == "dedicated_nuban":
+        acct = authorization.get("receiver_bank_account_number")
+        va = (
+            db.query(VirtualAccount)
+            .filter(VirtualAccount.account_number == acct)
+            .first()
+        )
+        if va is None:
+            log.warning(
+                "paystack webhook: dedicated_nuban transfer to unknown account=%s event=%s",
+                acct, event_id,
+            )
+            we.processed = True
+            db.commit()
+            return success({"status": "unknown_account"})
+
+        # kobo -> naira, GROSS (Timpbills absorbs the DVA fee).
+        amount = Decimal(data.get("amount", 0)) / Decimal(100)
+
+        tx_svc = TransactionService(db=db)
+        tx = tx_svc.create(
+            user_id=va.user_id,
+            type=TransactionType.wallet_funding,
+            amount=amount,
+            meta={
+                "funding_channel": "dedicated_nuban",
+                "paystack_event_id": event_id,
+                "sender_name": authorization.get("sender_name"),
+                "sender_bank": authorization.get("sender_bank"),
+                "sender_account_masked": authorization.get("sender_bank_account_number"),
+                "paystack_fee": data.get("fees"),
+            },
+        )
+        # LOCK policy: landed money is never rejected. Over-cap credits in full
+        # and locks outbound spend until the next KYC upgrade covers it.
+        new_balance = wallet_svc.credit(
+            user_id=va.user_id, amount=amount, over_cap=OverCapPolicy.LOCK,
+        )
+        tx_svc.transition(
+            tx,
+            to_status=TransactionStatus.success,
+            reason="paystack.webhook.dedicated_nuban",
+            context={"paystack_event_id": event_id},
+        )
+
+        we.processed = True
+        db.commit()
+
+        from app.db.models.user import User
+        user = db.query(User).filter(User.id == va.user_id).first()
+        if user is not None:
+            dispatch_delay(
+                user_id=str(va.user_id),
+                user_email=user.email,
+                event=NotificationEvent.wallet_funded,
+                context=build_wallet_funded_context(
+                    amount=amount,
+                    balance=new_balance,
+                    reference=tx.reference,
+                    channel="transfer",
+                ),
+            )
         return success({"ok": True})
 
     if not reference:

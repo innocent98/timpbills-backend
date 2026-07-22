@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -23,12 +24,14 @@ from app.services.token_store import RedisTokenStore
 import tests.e2e.test_auth_full_flows as _e2e_mod
 from tests.e2e.test_auth_full_flows import _seed_logged_in_user
 
-from app.db.models._enums import VirtualAccountStatus
+from app.db.models._enums import SpendLockReason, VirtualAccountStatus
 from app.db.models.user import User
 from app.db.models.virtual_account import VirtualAccount
+from app.db.models.wallet import Wallet
 from app.integrations.paystack.fake import (
     customer_identification_event,
     dedicated_account_assign_event,
+    dva_charge_event,
 )
 
 _test_email_client = FakeEmailClient()
@@ -138,3 +141,55 @@ async def test_unknown_customer_code_is_200_noop(db_session, client):
     await _seed_logged_in_user(client)
     r = await _post(client, customer_identification_event(customer_code="CUS_unknown", event_id="ci_x"))
     assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_dva_transfer_credits_wallet_gross(db_session, client):
+    user, headers, va = await _seed_va(db_session, client, status=VirtualAccountStatus.active)
+    va.account_number = "9988776655"
+    db_session.commit()
+
+    r = await _post(client, dva_charge_event(
+        account_number="9988776655", amount_kobo=500000, event_id="dva_credit_1"))
+    assert r.status_code == 200
+
+    w = await client.get("/api/v1/wallet", headers=headers)
+    assert w.json()["data"]["balance"] == "5000.00"  # gross, fee absorbed
+
+
+@pytest.mark.asyncio
+async def test_dva_transfer_unknown_account_is_noop(db_session, client):
+    await _seed_logged_in_user(client)
+    r = await _post(client, dva_charge_event(
+        account_number="0000000000", amount_kobo=500000, event_id="dva_unknown_1"))
+    assert r.status_code == 200
+    assert r.json()["data"]["status"] == "unknown_account"
+
+
+@pytest.mark.asyncio
+async def test_dva_transfer_over_cap_credits_full_and_locks(db_session, client):
+    user, headers, va = await _seed_va(db_session, client, status=VirtualAccountStatus.active)
+    va.account_number = "9988776655"
+    db_session.commit()
+    # tier_0 cap = 50,000. A 70,000 transfer overshoots -> credit full + lock.
+    r = await _post(client, dva_charge_event(
+        account_number="9988776655", amount_kobo=7000000, event_id="dva_overcap_1"))
+    assert r.status_code == 200
+    db_session.expire_all()
+    w = db_session.query(Wallet).filter(Wallet.user_id == user.id).one()
+    assert w.balance == Decimal("70000.00")
+    assert w.spend_locked is True
+    assert w.spend_locked_reason == SpendLockReason.over_cap
+
+
+@pytest.mark.asyncio
+async def test_dva_transfer_replayed_event_is_deduped(db_session, client):
+    user, headers, va = await _seed_va(db_session, client, status=VirtualAccountStatus.active)
+    va.account_number = "9988776655"
+    db_session.commit()
+    ev = dva_charge_event(account_number="9988776655", amount_kobo=500000, event_id="dva_dup_1")
+    await _post(client, ev)
+    await _post(client, ev)  # replay
+    db_session.expire_all()
+    w = db_session.query(Wallet).filter(Wallet.user_id == user.id).one()
+    assert w.balance == Decimal("5000.00")  # credited exactly once
