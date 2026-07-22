@@ -114,6 +114,12 @@ POST /wallet/virtual-account
   steps:
     - create VirtualAccount(status=pending_identity)
     - split user.full_name -> first_name / middle_name / last_name
+    - paystack.create_customer(email, first_name, last_name, phone) -> customer_code
+      (idempotent by email on Paystack); persist paystack_customer_code immediately.
+      This is REQUIRED before assign: customer_code is NOT NULL and is the resolution
+      key for the customeridentification.* / dedicatedaccount.assign.* webhooks (§5.1),
+      which arrive with no reference of ours. "Single-step assign" still holds: assign
+      reuses the same customer by email.
     - paystack.assign_dedicated_account(...)  -> 202
     - return current status to mobile
   async (webhooks, §5):
