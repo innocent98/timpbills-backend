@@ -20,3 +20,15 @@ class TransactionType(str, enum.Enum):
     cable          = "cable"
     flight         = "flight"
     refund         = "refund"
+
+
+class VirtualAccountStatus(str, enum.Enum):
+    pending_identity = "pending_identity"
+    pending_assign   = "pending_assign"
+    active           = "active"
+    failed           = "failed"
+    deactivated      = "deactivated"
+
+
+class SpendLockReason(str, enum.Enum):
+    over_cap = "over_cap"
