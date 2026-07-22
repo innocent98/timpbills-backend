@@ -18,7 +18,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.logger import log
-from app.db.models._enums import TransactionStatus
+from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
 from app.db.session import SessionLocal
@@ -33,6 +33,7 @@ from app.services.transaction_service import TransactionService
 from app.services.wallet_service import (
     InsufficientBalance,
     KycCapExceeded,
+    OverCapPolicy,
     WalletService,
 )
 from app.workers.celery_app import celery_app
@@ -367,5 +368,116 @@ async def _reconcile_bills() -> dict:
             "skipped":   skipped,
             "escalated": escalated,
         }
+    finally:
+        db.close()
+
+
+# ─── DVA inbound-funding reconciliation (backend must-fix #2) ─────────────
+#
+# The DVA funding webhook (webhooks.py, dedicated_nuban charge.success) is NOT
+# atomic: it commits the WebhookEvent dedup row + a pending wallet_funding tx
+# BEFORE crediting the wallet. A crash between those steps leaves the tx stuck
+# `pending` with the money uncredited; Paystack's redelivery then dedups on
+# provider_event_id and drops the credit forever. This sweep recovers those.
+#
+# NO DOUBLE-CREDIT is the invariant. Two crash sub-cases both leave the tx
+# `pending`, and the sweep can't tell them apart by status alone:
+#   (A) crash before the credit         -> wallet NOT credited -> MUST credit.
+#   (B) crash after the credit, before  -> wallet ALREADY credited, tx still
+#       tx->success                        pending -> MUST NOT credit again.
+# We therefore make the credit itself idempotent: WalletService.credit is
+# called with idempotency_key=tx.reference, which records a uniquely-
+# constrained wallet_credit_keys marker in the SAME commit as the balance
+# change. The live webhook path passes the same key, so in sub-case (B) the
+# marker already exists, the sweep's credit collides and no-ops, and we only
+# transition the tx to success.
+
+# Grace window: a tx younger than this may still be in-flight on the live
+# webhook path, so we leave it alone — the sweep must never race live credits.
+# The live credit+transition completes in milliseconds; 5 minutes is
+# comfortably beyond any realistic latency while still recovering promptly.
+_DVA_RECONCILE_GRACE_SECONDS = 300
+
+
+@celery_app.task(name="app.workers.tasks.reconcile_tasks.reconcile_dva_funding")
+def reconcile_dva_funding() -> dict:
+    """Recover DVA inbound-funding credits dropped by a mid-webhook crash.
+
+    Finds wallet_funding txns stuck `pending` with
+    meta.funding_channel == "dedicated_nuban" older than the grace window,
+    then credits (idempotently) + transitions each to success. Synchronous —
+    no external calls, pure DB — so no asyncio wrapper (unlike the Paystack /
+    VTPass reconcilers which await a provider client)."""
+    db = SessionLocal()
+    try:
+        cutoff = datetime.now(UTC) - timedelta(seconds=_DVA_RECONCILE_GRACE_SECONDS)
+        # Filter type/status/age in SQL; match funding_channel in Python so the
+        # query is portable across SQLite (tests) and Postgres JSONB (prod) —
+        # same approach as TransactionService.create_refund.
+        candidates = (
+            db.query(Transaction)
+            .filter(
+                Transaction.type == TransactionType.wallet_funding,
+                Transaction.status == TransactionStatus.pending,
+                Transaction.created_at < cutoff,
+            )
+            .limit(50)
+            .all()
+        )
+        stuck = [
+            tx for tx in candidates
+            if (tx.meta or {}).get("funding_channel") == "dedicated_nuban"
+        ]
+        if not stuck:
+            return {"checked": 0, "recovered": 0, "skipped": 0}
+
+        wallet_svc = WalletService(db=db)
+        tx_svc = TransactionService(db=db)
+        recovered = 0
+        skipped = 0
+
+        for tx in stuck:
+            # Re-lock the tx. If the live webhook (or a prior sweep tick) beat
+            # us to it, it's no longer pending — skip rather than double-handle.
+            locked = (
+                db.query(Transaction)
+                .filter(Transaction.id == tx.id)
+                .with_for_update()
+                .one()
+            )
+            if locked.status != TransactionStatus.pending:
+                skipped += 1
+                continue
+
+            # Idempotent credit keyed on the tx reference. Sub-case (A) credits
+            # once; sub-case (B) collides on the marker and no-ops. LOCK policy:
+            # landed money is never rejected — over-cap credits in full and
+            # spend-locks, exactly like the live DVA path.
+            try:
+                wallet_svc.credit(
+                    user_id=locked.user_id,
+                    amount=locked.amount,
+                    over_cap=OverCapPolicy.LOCK,
+                    idempotency_key=locked.reference,
+                )
+            except Exception as exc:
+                # Never let one bad row kill the batch. Discard partial state
+                # and move on; the next tick retries.
+                db.rollback()
+                log.warning(
+                    "reconcile_dva: credit failed ref=%s user=%s err=%s",
+                    locked.reference, locked.user_id, exc,
+                )
+                continue
+
+            tx_svc.transition(
+                locked,
+                to_status=TransactionStatus.success,
+                reason="reconcile.dva.recovered",
+            )
+            recovered += 1
+
+        db.commit()
+        return {"checked": len(stuck), "recovered": recovered, "skipped": skipped}
     finally:
         db.close()

@@ -237,8 +237,13 @@ async def paystack_webhook(
         )
         # LOCK policy: landed money is never rejected. Over-cap credits in full
         # and locks outbound spend until the next KYC upgrade covers it.
+        # idempotency_key=tx.reference records a uniquely-constrained marker in
+        # the same commit as the balance change, so the reconciliation sweep
+        # (reconcile_dva_funding) can safely re-drive a tx left pending by a
+        # crash without ever double-crediting. See must-fix #2.
         new_balance = wallet_svc.credit(
             user_id=va.user_id, amount=amount, over_cap=OverCapPolicy.LOCK,
+            idempotency_key=tx.reference,
         )
         tx_svc.transition(
             tx,

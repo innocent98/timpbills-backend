@@ -8,11 +8,13 @@ import enum
 from decimal import Decimal
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models._enums import SpendLockReason
 from app.db.models.user import KycLevel, User
 from app.db.models.wallet import Wallet
+from app.db.models.wallet_credit_key import WalletCreditKey
 
 # Naira caps per KYC tier, from PRD §13 (spec §2 — 4-tier table). Only the
 # max-balance cap is enforced here; per-txn/daily limits are display-only
@@ -94,11 +96,22 @@ class WalletService:
         user_id: UUID,
         amount: Decimal,
         over_cap: OverCapPolicy = OverCapPolicy.RAISE,
+        idempotency_key: str | None = None,
     ) -> Decimal:
         """Credit atomically under SELECT … FOR UPDATE.
 
         ``over_cap`` selects the over-cap behaviour (see OverCapPolicy).
         Default RAISE keeps the checkout path identical to before.
+
+        ``idempotency_key`` makes the credit exactly-once. When supplied, a
+        uniquely-constrained ``wallet_credit_keys`` marker is reserved in the
+        SAME database transaction as the balance mutation below. A repeat call
+        with the same key collides on the unique constraint and becomes a safe
+        no-op that returns the current balance WITHOUT crediting again. This is
+        the no-double-credit guard for the DVA funding path: the live webhook
+        and the reconciliation sweep both pass ``tx.reference``, so whichever
+        credits first wins and the other is a no-op. Callers that omit the key
+        (checkout, refund credits) keep their previous behaviour unchanged.
         """
         w = (
             self._db.query(Wallet)
@@ -124,6 +137,26 @@ class WalletService:
             w.balance_cap = cap if cap is not None else _UNLIMITED_CAP
         else:
             cap = w.balance_cap
+
+        # Reserve the idempotency marker AFTER the wallet is locked and BEFORE
+        # the balance mutation, so it commits atomically with the balance
+        # change at the single self._db.commit() below. A collision means this
+        # exact credit already landed: roll back (nothing was mutated) and
+        # return the current balance as a no-op.
+        if idempotency_key is not None:
+            self._db.add(
+                WalletCreditKey(key=idempotency_key, user_id=user_id, amount=amount)
+            )
+            try:
+                self._db.flush()
+            except IntegrityError:
+                self._db.rollback()
+                existing = (
+                    self._db.query(Wallet)
+                    .filter(Wallet.user_id == user_id)
+                    .first()
+                )
+                return existing.balance if existing is not None else Decimal("0.00")
 
         new_balance = w.balance + amount
         if cap is not None and new_balance > cap:

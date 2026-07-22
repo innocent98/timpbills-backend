@@ -45,6 +45,13 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.tasks.reconcile_tasks.reconcile_pending_bills",
         "schedule": crontab(minute="*/2"),
     },
+    # Backend must-fix #2 — recover DVA inbound-funding credits dropped by a
+    # crash mid-webhook (dedup row committed before the wallet credit). Same
+    # 2-minute cadence; idempotent per tx.reference so it never double-credits.
+    "reconcile-dva-funding-every-2min": {
+        "task": "app.workers.tasks.reconcile_tasks.reconcile_dva_funding",
+        "schedule": crontab(minute="*/2"),
+    },
     # Sprint 5b — nightly referral sweep: re-evaluates pending /
     # referee_cap_pending / clawback_pending rows. Cadence is daily
     # because each bucket is naturally a "tomorrow" problem (daily-cap
