@@ -99,3 +99,6 @@ note.txt
 
 # Local DB dumps (e.g. pre-wipe pg_dump) — never commit
 backups/
+
+# SDD orchestration scratch (skill-managed, not part of the codebase)
+.superpowers/
