@@ -198,6 +198,35 @@ def test_ignores_non_dva_and_non_pending(db_session):
     )
 
 
+def test_orphaned_non_dva_backlog_does_not_starve_genuine_recovery(db_session):
+    """Important review fix: the sweep's `limit(50)` must apply AFTER the
+    funding_channel match, not before it.
+
+    Orphaned card-funding `pending` wallet_funding txns (meta has no
+    `funding_channel`) can pile up over time. If the SQL query pulls 50 rows
+    and only THEN filters to dedicated_nuban in Python, a backlog of 50+
+    orphans fills the whole window and shadows a genuinely stuck DVA credit
+    below it -- the money is never recovered. Seed 51 orphans (aged past the
+    grace window, so they're eligible candidates) ahead of one genuine
+    dedicated_nuban stuck tx, and assert the DVA tx is still recovered."""
+    user, wallet = _seed_user_wallet(db_session, balance="0.00")
+    # Orphan backlog: non-DVA pending funding txns with no funding_channel
+    # in meta at all -- these must never satisfy the DVA match.
+    for _ in range(51):
+        _seed_funding_tx(db_session, user, amount="100.00", channel=None)
+
+    dva_tx = _seed_funding_tx(db_session, user, amount="5000.00", channel="dedicated_nuban")
+
+    result = _run_sweep(db_session)
+
+    assert result["recovered"] == 1
+    db_session.expire_all()
+    w = db_session.query(Wallet).filter(Wallet.user_id == user.id).one()
+    assert w.balance == Decimal("5000.00")
+    fresh = db_session.query(Transaction).filter(Transaction.id == dva_tx.id).one()
+    assert fresh.status == TransactionStatus.success
+
+
 def test_over_cap_stuck_tx_credits_full_and_locks(db_session):
     """Over-cap landed money is never rejected: the sweep credits in full and
     spend-locks the wallet (LOCK policy), same as the live DVA path."""

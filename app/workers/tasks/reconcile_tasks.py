@@ -15,6 +15,9 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from sqlalchemy import ColumnElement, cast, func
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logger import log
@@ -399,6 +402,26 @@ async def _reconcile_bills() -> dict:
 _DVA_RECONCILE_GRACE_SECONDS = 300
 
 
+def _dva_channel_filter(db: Session) -> "ColumnElement[bool]":
+    """SQL-level predicate for `meta.funding_channel == "dedicated_nuban"`.
+
+    `Transaction.meta` is `JSON().with_variant(JSONB(), "postgresql")` — plain
+    TEXT-backed JSON on SQLite, native JSONB on Postgres. There's no single
+    SQLAlchemy expression that compiles correctly on both (the generic JSON
+    comparator doesn't expose `.astext`, and `.op("->>")` isn't valid SQLite
+    syntax on older SQLite builds), so branch on the bound dialect, same
+    pattern as the ON-CONFLICT/IntegrityError dialect split in
+    PushTokensService — one portable behavior, two dialect-specific
+    implementations.
+    """
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        return cast(Transaction.meta, JSONB)["funding_channel"].astext == "dedicated_nuban"
+    # SQLite (test suite) and any other dialect: meta is stored as TEXT,
+    # extract via the json1 extension's json_extract().
+    return func.json_extract(Transaction.meta, "$.funding_channel") == "dedicated_nuban"
+
+
 @celery_app.task(name="app.workers.tasks.reconcile_tasks.reconcile_dva_funding")
 def reconcile_dva_funding() -> dict:
     """Recover DVA inbound-funding credits dropped by a mid-webhook crash.
@@ -411,23 +434,25 @@ def reconcile_dva_funding() -> dict:
     db = SessionLocal()
     try:
         cutoff = datetime.now(UTC) - timedelta(seconds=_DVA_RECONCILE_GRACE_SECONDS)
-        # Filter type/status/age in SQL; match funding_channel in Python so the
-        # query is portable across SQLite (tests) and Postgres JSONB (prod) —
-        # same approach as TransactionService.create_refund.
-        candidates = (
+        # funding_channel match MUST happen in SQL, before .limit(50) — not in
+        # Python after it. Orphaned card-funding pending wallet_funding txns
+        # (meta has no funding_channel) can accumulate; if the query pulled
+        # 50 rows and only then filtered to dedicated_nuban, a backlog of 50+
+        # orphans would fill the whole window and shadow a genuinely stuck
+        # DVA credit below it — starving recovery indefinitely. See the
+        # Important review fix covered by
+        # test_orphaned_non_dva_backlog_does_not_starve_genuine_recovery.
+        stuck = (
             db.query(Transaction)
             .filter(
                 Transaction.type == TransactionType.wallet_funding,
                 Transaction.status == TransactionStatus.pending,
                 Transaction.created_at < cutoff,
+                _dva_channel_filter(db),
             )
             .limit(50)
             .all()
         )
-        stuck = [
-            tx for tx in candidates
-            if (tx.meta or {}).get("funding_channel") == "dedicated_nuban"
-        ]
         if not stuck:
             return {"checked": 0, "recovered": 0, "skipped": 0}
 
