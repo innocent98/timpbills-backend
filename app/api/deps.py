@@ -397,6 +397,16 @@ def get_transaction_service(db: Session = Depends(get_db)) -> TransactionService
     return TransactionService(db=db)
 
 
+from app.services.virtual_account_service import VirtualAccountService
+
+
+def get_virtual_account_service(
+    db: Session = Depends(get_db),
+    paystack: PaymentProvider = Depends(get_paystack_provider),
+) -> VirtualAccountService:
+    return VirtualAccountService(db=db, paystack=paystack)
+
+
 # --- Sprint 3 · B4+B6: VTPass provider + BillService ---
 from app.integrations.vtpass import factory as _vtpass_factory
 from app.integrations.vtpass.base import BillProvider

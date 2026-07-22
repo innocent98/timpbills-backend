@@ -6,6 +6,7 @@ from app.api.deps import (
     get_idempotency_service,
     get_paystack_provider,
     get_transaction_service,
+    get_virtual_account_service,
     get_wallet_service,
     require_full_auth_gates,
     require_idempotency_key,
@@ -17,9 +18,15 @@ from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.user import User
 from app.integrations.paystack.base import PaymentProvider
+from app.schemas.virtual_account import (
+    BankListItemResponse,
+    ProvisionVirtualAccountRequest,
+    VirtualAccountResponse,
+)
 from app.schemas.wallet import FundWalletRequest, FundWalletResponse, WalletResponse
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
 from app.services.transaction_service import TransactionService
+from app.services.virtual_account_service import KycRequired, VirtualAccountService
 from app.services.wallet_service import WalletService
 from app.utils.responses import success
 
@@ -177,3 +184,84 @@ async def fund_wallet(
     except Exception:
         await idem.release_in_flight(user_id=str(user.id), key=idem_key)
         raise
+
+
+@router.post("/virtual-account", response_model=None, status_code=200)
+@limiter.limit("10/minute", key_func=per_user_or_ip)
+async def provision_virtual_account(
+    request: Request,
+    body: ProvisionVirtualAccountRequest,
+    user: User = Depends(require_full_auth_gates),
+    va_svc: VirtualAccountService = Depends(get_virtual_account_service),
+):
+    # Not a money-move: no X-Pin-Token. Standard bearer auth only.
+    try:
+        va = await va_svc.provision(
+            user=user,
+            bvn=body.bvn,
+            account_number=body.account_number,
+            bank_code=body.bank_code,
+            preferred_bank=body.preferred_bank,
+        )
+    except KycRequired:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "KYC_REQUIRED",
+                "message": "Complete KYC tier 1 before setting up an account number.",
+            },
+        )
+    out = VirtualAccountResponse(
+        status=va.status.value,
+        account_number=va.account_number,
+        account_name=va.account_name,
+        bank_name=va.bank_name,
+        failure_reason=va.failure_reason,
+    )
+    return success(
+        out.model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+
+@router.get("/virtual-account", response_model=None)
+@limiter.limit("30/minute", key_func=per_user_or_ip)
+async def get_virtual_account(
+    request: Request,
+    user: User = Depends(require_full_auth_gates),
+    va_svc: VirtualAccountService = Depends(get_virtual_account_service),
+):
+    va = va_svc.get_for_user(user_id=user.id)
+    if va is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NO_VIRTUAL_ACCOUNT", "message": "No account number set up yet."},
+        )
+    out = VirtualAccountResponse(
+        status=va.status.value,
+        account_number=va.account_number,
+        account_name=va.account_name,
+        bank_name=va.bank_name,
+        failure_reason=va.failure_reason,
+    )
+    return success(
+        out.model_dump(mode="json"),
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+
+@router.get("/banks", response_model=None)
+@limiter.limit("30/minute", key_func=per_user_or_ip)
+async def list_banks(
+    request: Request,
+    user: User = Depends(require_full_auth_gates),
+    paystack: PaymentProvider = Depends(get_paystack_provider),
+):
+    banks = await paystack.list_banks(country="nigeria")
+    out = {
+        "banks": [
+            BankListItemResponse(name=b.name, slug=b.slug, code=b.code).model_dump(mode="json")
+            for b in banks
+        ]
+    }
+    return success(out, request_id=getattr(request.state, "request_id", None))
