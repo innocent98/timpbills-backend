@@ -50,3 +50,60 @@ def test_wallet_spend_lock_columns_default(db_session):
     db_session.commit()
     db_session.refresh(w)
     assert w.spend_locked_reason == SpendLockReason.over_cap
+
+
+import pytest
+
+from app.integrations.paystack.fake import FakePaystackClient
+from app.services.virtual_account_service import (
+    KycRequired,
+    VirtualAccountService,
+    split_full_name,
+)
+
+
+def test_split_full_name_variants():
+    assert split_full_name("Ada Grace Obi") == ("Ada", "Grace", "Obi")
+    assert split_full_name("Ada Obi") == ("Ada", "", "Obi")
+    assert split_full_name("Ada Grace Mary Obi") == ("Ada", "Grace Mary", "Obi")
+    assert split_full_name("Ada") == ("Ada", "", "Ada")  # single-token fallback
+
+
+@pytest.mark.asyncio
+async def test_provision_requires_kyc_tier_1(db_session):
+    u = _seed_user(db_session, kyc=KycLevel.tier_0)
+    svc = VirtualAccountService(db=db_session, paystack=FakePaystackClient())
+    with pytest.raises(KycRequired):
+        await svc.provision(
+            user=u, bvn="22222222222", account_number="0123456789", bank_code="035"
+        )
+
+
+@pytest.mark.asyncio
+async def test_provision_creates_pending_identity_row_and_assigns(db_session):
+    u = _seed_user(db_session, kyc=KycLevel.tier_1)
+    fake = FakePaystackClient()
+    svc = VirtualAccountService(db=db_session, paystack=fake)
+    va = await svc.provision(
+        user=u, bvn="22222222222", account_number="0123456789", bank_code="035"
+    )
+    assert va.status == VirtualAccountStatus.pending_identity
+    assert va.paystack_customer_code.startswith("CUS_")
+    assert len(fake.assigned) == 1
+
+
+@pytest.mark.asyncio
+async def test_provision_is_idempotent(db_session):
+    u = _seed_user(db_session, kyc=KycLevel.tier_1)
+    fake = FakePaystackClient()
+    svc = VirtualAccountService(db=db_session, paystack=fake)
+    va1 = await svc.provision(
+        user=u, bvn="22222222222", account_number="0123456789", bank_code="035"
+    )
+    va2 = await svc.provision(
+        user=u, bvn="22222222222", account_number="0123456789", bank_code="035"
+    )
+    assert va1.id == va2.id
+    rows = db_session.query(VirtualAccount).filter(VirtualAccount.user_id == u.id).all()
+    assert len(rows) == 1
+    assert len(fake.assigned) == 1  # second call returns existing, no re-assign
