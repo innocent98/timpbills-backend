@@ -73,6 +73,11 @@ class NotificationEvent(str, Enum):
     welcome_bonus                   = "welcome_bonus"
     kyc_verification_success        = "kyc_verification_success"
     kyc_verification_failed         = "kyc_verification_failed"
+    # Dedicated Virtual Account (Paystack) provisioning outcomes. Push +
+    # in-app only — no email template — per spec §9; SMS stays reserved
+    # for KYC-1 per project convention.
+    dva_ready                       = "dva_ready"
+    dva_failed                      = "dva_failed"
 
 
 # ─── Notification categories (Sprint 5c · Task 5.2) ─────────────────────────
@@ -111,6 +116,8 @@ EVENT_CATEGORY: dict[NotificationEvent, NotificationCategory] = {
     NotificationEvent.welcome_bonus:               NotificationCategory.referral_updates,
     NotificationEvent.kyc_verification_success:    NotificationCategory.transaction_alerts,
     NotificationEvent.kyc_verification_failed:     NotificationCategory.transaction_alerts,
+    NotificationEvent.dva_ready:                   NotificationCategory.transaction_alerts,
+    NotificationEvent.dva_failed:                  NotificationCategory.transaction_alerts,
 }
 
 
@@ -204,6 +211,8 @@ _EMAIL_TEMPLATES: dict[NotificationEvent, str | None] = {
     NotificationEvent.welcome_bonus:               None,
     NotificationEvent.kyc_verification_success:    "kyc_verification_success",
     NotificationEvent.kyc_verification_failed:     "kyc_verification_failed",
+    NotificationEvent.dva_ready:                   None,
+    NotificationEvent.dva_failed:                  None,
 }
 
 
@@ -282,6 +291,19 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
         return _PushCopy(
             title="Welcome bonus added",
             body=f"₦{amount} landed in your wallet — enjoy.",
+        )
+    if event is NotificationEvent.dva_ready:
+        acct = ctx.get("account_number", "")
+        bank = ctx.get("bank_name", "your bank")
+        return _PushCopy(
+            title="Your account number is ready",
+            body=f"Transfer to {acct} ({bank}) to top up your wallet instantly.",
+        )
+    if event is NotificationEvent.dva_failed:
+        reason = ctx.get("reason") or "We could not set up your account number."
+        return _PushCopy(
+            title="Account setup failed",
+            body=f"{reason}. Please try again from the app.",
         )
     return None
 
@@ -691,6 +713,23 @@ _VERIFICATION_TYPE_LABELS = {
     "bvn": "BVN",
     "nin": "NIN",
 }
+
+
+def build_dva_context(
+    *,
+    status: str,
+    account_number: str | None = None,
+    bank_name: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Shape the push/in-app context for dva_ready / dva_failed. No em/en
+    dashes in any string that reaches the user."""
+    return {
+        "status": status,
+        "account_number": account_number or "",
+        "bank_name": bank_name or "",
+        "reason": reason or "",
+    }
 
 
 def build_kyc_context(
