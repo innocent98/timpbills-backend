@@ -158,6 +158,29 @@ async def test_dva_transfer_credits_wallet_gross(db_session, client):
 
 
 @pytest.mark.asyncio
+async def test_dva_transfer_credits_wallet_when_only_top_level_channel_set(db_session, client):
+    # Regression: Paystack's spec (and real payloads) may set
+    # data.channel == "dedicated_nuban" without also setting
+    # data.authorization.channel. The DVA branch must match on EITHER
+    # location, or the transfer falls through to the reference/Payment
+    # path, finds no Payment, and the money is never credited.
+    user, headers, va = await _seed_va(db_session, client, status=VirtualAccountStatus.active)
+    va.account_number = "9988776655"
+    db_session.commit()
+
+    ev = dva_charge_event(
+        account_number="9988776655", amount_kobo=500000, event_id="dva_toplevel_1")
+    assert ev["data"]["channel"] == "dedicated_nuban"
+    ev["data"]["authorization"]["channel"] = "card-like"
+
+    r = await _post(client, ev)
+    assert r.status_code == 200
+
+    w = await client.get("/api/v1/wallet", headers=headers)
+    assert w.json()["data"]["balance"] == "5000.00"  # gross, fee absorbed
+
+
+@pytest.mark.asyncio
 async def test_dva_transfer_unknown_account_is_noop(db_session, client):
     await _seed_logged_in_user(client)
     r = await _post(client, dva_charge_event(

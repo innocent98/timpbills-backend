@@ -199,7 +199,10 @@ async def paystack_webhook(
     # unique insert (flushed above) is the sole idempotency guard — a replayed
     # data.id short-circuits at the dedupe block and never re-credits.
     authorization = data.get("authorization") or {}
-    if event_type == "charge.success" and authorization.get("channel") == "dedicated_nuban":
+    if event_type == "charge.success" and (
+        data.get("channel") == "dedicated_nuban"
+        or authorization.get("channel") == "dedicated_nuban"
+    ):
         acct = authorization.get("receiver_bank_account_number")
         va = (
             db.query(VirtualAccount)
