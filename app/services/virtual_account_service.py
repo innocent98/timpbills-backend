@@ -106,17 +106,28 @@ class VirtualAccountService:
 
         # 202 — result arrives via customeridentification.* then
         # dedicatedaccount.assign.* webhooks. BVN is never persisted.
-        await self._paystack.assign_dedicated_account(
-            email=user.email,
-            first_name=first,
-            middle_name=middle,
-            last_name=last,
-            phone=user.phone,
-            preferred_bank=preferred_bank or settings.PAYSTACK_DVA_PREFERRED_BANK,
-            country="NG",
-            account_number=account_number,
-            bvn=bvn,
-            bank_code=bank_code,
-        )
+        try:
+            await self._paystack.assign_dedicated_account(
+                email=user.email,
+                first_name=first,
+                middle_name=middle,
+                last_name=last,
+                phone=user.phone,
+                preferred_bank=preferred_bank or settings.PAYSTACK_DVA_PREFERRED_BANK,
+                country="NG",
+                account_number=account_number,
+                bvn=bvn,
+                bank_code=bank_code,
+            )
+        except Exception:
+            # assign never reached Paystack (or failed before a webhook could
+            # ever fire) - leaving the row at pending_identity would wedge it
+            # forever, since that status short-circuits future provision()
+            # calls. Fall back to failed so a retry is possible.
+            va.status = VirtualAccountStatus.failed
+            va.failure_reason = "Could not start account setup. Please try again."
+            self._db.commit()
+            raise
+
         self._db.refresh(va)
         return va

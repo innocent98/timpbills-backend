@@ -21,6 +21,7 @@ class FakePaystackClient:
     initialized: list[tuple[str, int]] = field(default_factory=list)
     customers: list[str] = field(default_factory=list)
     assigned: list[tuple[str, str, str, str]] = field(default_factory=list)
+    _assign_raises: bool = False
 
     # Test hooks
     def will_succeed(self, reference: str) -> None:
@@ -28,6 +29,12 @@ class FakePaystackClient:
 
     def will_fail(self, reference: str) -> None:
         self._outcomes[reference] = "failed"
+
+    def will_raise_on_assign(self) -> None:
+        """Next call to assign_dedicated_account raises (simulates a network
+        error before Paystack receives the request). Clears itself after
+        firing once, so a subsequent call in the same test succeeds."""
+        self._assign_raises = True
 
     # Protocol
     async def initialize(
@@ -80,6 +87,9 @@ class FakePaystackClient:
         phone: str, preferred_bank: str, country: str, account_number: str,
         bvn: str, bank_code: str,
     ) -> AssignDedicatedAccountResponse:
+        if self._assign_raises:
+            self._assign_raises = False
+            raise ConnectionError("simulated network failure before Paystack received the request")
         self.assigned.append((email, account_number, bvn, bank_code))
         return AssignDedicatedAccountResponse(
             status=True, message="Assign dedicated account in progress"

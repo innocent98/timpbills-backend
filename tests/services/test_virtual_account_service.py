@@ -107,3 +107,32 @@ async def test_provision_is_idempotent(db_session):
     rows = db_session.query(VirtualAccount).filter(VirtualAccount.user_id == u.id).all()
     assert len(rows) == 1
     assert len(fake.assigned) == 1  # second call returns existing, no re-assign
+
+
+@pytest.mark.asyncio
+async def test_provision_recovers_when_assign_throws(db_session):
+    u = _seed_user(db_session, kyc=KycLevel.tier_1)
+    fake = FakePaystackClient()
+    svc = VirtualAccountService(db=db_session, paystack=fake)
+    fake.will_raise_on_assign()
+
+    with pytest.raises(Exception):
+        await svc.provision(
+            user=u, bvn="22222222222", account_number="0123456789", bank_code="035"
+        )
+
+    row = (
+        db_session.query(VirtualAccount)
+        .filter(VirtualAccount.user_id == u.id)
+        .one()
+    )
+    assert row.status == VirtualAccountStatus.failed
+    assert row.failure_reason is not None
+
+    # Retry: assign now succeeds, row recovers to pending_identity.
+    va2 = await svc.provision(
+        user=u, bvn="22222222222", account_number="0123456789", bank_code="035"
+    )
+    assert va2.status == VirtualAccountStatus.pending_identity
+    assert va2.id == row.id
+    assert len(fake.assigned) == 1
