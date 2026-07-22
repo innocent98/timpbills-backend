@@ -4,11 +4,13 @@
 Balance invariants enforced here AND at the DB level (CHECK constraints
 on wallets table). Never bypass this service to mutate a wallet.
 """
+import enum
 from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.db.models._enums import SpendLockReason
 from app.db.models.user import KycLevel, User
 from app.db.models.wallet import Wallet
 
@@ -47,6 +49,22 @@ class WalletNotFound(Exception):
     pass
 
 
+class OverCapPolicy(str, enum.Enum):
+    """How credit() reacts when a credit would push balance past the KYC cap.
+
+    RAISE  - checkout path (default). Raise KycCapExceeded; the caller returns
+             422 and Paystack retries until ops raises the tier. Unchanged.
+    LOCK   - transfer/DVA path. Landed money is never rejected: credit in full
+             and lock outbound spend until the next KYC upgrade covers it.
+    """
+    RAISE = "raise"
+    LOCK = "lock"
+
+
+class WalletSpendLocked(Exception):
+    """Outbound money-move attempted while the wallet is spend-locked."""
+
+
 class WalletService:
     def __init__(self, *, db: Session) -> None:
         self._db = db
@@ -70,8 +88,18 @@ class WalletService:
         w = self.get_or_create(user_id=user_id)
         return w.balance
 
-    def credit(self, *, user_id: UUID, amount: Decimal) -> Decimal:
-        """Credit atomically under SELECT … FOR UPDATE. Raises KycCapExceeded."""
+    def credit(
+        self,
+        *,
+        user_id: UUID,
+        amount: Decimal,
+        over_cap: OverCapPolicy = OverCapPolicy.RAISE,
+    ) -> Decimal:
+        """Credit atomically under SELECT … FOR UPDATE.
+
+        ``over_cap`` selects the over-cap behaviour (see OverCapPolicy).
+        Default RAISE keeps the checkout path identical to before.
+        """
         w = (
             self._db.query(Wallet)
             .filter(Wallet.user_id == user_id)
@@ -99,10 +127,16 @@ class WalletService:
 
         new_balance = w.balance + amount
         if cap is not None and new_balance > cap:
-            raise KycCapExceeded(
-                f"new balance {new_balance} exceeds cap {cap}"
-            )
-        w.balance = new_balance
+            if over_cap == OverCapPolicy.RAISE:
+                raise KycCapExceeded(
+                    f"new balance {new_balance} exceeds cap {cap}"
+                )
+            # LOCK: credit in full, never reject landed money; gate outbound.
+            w.balance = new_balance
+            w.spend_locked = True
+            w.spend_locked_reason = SpendLockReason.over_cap
+        else:
+            w.balance = new_balance
         self._db.commit()
         return new_balance
 
@@ -119,3 +153,37 @@ class WalletService:
         w.balance = w.balance - amount
         self._db.commit()
         return w.balance
+
+    def raise_if_spend_locked(self, *, user_id: UUID) -> None:
+        """Guard for every outbound money-move. Raises WalletSpendLocked when
+        the wallet is locked (over-cap landed money awaiting a KYC upgrade)."""
+        w = self._db.query(Wallet).filter(Wallet.user_id == user_id).first()
+        if w is not None and w.spend_locked:
+            raise WalletSpendLocked(
+                "wallet is spend-locked pending a KYC upgrade"
+            )
+
+    def clear_spend_lock_if_within_cap(self, *, user_id: UUID) -> bool:
+        """Clear an over-cap spend-lock when the user's current KYC cap now
+        covers the balance. Called after a tier upgrade. Returns True if the
+        lock was cleared, False if it was left in place or absent."""
+        w = (
+            self._db.query(Wallet)
+            .filter(Wallet.user_id == user_id)
+            .with_for_update()
+            .first()
+        )
+        if (
+            w is None
+            or not w.spend_locked
+            or w.spend_locked_reason != SpendLockReason.over_cap
+        ):
+            return False
+        user = self._db.query(User).filter(User.id == user_id).first()
+        cap = _resolve_cap(user.kyc_level) if user is not None else w.balance_cap
+        if cap is None or w.balance <= cap:
+            w.spend_locked = False
+            w.spend_locked_reason = None
+            self._db.commit()
+            return True
+        return False
