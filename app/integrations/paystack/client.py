@@ -3,7 +3,7 @@
 from decimal import Decimal
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
 from app.integrations.paystack.errors import PaystackError  # re-exported
@@ -20,6 +20,41 @@ from app.integrations.paystack.schemas import (
 from app.integrations.paystack.signature import verify_paystack_signature
 
 
+def _is_retryable_paystack_error(exc: BaseException) -> bool:
+    """5xx and genuine transport failures (timeouts, connection errors) are
+    worth retrying — the request may simply need to land again. A 4xx
+    (invalid preferred_bank, an account the BVN does not own, bad params)
+    fails identically on every attempt, so retrying it only wastes the
+    3-attempt budget and delays surfacing the real error. Same policy the
+    Dojah client uses."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, httpx.TransportError)
+
+
+def _check(r: httpx.Response) -> dict:
+    """Turn a Paystack response into its parsed body or a PaystackError.
+
+    - 5xx: re-raise as httpx.HTTPStatusError so the retry decorator retries.
+    - 4xx or a 200 carrying ``status: false``: raise PaystackError with
+      Paystack's own message. This is a rejection, not a transport blip, so
+      it must NOT be retried and must reach callers as a PaystackError the
+      endpoint layer can map to a 502 — never a bare 500.
+    - otherwise: return the JSON body.
+    """
+    if r.status_code >= 500:
+        r.raise_for_status()
+    try:
+        body = r.json()
+    except ValueError:
+        body = {}
+    if r.status_code >= 400 or not body.get("status"):
+        raise PaystackError(
+            body.get("message") or f"Paystack returned HTTP {r.status_code}"
+        )
+    return body
+
+
 class PaystackClient:
     def __init__(self) -> None:
         if not settings.PAYSTACK_SECRET_KEY:
@@ -33,7 +68,7 @@ class PaystackClient:
 
     @retry(
         reraise=True,
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        retry=retry_if_exception(_is_retryable_paystack_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )
@@ -68,7 +103,7 @@ class PaystackClient:
 
     @retry(
         reraise=True,
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        retry=retry_if_exception(_is_retryable_paystack_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )
@@ -104,7 +139,7 @@ class PaystackClient:
     # ── Dedicated Virtual Accounts ───────────────────────────────────────
     @retry(
         reraise=True,
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        retry=retry_if_exception(_is_retryable_paystack_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )
@@ -121,10 +156,7 @@ class PaystackClient:
             r = await c.post(
                 f"{self._base}/customer", json=payload, headers=self._headers
             )
-            r.raise_for_status()
-        body = r.json()
-        if not body.get("status"):
-            raise PaystackError(body.get("message", "create_customer failed"))
+        body = _check(r)
         d = body["data"]
         return CreateCustomerResponse(
             customer_code=d["customer_code"], customer_id=str(d.get("id") or "") or None
@@ -132,7 +164,7 @@ class PaystackClient:
 
     @retry(
         reraise=True,
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        retry=retry_if_exception(_is_retryable_paystack_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )
@@ -158,8 +190,9 @@ class PaystackClient:
                 f"{self._base}/dedicated_account/assign",
                 json=payload, headers=self._headers,
             )
-            r.raise_for_status()  # 202 is a success status
-        body = r.json()
+        # _check treats 202 (async accepted) as success and turns a 400 such
+        # as "wema-bank is not available in test mode" into a PaystackError.
+        body = _check(r)
         return AssignDedicatedAccountResponse(
             status=bool(body.get("status")),
             message=body.get("message", ""),
@@ -167,7 +200,7 @@ class PaystackClient:
 
     @retry(
         reraise=True,
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        retry=retry_if_exception(_is_retryable_paystack_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )
@@ -193,7 +226,7 @@ class PaystackClient:
 
     @retry(
         reraise=True,
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        retry=retry_if_exception(_is_retryable_paystack_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )
@@ -214,7 +247,7 @@ class PaystackClient:
 
     @retry(
         reraise=True,
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        retry=retry_if_exception(_is_retryable_paystack_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )
@@ -236,7 +269,7 @@ class PaystackClient:
 
     @retry(
         reraise=True,
-        retry=retry_if_exception_type(httpx.HTTPStatusError),
+        retry=retry_if_exception(_is_retryable_paystack_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )

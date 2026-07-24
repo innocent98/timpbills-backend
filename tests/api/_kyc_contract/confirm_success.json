@@ -2,7 +2,7 @@
   "face_match": true,
   "failure_reason": null,
   "liveness_passed": true,
-  "reference": "KYC-BVN-9f47d17e698c1033",
+  "reference": "KYC-BVN-fc73ee9212fa9ec2",
   "status": "success",
   "tier": 2,
   "verification_type": "bvn"
