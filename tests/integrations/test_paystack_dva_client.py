@@ -106,6 +106,42 @@ async def test_assign_5xx_retries_then_succeeds(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_assign_omits_empty_middle_name(monkeypatch):
+    """Paystack rejects an empty-string middle_name with 400 missing_params.
+    A user with no middle name must have the field omitted entirely, not sent
+    blank -- otherwise DVA setup fails for everyone without a middle name."""
+    client = _client(monkeypatch)
+    patcher, calls = _patch_async_client([
+        _mock_response(200, {"status": True, "message": "in progress"}),
+    ])
+    with patcher:
+        await client.assign_dedicated_account(
+            email="u@example.com", first_name="Victor", middle_name="",
+            last_name="Adebayo", phone="+2348100000000", preferred_bank="test-bank",
+            country="NG", account_number="0111111111", bvn="22222222221",
+            bank_code="070",
+        )
+    sent = calls[0]
+    assert "middle_name" not in sent, sent
+
+
+@pytest.mark.asyncio
+async def test_assign_includes_middle_name_when_present(monkeypatch):
+    client = _client(monkeypatch)
+    patcher, calls = _patch_async_client([
+        _mock_response(200, {"status": True, "message": "in progress"}),
+    ])
+    with patcher:
+        await client.assign_dedicated_account(
+            email="u@example.com", first_name="Ada", middle_name="Chi",
+            last_name="Okoro", phone="+2348100000000", preferred_bank="test-bank",
+            country="NG", account_number="0111111111", bvn="22222222221",
+            bank_code="070",
+        )
+    assert calls[0]["middle_name"] == "Chi"
+
+
+@pytest.mark.asyncio
 async def test_create_customer_4xx_becomes_paystack_error_without_retry(monkeypatch):
     client = _client(monkeypatch)
     patcher, calls = _patch_async_client([

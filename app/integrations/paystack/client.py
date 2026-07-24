@@ -176,7 +176,6 @@ class PaystackClient:
         payload = {
             "email": email,
             "first_name": first_name,
-            "middle_name": middle_name,
             "last_name": last_name,
             "phone": phone,
             "preferred_bank": preferred_bank,
@@ -185,6 +184,11 @@ class PaystackClient:
             "bvn": bvn,
             "bank_code": bank_code,
         }
+        # Paystack rejects an empty-string middle_name with 400 missing_params
+        # ("middle_name is not allowed to be empty"). Users without a middle
+        # name must have the field omitted, not sent blank.
+        if middle_name:
+            payload["middle_name"] = middle_name
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(
                 f"{self._base}/dedicated_account/assign",
