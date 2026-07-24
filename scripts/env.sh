@@ -141,8 +141,14 @@ cmd_verify() {
     local key
     key=$(get_key)
 
-    if openssl enc -aes-256-cbc -d -pbkdf2 -iter 100000 \
-        -in "$enc" -pass "pass:$key" 2>/dev/null | head -1 | grep -q '='; then
+    # Decrypt into a variable rather than piping to `head`: under `pipefail`
+    # an early-exiting reader SIGPIPEs openssl, and the pipeline then reports
+    # failure for a perfectly good file and key.
+    local decrypted
+    decrypted=$(openssl enc -aes-256-cbc -d -pbkdf2 -iter 100000 \
+        -in "$enc" -pass "pass:$key" 2>/dev/null || true)
+
+    if printf '%s' "$decrypted" | grep -q '='; then
         echo -e "${GREEN}Verification passed.${NC} .env.$env.enc can be decrypted."
     else
         echo -e "${RED}Verification failed.${NC} Wrong key or corrupted file."
