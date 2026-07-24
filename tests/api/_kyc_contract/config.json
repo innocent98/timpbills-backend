@@ -1,7 +1,7 @@
 {
-  "app_id": null,
-  "bvn_widget_id": null,
+  "app_id": "6a3bdb178f7b433324faf48e",
+  "bvn_widget_id": "6a513202bf3ab16c77ce6813",
   "environment": "sandbox",
-  "nin_widget_id": null,
-  "public_key": null
+  "nin_widget_id": "6a513b6fbf3ab16c77ced126",
+  "public_key": "test_pk_Hu796uVPDpfB1x1ENktPYCb9q"
 }

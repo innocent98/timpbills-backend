@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from app.integrations.paystack.errors import PaystackError
 from app.integrations.paystack.schemas import (
     AssignDedicatedAccountResponse,
     BankListItem,
@@ -22,6 +23,7 @@ class FakePaystackClient:
     customers: list[str] = field(default_factory=list)
     assigned: list[tuple[str, str, str, str]] = field(default_factory=list)
     _assign_raises: bool = False
+    _assign_rejects: str | None = None
 
     # Test hooks
     def will_succeed(self, reference: str) -> None:
@@ -35,6 +37,13 @@ class FakePaystackClient:
         error before Paystack receives the request). Clears itself after
         firing once, so a subsequent call in the same test succeeds."""
         self._assign_raises = True
+
+    def will_reject_assign(self, message: str) -> None:
+        """Next call to assign_dedicated_account is rejected BY Paystack with
+        a PaystackError, as opposed to failing in transit like
+        will_raise_on_assign. Mirrors a real 400 such as "fidelity-bank is
+        not available in test mode". Clears itself after firing once."""
+        self._assign_rejects = message
 
     # Protocol
     async def initialize(
@@ -90,6 +99,9 @@ class FakePaystackClient:
         if self._assign_raises:
             self._assign_raises = False
             raise ConnectionError("simulated network failure before Paystack received the request")
+        if self._assign_rejects is not None:
+            message, self._assign_rejects = self._assign_rejects, None
+            raise PaystackError(message)
         self.assigned.append((email, account_number, bvn, bank_code))
         return AssignDedicatedAccountResponse(
             status=True, message="Assign dedicated account in progress"

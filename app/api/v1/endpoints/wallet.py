@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,6 +19,7 @@ from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.user import User
 from app.integrations.paystack.base import PaymentProvider
+from app.integrations.paystack.errors import PaystackError
 from app.schemas.virtual_account import (
     BankListItemResponse,
     ProvisionVirtualAccountRequest,
@@ -29,6 +31,8 @@ from app.services.transaction_service import TransactionService
 from app.services.virtual_account_service import KycRequired, VirtualAccountService
 from app.services.wallet_service import WalletService
 from app.utils.responses import success
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/wallet", tags=["wallet"])
 
@@ -209,6 +213,24 @@ async def provision_virtual_account(
             detail={
                 "code": "KYC_REQUIRED",
                 "message": "Complete KYC tier 1 before setting up an account number.",
+            },
+        )
+    except PaystackError as exc:
+        # Our bank partner refused the request (bad preferred_bank, an account
+        # the BVN does not own, a provider outage). Paystack's own wording is
+        # operator-facing, so log it and hand the user something actionable.
+        log.warning(
+            "dva.provision.provider_rejected user_id=%s reason=%s", user.id, exc
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "PROVIDER_ERROR",
+                "message": (
+                    "We could not set up your account number right now. "
+                    "Check that the account number and bank match your BVN, "
+                    "then try again."
+                ),
             },
         )
     out = VirtualAccountResponse(

@@ -6,6 +6,7 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
+from app.integrations.paystack.errors import PaystackError  # re-exported
 from app.integrations.paystack.schemas import (
     AssignDedicatedAccountResponse,
     BankListItem,
@@ -17,10 +18,6 @@ from app.integrations.paystack.schemas import (
     VerifyResponse,
 )
 from app.integrations.paystack.signature import verify_paystack_signature
-
-
-class PaystackError(Exception):
-    pass
 
 
 class PaystackClient:

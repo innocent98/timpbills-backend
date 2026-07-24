@@ -1,11 +1,11 @@
 {
   "records": [
     {
-      "created_at": "2026-07-10T14:17:49.851955",
+      "created_at": "2026-07-24T15:40:22.129372",
       "face_match": false,
       "failure_reason": null,
       "liveness_passed": false,
-      "reference": "KYC-BVN-da9793e3e0bab6fe",
+      "reference": "PENDING-BVN-1",
       "status": "pending",
       "verification_type": "bvn"
     }
