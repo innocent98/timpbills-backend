@@ -243,3 +243,37 @@ def test_over_cap_stuck_tx_credits_full_and_locks(db_session):
     assert w.spend_locked is True
     fresh = db_session.query(Transaction).filter(Transaction.id == tx.id).one()
     assert fresh.status == TransactionStatus.success
+
+
+def test_all_digit_uuid_marker_round_trips(db_session):
+    """Regression: a uuid4 whose 32-char hex is all digits must survive the
+    WalletCreditKey round-trip on SQLite.
+
+    postgresql.UUID rendered as bare "UUID" gets NUMERIC affinity on SQLite,
+    which coerces an all-digit hex to a float; the UUID result processor then
+    raised "'float' object has no attribute 'replace'" -- a ~1-in-3.4M CI
+    flake. The conftest CHAR(32) compile rule fixes it. This forces the poison
+    value deterministically so the flake can never return unnoticed.
+    """
+    poison = uuid.UUID("1234567890" * 3 + "12")  # 32 hex chars, all digits
+    assert poison.hex.isdigit()
+    user, _ = _seed_user_wallet(db_session)
+    db_session.add(
+        WalletCreditKey(
+            id=poison,
+            key="TMP-DVA-ALLDIGIT",
+            user_id=poison,
+            amount=Decimal("5000.00"),
+        )
+    )
+    db_session.commit()
+    db_session.expire_all()
+
+    row = (
+        db_session.query(WalletCreditKey)
+        .filter(WalletCreditKey.key == "TMP-DVA-ALLDIGIT")
+        .one()
+    )
+    assert row.id == poison
+    assert row.user_id == poison
+    assert row.amount == Decimal("5000.00")
