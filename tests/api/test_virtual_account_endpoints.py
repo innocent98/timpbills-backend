@@ -1,6 +1,3 @@
-import json
-from decimal import Decimal
-from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -13,9 +10,7 @@ from app.api.deps import (
     reset_fake_sms, reset_fake_email, reset_fake_paystack,
 )
 from app.core.limiter import limiter
-from app.db.models._enums import SpendLockReason
 from app.db.models.user import KycLevel, User
-from app.db.models.wallet import Wallet
 from app.integrations.email.fake import FakeEmailClient
 from app.services.token_store import RedisTokenStore
 
