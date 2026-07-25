@@ -100,6 +100,13 @@ class User(TimestampMixin, Base):
     # Migration 202605220900 added the column.
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Set by the anonymization sweep once PII has been scrubbed (30 days
+    # after deleted_at). While deleted_at is set but this is NULL the
+    # account is in the reversible grace window; once this is set the row
+    # carries no personal data and only the retained ledger remains.
+    # Migration 202607251200 added the column.
+    anonymized_at = Column(DateTime(timezone=True), nullable=True)
+
     # 1:1 back-reference to NotificationPreference. `cascade="all,
     # delete-orphan"` mirrors the FK's ON DELETE CASCADE — deleting the
     # user from the ORM also drops their preference row in the same flush.
