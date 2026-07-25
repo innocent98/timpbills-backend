@@ -4,4 +4,4 @@ Your {{ verification_type_label }} verification didn't go through. Please try ag
 
 Need help? Reply to this email.
 
-— Timpbills
+Timpbills

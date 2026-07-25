@@ -274,13 +274,13 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
         )
     if event is NotificationEvent.kyc_verification_success:
         return _PushCopy(
-            title=f"KYC verified — you're now Tier {ctx.get('tier')}",
+            title=f"KYC verified, you're now Tier {ctx.get('tier')}",
             body=f"Your wallet limit is now {ctx.get('wallet_cap_label', '')}.",
         )
     if event is NotificationEvent.kyc_verification_failed:
         return _PushCopy(
             title="We couldn't verify your identity",
-            body="Please try again from the app — check your BVN/NIN details.",
+            body="Please try again from the app. Check your BVN/NIN details.",
         )
     if event is NotificationEvent.referrer_signup_notified:
         name = ctx.get("referee_display_name") or "Someone"
@@ -298,7 +298,7 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
         amount = ctx.get("amount_naira", "")
         return _PushCopy(
             title="Welcome bonus added",
-            body=f"₦{amount} landed in your wallet — enjoy.",
+            body=f"₦{amount} landed in your wallet. Enjoy.",
         )
     if event is NotificationEvent.dva_ready:
         acct = ctx.get("account_number", "")
@@ -600,17 +600,17 @@ class NotificationService:
 def _email_subject(event: NotificationEvent, ctx: dict[str, Any]) -> str:
     if event is NotificationEvent.bill_success:
         if ctx.get("partial"):
-            return f"Partial delivery — ₦{ctx.get('delivered_amount')} sent"
+            return f"Partial delivery: ₦{ctx.get('delivered_amount')} sent"
         return f"Your ₦{ctx.get('amount')} {ctx.get('tx_type_label')} is on its way"
     if event is NotificationEvent.bill_failure_refund:
         return f"Refund: ₦{ctx.get('amount')} back in your wallet"
     if event is NotificationEvent.wallet_funded:
-        return f"Wallet funded — ₦{ctx.get('amount')}"
+        return f"Wallet funded: ₦{ctx.get('amount')}"
     if event is NotificationEvent.electricity_token_delivered:
-        return f"Electricity token — ₦{ctx.get('amount')} on meter {ctx.get('meter_number')}"
+        return f"Electricity token: ₦{ctx.get('amount')} on meter {ctx.get('meter_number')}"
     if event is NotificationEvent.cable_activated:
         verb = "renewed" if ctx.get("mode") == "renew" else "activated"
-        return f"{ctx.get('provider_label', 'Cable')} {verb} — {ctx.get('plan_name', '')}"
+        return f"{ctx.get('provider_label', 'Cable')} {verb}: {ctx.get('plan_name', '')}"
     if event is NotificationEvent.kyc_verification_success:
         return "You're verified"
     if event is NotificationEvent.kyc_verification_failed:
