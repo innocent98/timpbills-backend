@@ -10,9 +10,10 @@ from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.push_token import PushToken
 
 
-def _deleted_user(db, *, days_ago, email="d@e.co", phone="+2348100000031"):
+def _deleted_user(db, *, days_ago, email="d@e.co", phone="+2348100000031",
+                  referral_code="REFCODE1"):
     u = User(id=uuid.uuid4(), email=email, phone=phone, full_name="Real Name",
-             password_hash="x", is_active=False,
+             password_hash="x", is_active=False, referral_code=referral_code,
              deleted_at=datetime.now(UTC) - timedelta(days=days_ago))
     db.add(u); db.flush()
     db.add(Wallet(id=uuid.uuid4(), user_id=u.id, balance=Decimal("0.00"),
@@ -46,6 +47,7 @@ def test_over_grace_is_anonymized_ledger_kept(db_session):
     assert fresh.full_name == "Deleted User"
     assert fresh.email != "d@e.co" and "deleted" in fresh.email
     assert fresh.phone != "+2348100000031"
+    assert fresh.referral_code != "REFCODE1" and fresh.referral_code is not None
     # ledger kept
     assert db_session.query(Transaction).filter(Transaction.user_id == u.id).count() == 1
     assert db_session.query(Wallet).filter(Wallet.user_id == u.id).count() == 1

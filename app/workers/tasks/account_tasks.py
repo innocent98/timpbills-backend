@@ -23,7 +23,6 @@ def anonymize_deleted_accounts() -> dict:
         cutoff = datetime.now(UTC) - timedelta(days=GRACE_DAYS)
         users = (
             db.query(User)
-            .filter(User.deleted_at.isnot(None))
             .filter(User.deleted_at <= cutoff)
             .filter(User.anonymized_at.is_(None))
             .limit(200)
@@ -57,6 +56,14 @@ def anonymize_deleted_accounts() -> dict:
             locked.gender = None
             locked.address = None
             locked.avatar_url = None
+            # referral_code is NOT NULL + unique (VARCHAR(8)) and is exposed
+            # via the public referral share URL / queryable by exact match,
+            # so leaving the real value is a residual identity linkage.
+            # Derived from locked.id (not the random generate_referral_code
+            # path, which could collide with a live user's code) so the
+            # placeholder is deterministic and fits the column's uniqueness
+            # guarantee without touching the DB to check for collisions.
+            locked.referral_code = f"d{locked.id.hex[:7]}"
             locked.anonymized_at = datetime.now(UTC)
             db.commit()
             count += 1
