@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    account,
     admin,
     admin_auth,
     auth,
@@ -18,6 +19,7 @@ from app.api.v1.endpoints import (
 api_router = APIRouter()
 
 api_router.include_router(health.router, prefix="/health", tags=["health"])
+api_router.include_router(account.router)
 api_router.include_router(auth.router)
 api_router.include_router(wallet.router)
 api_router.include_router(webhooks.router)
