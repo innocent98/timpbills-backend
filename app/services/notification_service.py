@@ -78,6 +78,12 @@ class NotificationEvent(str, Enum):
     # for KYC-1 per project convention.
     dva_ready                       = "dva_ready"
     dva_failed                      = "dva_failed"
+    # Public account-deletion request confirmation. Email is the primary
+    # channel (the person may have uninstalled the app, which is why they
+    # used the web page); push is best-effort. SMS stays reserved per
+    # project convention. Copy states the scheduled deletion date and the
+    # single cancel path (return to the deletion page).
+    account_deletion_requested      = "account_deletion_requested"
 
 
 # ─── Notification categories (Sprint 5c · Task 5.2) ─────────────────────────
@@ -118,6 +124,7 @@ EVENT_CATEGORY: dict[NotificationEvent, NotificationCategory] = {
     NotificationEvent.kyc_verification_failed:     NotificationCategory.transaction_alerts,
     NotificationEvent.dva_ready:                   NotificationCategory.transaction_alerts,
     NotificationEvent.dva_failed:                  NotificationCategory.transaction_alerts,
+    NotificationEvent.account_deletion_requested:  NotificationCategory.transaction_alerts,
 }
 
 
@@ -213,6 +220,7 @@ _EMAIL_TEMPLATES: dict[NotificationEvent, str | None] = {
     NotificationEvent.kyc_verification_failed:     "kyc_verification_failed",
     NotificationEvent.dva_ready:                   None,
     NotificationEvent.dva_failed:                  None,
+    NotificationEvent.account_deletion_requested:  "account_deletion_requested",
 }
 
 
@@ -304,6 +312,12 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
         return _PushCopy(
             title="Account setup failed",
             body=f"{reason}. Please try again from the app.",
+        )
+    if event is NotificationEvent.account_deletion_requested:
+        return _PushCopy(
+            title="Account deletion scheduled",
+            body=f"Your account is scheduled for deletion on "
+                 f"{ctx.get('scheduled_date', '')}. Tap to cancel if this was not you.",
         )
     return None
 
@@ -601,6 +615,8 @@ def _email_subject(event: NotificationEvent, ctx: dict[str, Any]) -> str:
         return "You're verified"
     if event is NotificationEvent.kyc_verification_failed:
         return "We couldn't verify your identity"
+    if event is NotificationEvent.account_deletion_requested:
+        return "Your Timpbills account deletion request"
     return "Timpbills notification"
 
 

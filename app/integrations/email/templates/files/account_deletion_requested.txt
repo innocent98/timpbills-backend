@@ -1,0 +1,9 @@
+Account deletion requested
+
+We received a request to delete your Timpbills account. Your account is now scheduled for permanent deletion on {{ scheduled_date }}.
+
+If you did not make this request, go to {{ cancel_url }} and choose "Cancel a pending deletion" before that date to keep your account.
+
+Need help? Reply to this email.
+
+Timpbills.
