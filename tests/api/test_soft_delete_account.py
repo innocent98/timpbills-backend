@@ -291,6 +291,41 @@ async def test_re_register_allowed_after_30_days(client, db_session):
 
 
 # ---------------------------------------------------------------------------
+# Wallet-balance guard (Task 5 — routed through AccountDeletionService)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_delete_me_blocked_when_wallet_not_empty(client, db_session):
+    """A positive wallet balance now blocks the authenticated delete the
+    same way it already blocks the public deletion-request flow — both
+    route through AccountDeletionService.request_deletion. The user row
+    must be left untouched (no partial tombstone) when the guard trips."""
+    import uuid
+    from decimal import Decimal
+
+    from app.db.models.user import User
+    from app.db.models.wallet import Wallet
+
+    headers, _, user_id = await _seed_user(
+        client, email="sd9@test.co", phone="+2348077777709"
+    )
+    db_session.add(
+        Wallet(id=uuid.uuid4(), user_id=uuid.UUID(user_id), balance=Decimal("500.00"))
+    )
+    db_session.commit()
+
+    r = await client.delete("/api/v1/users/me", headers=headers)
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "WALLET_NOT_EMPTY"
+
+    db_session.expire_all()
+    user = db_session.query(User).filter(User.email == "sd9@test.co").first()
+    assert user is not None
+    assert user.is_active is True
+    assert user.deleted_at is None
+
+
+# ---------------------------------------------------------------------------
 # Auth required
 # ---------------------------------------------------------------------------
 
