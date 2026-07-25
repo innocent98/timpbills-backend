@@ -18,6 +18,7 @@ celery_app = Celery(
         "app.workers.tasks.reconcile_tasks",
         "app.workers.tasks.notification_tasks",
         "app.workers.tasks.referral_tasks",
+        "app.workers.tasks.account_tasks",
     ],
 )
 
@@ -59,5 +60,11 @@ celery_app.conf.beat_schedule = {
     "sweep-referrals-nightly": {
         "task": "app.workers.tasks.referral_tasks.sweep_referrals",
         "schedule": crontab(hour=2, minute=15),  # 02:15 UTC
+    },
+    # Account-deletion PII purge: anonymize accounts soft-deleted 30+ days
+    # ago. Daily is ample; the grace window is measured in days.
+    "anonymize-deleted-accounts-daily": {
+        "task": "app.workers.tasks.account_tasks.anonymize_deleted_accounts",
+        "schedule": crontab(hour=3, minute=0),  # 03:00 UTC
     },
 }
