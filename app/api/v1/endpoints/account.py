@@ -27,6 +27,10 @@ _ERROR_MAP: dict[str, tuple[int, str]] = {
         409,
         "This account has already been permanently deleted.",
     ),
+    "NOT_PENDING_DELETION": (
+        409,
+        "There is no pending deletion to cancel for this account.",
+    ),
 }
 
 

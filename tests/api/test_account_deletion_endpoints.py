@@ -77,3 +77,13 @@ async def test_cancel_after_request(db_session, client):
     r = await client.post("/api/v1/account/deletion-request/cancel",
                           json={"identifier": "e@f.co", "password": "Secret123"})
     assert r.status_code == 200 and r.json()["data"]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_pending_deletion_409(db_session, client):
+    # No deletion-request was ever made for this account.
+    _seed(db_session, email="g@h.co", phone="+2348100000024")
+    r = await client.post("/api/v1/account/deletion-request/cancel",
+                          json={"identifier": "g@h.co", "password": "Secret123"})
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "NOT_PENDING_DELETION"

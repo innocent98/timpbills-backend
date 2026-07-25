@@ -53,9 +53,17 @@ class AccountDeletionService:
         return user
 
     async def request_deletion(self, *, user: User) -> datetime:
+        # An already-anonymized user has no PII left to re-tombstone or
+        # re-notify -- and the identity is already detached from the
+        # ledger. Must be checked before the idempotent early-return below,
+        # since that check alone can't distinguish "still in grace" from
+        # "already scrubbed" once both timestamps are set.
+        if user.anonymized_at is not None:
+            raise ValueError("ALREADY_ANONYMIZED")
+
         # Idempotent: an account already inside the grace window returns its
         # existing schedule without re-stamping or re-notifying.
-        if user.deleted_at is not None and user.anonymized_at is None:
+        if user.deleted_at is not None:
             return _ensure_aware_utc(user.deleted_at) + timedelta(days=GRACE_DAYS)
 
         wallet = (
@@ -91,6 +99,14 @@ class AccountDeletionService:
     def cancel_deletion(self, *, user: User) -> None:
         if user.anonymized_at is not None:
             raise ValueError("ALREADY_ANONYMIZED")
+        # Only a genuine pending-deletion account may be reactivated here.
+        # Without this guard, the public, unauthenticated cancel endpoint
+        # could flip is_active back to True on an account disabled for an
+        # unrelated reason (e.g. a future admin ban: is_active=False with
+        # deleted_at IS NULL) -- resolve_and_verify deliberately resolves
+        # inactive users too, so that path alone doesn't protect us.
+        if user.deleted_at is None:
+            raise ValueError("NOT_PENDING_DELETION")
         user.is_active = True
         user.deleted_at = None
         self._db.add(user)

@@ -110,3 +110,28 @@ def test_cancel_after_anonymization_raises(db_session):
     svc = AccountDeletionService(db=db_session, token_store=_FakeTokenStore())
     with pytest.raises(ValueError, match="ALREADY_ANONYMIZED"):
         svc.cancel_deletion(user=u)
+
+
+def test_cancel_without_pending_deletion_raises_and_leaves_is_active(db_session):
+    # An account that is inactive for a reason OTHER than self-deletion
+    # (e.g. a future admin ban: is_active=False, deleted_at IS NULL) must
+    # not be reactivatable via the public, unauthenticated cancel endpoint.
+    u = _user(db_session)
+    u.is_active = False
+    db_session.commit()
+    svc = AccountDeletionService(db=db_session, token_store=_FakeTokenStore())
+    with pytest.raises(ValueError, match="NOT_PENDING_DELETION"):
+        svc.cancel_deletion(user=u)
+    db_session.refresh(u)
+    assert u.is_active is False  # untouched, not flipped back to True
+
+
+@pytest.mark.asyncio
+async def test_request_deletion_on_already_anonymized_user_raises(db_session):
+    u = _user(db_session)
+    u.deleted_at = datetime.now(UTC) - timedelta(days=40)
+    u.anonymized_at = datetime.now(UTC) - timedelta(days=10)
+    db_session.commit()
+    svc = AccountDeletionService(db=db_session, token_store=_FakeTokenStore())
+    with pytest.raises(ValueError, match="ALREADY_ANONYMIZED"):
+        await svc.request_deletion(user=u)

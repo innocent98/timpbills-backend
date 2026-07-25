@@ -4,11 +4,13 @@ the users row and deletes PII child rows, but KEEPS the financial ledger
 detached, per AML retention. Idempotent via the anonymized_at marker."""
 from datetime import UTC, datetime, timedelta
 
+from app.core.logger import log
 from app.db.models.kyc_record import KycRecord
 from app.db.models.otp import OtpCode
 from app.db.models.push_token import PushToken
 from app.db.models.user import User
 from app.db.models.virtual_account import VirtualAccount
+from app.db.models.wallet import Wallet
 from app.db.session import SessionLocal
 from app.services.account_deletion_service import GRACE_DAYS
 from app.workers.celery_app import celery_app
@@ -35,38 +37,75 @@ def anonymize_deleted_accounts() -> dict:
             )
             if locked.anonymized_at is not None:
                 continue
-            # Delete PII child rows.
-            db.query(PushToken).filter(PushToken.user_id == locked.id).delete()
-            db.query(OtpCode).filter(OtpCode.user_id == locked.id).delete()
-            db.query(KycRecord).filter(KycRecord.user_id == locked.id).delete()
-            # Detach the DVA from Paystack identity but keep the row. The
-            # column is NOT NULL (see VirtualAccount.paystack_customer_code),
-            # so we set a non-functional placeholder rather than nulling it.
-            for va in db.query(VirtualAccount).filter(
-                VirtualAccount.user_id == locked.id
-            ):
-                va.paystack_customer_code = f"deleted-{locked.id}"
-            # Scrub the user row (keep id + retained-ledger FKs).
-            locked.email = f"deleted-{locked.id}@deleted.invalid"
-            locked.phone = f"deleted:{locked.id}"
-            locked.full_name = "Deleted User"
-            locked.password_hash = _DELETED_PASSWORD
-            locked.pin_hash = None
-            locked.date_of_birth = None
-            locked.gender = None
-            locked.address = None
-            locked.avatar_url = None
-            # referral_code is NOT NULL + unique (VARCHAR(8)) and is exposed
-            # via the public referral share URL / queryable by exact match,
-            # so leaving the real value is a residual identity linkage.
-            # Derived from locked.id (not the random generate_referral_code
-            # path, which could collide with a live user's code) so the
-            # placeholder is deterministic and fits the column's uniqueness
-            # guarantee without touching the DB to check for collisions.
-            locked.referral_code = f"d{locked.id.hex[:7]}"
-            locked.anonymized_at = datetime.now(UTC)
-            db.commit()
-            count += 1
+            # Re-check the deletion state under the lock. The batch snapshot
+            # above can go stale if cancel_deletion() committed in between
+            # (deleted_at -> None) -- trust the freshly locked row, not the
+            # pre-lock query result.
+            deleted_at = locked.deleted_at
+            if deleted_at is not None and deleted_at.tzinfo is None:
+                deleted_at = deleted_at.replace(tzinfo=UTC)
+            if deleted_at is None or deleted_at > cutoff:
+                continue
+            try:
+                # Money can still land via the still-live DVA during the
+                # grace window -- the funding webhook's wallet_service.credit
+                # does not check account state -- so the request-time
+                # zero-balance guard in request_deletion isn't sufficient
+                # here. Re-check under lock and skip rather than orphan
+                # funds under a scrubbed, unrecoverable identity.
+                wallet = (
+                    db.query(Wallet)
+                    .filter(Wallet.user_id == locked.id)
+                    .with_for_update()
+                    .first()
+                )
+                if wallet is not None and wallet.balance > 0:
+                    log.warning(
+                        "anonymize: skipped user=%s with non-zero balance=%s",
+                        locked.id, wallet.balance,
+                    )
+                    continue
+                # Delete PII child rows.
+                db.query(PushToken).filter(PushToken.user_id == locked.id).delete()
+                db.query(OtpCode).filter(OtpCode.user_id == locked.id).delete()
+                db.query(KycRecord).filter(KycRecord.user_id == locked.id).delete()
+                # Detach the DVA from Paystack identity but keep the row. The
+                # column is NOT NULL (see VirtualAccount.paystack_customer_code),
+                # so we set a non-functional placeholder rather than nulling it.
+                for va in db.query(VirtualAccount).filter(
+                    VirtualAccount.user_id == locked.id
+                ):
+                    va.paystack_customer_code = f"deleted-{locked.id}"
+                # Scrub the user row (keep id + retained-ledger FKs).
+                locked.email = f"deleted-{locked.id}@deleted.invalid"
+                locked.phone = f"deleted:{locked.id}"
+                locked.full_name = "Deleted User"
+                locked.password_hash = _DELETED_PASSWORD
+                locked.pin_hash = None
+                locked.date_of_birth = None
+                locked.gender = None
+                locked.address = None
+                locked.avatar_url = None
+                # referral_code is NOT NULL + unique (VARCHAR(8)) and is exposed
+                # via the public referral share URL / queryable by exact match,
+                # so leaving the real value is a residual identity linkage.
+                # Derived from locked.id (not the random generate_referral_code
+                # path, which could collide with a live user's code) so the
+                # placeholder is deterministic and fits the column's uniqueness
+                # guarantee without touching the DB to check for collisions.
+                locked.referral_code = f"d{locked.id.hex[:7]}"
+                locked.anonymized_at = datetime.now(UTC)
+                db.commit()
+                count += 1
+            except Exception as exc:
+                # Never let one bad row (e.g. a rare referral_code placeholder
+                # unique-collision) abort the whole batch. Discard partial
+                # state; the next tick retries this user.
+                db.rollback()
+                log.warning(
+                    "anonymize: skipped user=%s due to error: %s", locked.id, exc,
+                )
+                continue
         return {"anonymized": count}
     finally:
         db.close()

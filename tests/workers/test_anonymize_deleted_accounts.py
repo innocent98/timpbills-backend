@@ -71,3 +71,67 @@ def test_rerun_is_noop(db_session):
     _run(db_session)
     db_session.expire_all()
     assert db_session.query(User).filter(User.id == u.id).one().anonymized_at == first
+
+
+def test_nonzero_balance_is_skipped_not_anonymized(db_session):
+    # Money can land via the still-live DVA during the grace window (the
+    # funding webhook doesn't check account state). Scrubbing this user
+    # would orphan the funds under a dead identity — the sweep must skip.
+    u = _deleted_user(db_session, days_ago=31, email="rich@y.co",
+                       phone="+2348100000034", referral_code="REFCODE2")
+    wallet = db_session.query(Wallet).filter(Wallet.user_id == u.id).one()
+    wallet.balance = Decimal("500.00")
+    db_session.commit()
+
+    result = _run(db_session)
+
+    db_session.expire_all()
+    fresh = db_session.query(User).filter(User.id == u.id).one()
+    assert fresh.anonymized_at is None
+    assert fresh.email == "rich@y.co"
+    assert fresh.full_name == "Real Name"
+    assert fresh.referral_code == "REFCODE2"
+    # Wallet + its balance kept exactly as-is.
+    fresh_wallet = db_session.query(Wallet).filter(Wallet.user_id == u.id).one()
+    assert fresh_wallet.balance == Decimal("500.00")
+    assert result["anonymized"] == 0
+
+
+def test_cancelled_deletion_between_select_and_lock_is_not_scrubbed(db_session):
+    # Simulates the cancel_deletion-vs-sweep race: the row IS in the
+    # initial batch selection (deleted_at <= cutoff), but by the time the
+    # per-row FOR UPDATE lock is taken, deleted_at has been cleared by a
+    # concurrent cancel_deletion() commit. The per-row re-check must
+    # honour the fresh, locked state rather than the stale batch snapshot.
+    u = _deleted_user(db_session, days_ago=31, email="cancelled@y.co",
+                       phone="+2348100000035")
+
+    orig_query = db_session.query
+    call_count = {"n": 0}
+
+    def _query_with_race(*args, **kwargs):
+        if args and args[0] is User:
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                # This is the per-row lock query for u. Simulate
+                # cancel_deletion() having committed in between.
+                db_session.execute(
+                    User.__table__.update()
+                    .where(User.id == u.id)
+                    .values(deleted_at=None, is_active=True)
+                )
+                db_session.commit()
+        return orig_query(*args, **kwargs)
+
+    db_session.query = _query_with_race
+    try:
+        result = _run(db_session)
+    finally:
+        db_session.query = orig_query
+
+    db_session.expire_all()
+    fresh = db_session.query(User).filter(User.id == u.id).one()
+    assert fresh.anonymized_at is None
+    assert fresh.email == "cancelled@y.co"
+    assert fresh.is_active is True
+    assert result["anonymized"] == 0
