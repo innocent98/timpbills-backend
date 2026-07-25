@@ -25,7 +25,11 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     ALGORITHM: str = "HS256"
 
-    # CORS
+    # CORS origins for frontend + public deletion page.
+    # In development, localhost suffices. In staging/production, the env var
+    # must include the marketing site origins (e.g. https://timpbills.com,
+    # https://staging.timpbills.com) so the public /delete-account page can
+    # call the API cross-origin. See .env.staging / .env.production.
     BACKEND_CORS_ORIGINS: list[str] = [
         "http://localhost:3000",
         "http://localhost:8000",
