@@ -53,6 +53,19 @@ from app.workers.tasks.notification_tasks import dispatch_delay
 # Local alias to keep the existing call sites tidy without a big rename.
 _REFUNDABLE_ON_FAILURE = REFUNDABLE_ON_FAILURE
 
+# Paystack DVA identity/assign lifecycle events carry NO top-level ``data.id``
+# — they are keyed only by ``customer`` / ``dedicated_account``. The generic
+# ``data.id``-mandatory guard was written for charge events; without special
+# handling it rejects these with 400, so the assigned account number never
+# lands and the VA hangs in ``pending_assign`` forever. See the id synthesis
+# in ``paystack_webhook`` below.
+_DVA_LIFECYCLE_EVENTS = {
+    "customeridentification.success",
+    "customeridentification.failed",
+    "dedicatedaccount.assign.success",
+    "dedicatedaccount.assign.failed",
+}
+
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -88,8 +101,22 @@ async def paystack_webhook(
 
     payload = json.loads(raw_body or b"{}")
     event_type = payload.get("event", "")
-    event_id = str(payload.get("data", {}).get("id", ""))
-    reference = payload.get("data", {}).get("reference")
+    data = payload.get("data", {}) or {}
+    event_id = str(data.get("id", "")).strip()
+    reference = data.get("reference")
+
+    # DVA lifecycle events have no ``data.id`` (see _DVA_LIFECYCLE_EVENTS).
+    # Synthesize a stable dedupe key from the natural identifiers so a Paystack
+    # retry still collides at the WebhookEvent unique constraint, and — crucially
+    # — so the event is NOT rejected by the id-mandatory guard below.
+    if not event_id and event_type in _DVA_LIFECYCLE_EVENTS:
+        cc = (
+            data.get("customer_code")
+            or (data.get("customer") or {}).get("customer_code")
+            or ""
+        )
+        da_id = str((data.get("dedicated_account") or {}).get("id") or "")
+        event_id = f"{event_type}:{cc}:{da_id}"
 
     if not event_id:
         raise HTTPException(status_code=400, detail={
@@ -116,17 +143,10 @@ async def paystack_webhook(
         db.rollback()
         return success({"ok": True, "deduped": True})
 
-    data = payload.get("data", {})
-
     # ── DVA identity + assign lifecycle (resolved by customer_code) ──────
     # These events carry no reference we minted, so they are handled BEFORE
     # the reference-mandatory MALFORMED check below.
-    if event_type in (
-        "customeridentification.success",
-        "customeridentification.failed",
-        "dedicatedaccount.assign.success",
-        "dedicatedaccount.assign.failed",
-    ):
+    if event_type in _DVA_LIFECYCLE_EVENTS:
         customer_code = (
             data.get("customer_code")
             or (data.get("customer") or {}).get("customer_code")

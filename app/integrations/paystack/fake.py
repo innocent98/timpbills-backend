@@ -24,6 +24,8 @@ class FakePaystackClient:
     assigned: list[tuple[str, str, str, str]] = field(default_factory=list)
     _assign_raises: bool = False
     _assign_rejects: str | None = None
+    # customer_code -> DedicatedAccountDetails, for the recovery-reconcile path.
+    _customer_dva: dict = field(default_factory=dict)
 
     # Test hooks
     def will_succeed(self, reference: str) -> None:
@@ -121,6 +123,25 @@ class FakePaystackClient:
     ) -> AssignDedicatedAccountResponse:
         return AssignDedicatedAccountResponse(status=True, message="requery queued")
 
+    def will_have_dedicated_account(
+        self, *, customer_code: str, account_number: str = "9988776655",
+        account_name: str = "ADA OBI", bank_name: str = "Test Bank",
+        bank_slug: str = "test-bank", dedicated_account_id: str = "dva_recovered",
+    ) -> None:
+        """Test hook: make fetch_customer_dedicated_account(customer_code)
+        return an assigned account (simulates a DVA that Paystack assigned
+        but whose webhook we missed)."""
+        self._customer_dva[customer_code] = DedicatedAccountDetails(
+            account_number=account_number, account_name=account_name,
+            bank_name=bank_name, bank_slug=bank_slug,
+            dedicated_account_id=dedicated_account_id, status="active",
+        )
+
+    async def fetch_customer_dedicated_account(
+        self, *, customer_code: str
+    ) -> DedicatedAccountDetails | None:
+        return self._customer_dva.get(customer_code)
+
     async def list_dva_providers(self) -> list[DvaProvider]:
         return [DvaProvider(provider_slug="test-bank", bank_name="Test Bank")]
 
@@ -132,12 +153,19 @@ class FakePaystackClient:
         ]
 
 
+# NOTE: real Paystack DVA lifecycle events (customeridentification.*,
+# dedicatedaccount.assign.*) carry NO top-level ``data.id`` — only nested
+# ``data.customer.*`` / ``data.dedicated_account.id``. An earlier version of
+# these fakes fabricated a ``data.id``, which masked a production bug where the
+# webhook endpoint rejected id-less DVA events with 400. Keep these faithful:
+# do NOT reintroduce a top-level ``data.id`` here. The ``event_id`` arg maps to
+# the (real) ``dedicated_account.id`` for assign events.
 def customer_identification_event(
     *, customer_code: str, success: bool = True, reason: str | None = None,
-    event_id: str = "evt_ci",
+    event_id: str = "evt_ci",  # noqa: ARG001 — kept for call-site compat; no data.id in real events
 ) -> dict:
     event = "customeridentification.success" if success else "customeridentification.failed"
-    data = {"id": event_id, "customer_code": customer_code, "email": "ada@x.co"}
+    data = {"customer_code": customer_code, "email": "ada@x.co"}
     if not success:
         data["reason"] = reason or "Account resolution failed"
     return {"event": event, "data": data}
@@ -146,13 +174,13 @@ def customer_identification_event(
 def dedicated_account_assign_event(
     *, customer_code: str, success: bool = True, account_number: str | None = None,
     account_name: str | None = None, bank_name: str | None = None,
-    bank_slug: str | None = None, reason: str | None = None, event_id: str = "evt_da",
+    bank_slug: str | None = None, reason: str | None = None, event_id: str = "dva_1",
 ) -> dict:
     event = "dedicatedaccount.assign.success" if success else "dedicatedaccount.assign.failed"
-    data: dict = {"id": event_id, "customer": {"customer_code": customer_code}}
+    data: dict = {"customer": {"customer_code": customer_code}}
     if success:
         data["dedicated_account"] = {
-            "id": "dva_1",
+            "id": event_id,
             "account_number": account_number,
             "account_name": account_name,
             "bank": {"name": bank_name, "slug": bank_slug},

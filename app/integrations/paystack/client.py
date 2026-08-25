@@ -255,6 +255,44 @@ class PaystackClient:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
     )
+    async def fetch_customer_dedicated_account(
+        self, *, customer_code: str
+    ) -> DedicatedAccountDetails | None:
+        """Return the DVA assigned to a customer, resolved by customer_code.
+
+        Recovery path when the assign webhook was missed/rejected: we hold the
+        customer_code but not the account number. Paystack's customer resource
+        embeds the assigned dedicated account. Returns None when the customer
+        has no account_number yet (assignment still in flight)."""
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                f"{self._base}/customer/{customer_code}",
+                headers=self._headers,
+            )
+            r.raise_for_status()
+        d = r.json().get("data") or {}
+        accounts = d.get("dedicated_account") or d.get("dedicated_accounts")
+        acct = accounts[0] if isinstance(accounts, list) and accounts else (
+            accounts if isinstance(accounts, dict) else None
+        )
+        if not acct or not acct.get("account_number"):
+            return None
+        bank = acct.get("bank") or {}
+        return DedicatedAccountDetails(
+            account_number=acct.get("account_number"),
+            account_name=acct.get("account_name"),
+            bank_name=bank.get("name"),
+            bank_slug=bank.get("slug"),
+            dedicated_account_id=str(acct.get("id") or "") or None,
+            status=("active" if acct.get("active", True) else None),
+        )
+
+    @retry(
+        reraise=True,
+        retry=retry_if_exception(_is_retryable_paystack_error),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+    )
     async def list_dva_providers(self) -> list[DvaProvider]:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(
