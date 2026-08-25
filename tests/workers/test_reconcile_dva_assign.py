@@ -115,20 +115,43 @@ def test_pending_identity_also_recovered(db_session):
 
 
 def test_no_account_assigned_yet_left_pending(db_session):
-    """Assignment genuinely still in flight (Paystack returns no account) -> the
-    VA is left pending for a later tick, not force-failed."""
+    """Assignment still in flight (Paystack returns no account) and within the
+    give-up window -> the VA is left pending for a later tick, not force-failed."""
     user = _seed_user(db_session)
-    va = _seed_va(db_session, user, customer_code="CUS_inflight_1")
+    # 10 min old: past the 180s recovery grace, but well within the 30-min
+    # give-up window.
+    va = _seed_va(db_session, user, customer_code="CUS_inflight_1", age=timedelta(minutes=10))
     fake = FakePaystackClient()  # no will_have_dedicated_account -> returns None
 
     result, disp = _run_sweep(db_session, fake)
 
     assert result["recovered"] == 0
     assert result["skipped"] == 1
+    assert result["failed"] == 0
     db_session.expire_all()
     row = db_session.query(VirtualAccount).filter(VirtualAccount.id == va.id).one()
     assert row.status == VirtualAccountStatus.pending_assign
     assert not disp.called
+
+
+def test_stuck_past_giveup_window_marked_failed(db_session):
+    """A VA stuck pending with NO assignable account past the give-up window
+    (e.g. the DVA was deleted on the Paystack dashboard) is failed so the user
+    can re-provision — a pending_* row would otherwise wedge provision() forever."""
+    user = _seed_user(db_session)
+    # 40 min old: past the 30-min give-up window.
+    va = _seed_va(db_session, user, customer_code="CUS_gone_1", age=timedelta(minutes=40))
+    fake = FakePaystackClient()  # returns None -> nothing to recover
+
+    result, disp = _run_sweep(db_session, fake)
+
+    assert result["failed"] == 1
+    assert result["recovered"] == 0
+    db_session.expire_all()
+    row = db_session.query(VirtualAccount).filter(VirtualAccount.id == va.id).one()
+    assert row.status == VirtualAccountStatus.failed
+    assert row.failure_reason
+    assert disp.called  # user notified their setup failed
 
 
 def test_fresh_va_inside_grace_window_ignored(db_session):
