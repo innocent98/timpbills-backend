@@ -53,6 +53,14 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.tasks.reconcile_tasks.reconcile_dva_funding",
         "schedule": crontab(minute="*/2"),
     },
+    # Recover DVA *provisioning* stuck when the customeridentification /
+    # dedicatedaccount.assign webhooks are missed or rejected: asks Paystack by
+    # customer_code whether an account was assigned and backfills it, so the VA
+    # never hangs in pending_assign forever. Idempotent vs the live webhook.
+    "reconcile-dva-assign-every-2min": {
+        "task": "app.workers.tasks.reconcile_tasks.reconcile_pending_dva_assign",
+        "schedule": crontab(minute="*/2"),
+    },
     # Sprint 5b — nightly referral sweep: re-evaluates pending /
     # referee_cap_pending / clawback_pending rows. Cadence is daily
     # because each bucket is naturally a "tomorrow" problem (daily-cap

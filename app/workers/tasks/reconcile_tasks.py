@@ -21,9 +21,15 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.logger import log
-from app.db.models._enums import TransactionStatus, TransactionType
+from app.db.models._enums import (
+    TransactionStatus,
+    TransactionType,
+    VirtualAccountStatus,
+)
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.transaction import Transaction
+from app.db.models.user import User
+from app.db.models.virtual_account import VirtualAccount
 from app.db.session import SessionLocal
 from app.integrations.paystack.factory import select_paystack_client
 from app.integrations.vtpass.base import (
@@ -32,6 +38,10 @@ from app.integrations.vtpass.base import (
 )
 from app.integrations.vtpass.factory import select_vtpass_client
 from app.services.bill_service import REFUNDABLE_ON_FAILURE, BillService
+from app.services.notification_service import (
+    NotificationEvent,
+    build_dva_context,
+)
 from app.services.transaction_service import TransactionService
 from app.services.wallet_service import (
     InsufficientBalance,
@@ -40,6 +50,7 @@ from app.services.wallet_service import (
     WalletService,
 )
 from app.workers.celery_app import celery_app
+from app.workers.tasks.notification_tasks import dispatch_delay
 
 # Tx states that are already final — the webhook handler beat us to it,
 # or ops manually resolved. Skip them rather than InvalidStateTransition.
@@ -503,6 +514,134 @@ def reconcile_dva_funding() -> dict:
             recovered += 1
 
         db.commit()
+        return {"checked": len(stuck), "recovered": recovered, "skipped": skipped}
+    finally:
+        db.close()
+
+
+# ─── DVA assignment reconciliation (recover stuck provisioning) ───────────
+#
+# Provisioning a DVA is async: POST /wallet/virtual-account creates the
+# customer and requests an account; Paystack later assigns it and notifies via
+# the customeridentification.* / dedicatedaccount.assign.* webhooks. If those
+# are missed or (as in the prod incident) rejected, the account number never
+# lands and the VA hangs in pending_identity/pending_assign forever — the UI
+# polls GET /wallet/virtual-account indefinitely with no self-healing.
+#
+# This sweep is that self-healing: for every VA stuck pending past the grace
+# window it asks Paystack directly (by customer_code) whether an account was
+# assigned, and backfills it. Idempotent against the live webhook via a row
+# lock — if the webhook already activated the VA, we skip.
+
+# A freshly-provisioned VA is legitimately pending for a short while as Paystack
+# assigns the account; only sweep ones older than this so we don't fight the
+# live webhook path.
+_DVA_ASSIGN_RECONCILE_GRACE_SECONDS = 180
+
+
+@celery_app.task(
+    name="app.workers.tasks.reconcile_tasks.reconcile_pending_dva_assign"
+)
+def reconcile_pending_dva_assign() -> dict:
+    return asyncio.run(_reconcile_dva_assign())
+
+
+async def _reconcile_dva_assign() -> dict:
+    """Backfill DVAs whose assignment webhook was missed/rejected.
+
+    Finds VirtualAccounts stuck pending_identity/pending_assign past the grace
+    window, asks Paystack for the customer's assigned account, and activates the
+    row when one exists. Awaits the provider, so — like the payment/bill
+    reconcilers — it runs under asyncio.run via the celery wrapper above."""
+    db = SessionLocal()
+    try:
+        client = select_paystack_client()
+        cutoff = datetime.now(UTC) - timedelta(
+            seconds=_DVA_ASSIGN_RECONCILE_GRACE_SECONDS
+        )
+        stuck = (
+            db.query(VirtualAccount)
+            .filter(
+                VirtualAccount.status.in_(
+                    [
+                        VirtualAccountStatus.pending_identity,
+                        VirtualAccountStatus.pending_assign,
+                    ]
+                ),
+                VirtualAccount.created_at < cutoff,
+            )
+            .limit(50)
+            .all()
+        )
+        if not stuck:
+            return {"checked": 0, "recovered": 0, "skipped": 0}
+
+        recovered = 0
+        skipped = 0
+        for va in stuck:
+            try:
+                details = await client.fetch_customer_dedicated_account(
+                    customer_code=va.paystack_customer_code
+                )
+            except Exception as exc:
+                # Provider hiccup on one row must not kill the batch; the next
+                # tick retries.
+                log.warning(
+                    "reconcile_dva_assign: fetch failed customer=%s err=%s",
+                    va.paystack_customer_code, exc,
+                )
+                skipped += 1
+                continue
+
+            if details is None or not details.account_number:
+                # Assignment genuinely still in flight — leave pending.
+                skipped += 1
+                continue
+
+            # Re-lock: the live assign webhook may have activated this row
+            # between the query and now. If so, skip rather than double-write.
+            locked = (
+                db.query(VirtualAccount)
+                .filter(VirtualAccount.id == va.id)
+                .with_for_update()
+                .one()
+            )
+            if locked.status == VirtualAccountStatus.active:
+                skipped += 1
+                continue
+
+            locked.account_number = details.account_number
+            locked.account_name = details.account_name
+            locked.bank_name = details.bank_name
+            locked.bank_slug = details.bank_slug
+            locked.dedicated_account_id = details.dedicated_account_id
+            locked.status = VirtualAccountStatus.active
+            locked.failure_reason = None
+            try:
+                db.commit()
+            except Exception as exc:
+                # e.g. account_number unique collision — discard and move on.
+                db.rollback()
+                log.warning(
+                    "reconcile_dva_assign: backfill commit failed customer=%s err=%s",
+                    va.paystack_customer_code, exc,
+                )
+                skipped += 1
+                continue
+
+            recovered += 1
+            user = db.query(User).filter(User.id == locked.user_id).first()
+            if user is not None:
+                dispatch_delay(
+                    user_id=str(locked.user_id),
+                    user_email=user.email,
+                    event=NotificationEvent.dva_ready,
+                    context=build_dva_context(
+                        status="active",
+                        account_number=locked.account_number,
+                        bank_name=locked.bank_name,
+                    ),
+                )
         return {"checked": len(stuck), "recovered": recovered, "skipped": skipped}
     finally:
         db.close()
