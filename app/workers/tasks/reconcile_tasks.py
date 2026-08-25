@@ -538,6 +538,14 @@ def reconcile_dva_funding() -> dict:
 # live webhook path.
 _DVA_ASSIGN_RECONCILE_GRACE_SECONDS = 180
 
+# Give-up window: a VA still pending this long with NO account assignable from
+# Paystack is treated as unrecoverable and marked `failed`, so the user can
+# re-provision (provision() is idempotent on pending_* and would otherwise wedge
+# the row forever). Set well beyond real assignment latency (seconds–minutes) so
+# a legitimately slow assignment is never failed prematurely; a late assign
+# webhook can still re-activate a failed row.
+_DVA_ASSIGN_GIVEUP_SECONDS = 1800  # 30 minutes
+
 
 @celery_app.task(
     name="app.workers.tasks.reconcile_tasks.reconcile_pending_dva_assign"
@@ -574,10 +582,14 @@ async def _reconcile_dva_assign() -> dict:
             .all()
         )
         if not stuck:
-            return {"checked": 0, "recovered": 0, "skipped": 0}
+            return {"checked": 0, "recovered": 0, "skipped": 0, "failed": 0}
 
+        giveup_cutoff = datetime.now(UTC) - timedelta(
+            seconds=_DVA_ASSIGN_GIVEUP_SECONDS
+        )
         recovered = 0
         skipped = 0
+        failed = 0
         for va in stuck:
             try:
                 details = await client.fetch_customer_dedicated_account(
@@ -594,8 +606,45 @@ async def _reconcile_dva_assign() -> dict:
                 continue
 
             if details is None or not details.account_number:
-                # Assignment genuinely still in flight — leave pending.
-                skipped += 1
+                # No account assignable from Paystack. Either assignment is
+                # still in flight (leave pending), or it's been stuck so long
+                # it's unrecoverable — e.g. the account was deleted on the
+                # Paystack dashboard — in which case fail it so the user can
+                # re-provision (a pending_* row wedges provision() forever).
+                created = va.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
+                if created >= giveup_cutoff:
+                    skipped += 1
+                    continue
+                locked = (
+                    db.query(VirtualAccount)
+                    .filter(VirtualAccount.id == va.id)
+                    .with_for_update()
+                    .one()
+                )
+                if locked.status not in (
+                    VirtualAccountStatus.pending_identity,
+                    VirtualAccountStatus.pending_assign,
+                ):
+                    skipped += 1
+                    continue
+                locked.status = VirtualAccountStatus.failed
+                locked.failure_reason = (
+                    "Account setup did not complete. Please try again."
+                )
+                db.commit()
+                failed += 1
+                user = db.query(User).filter(User.id == locked.user_id).first()
+                if user is not None:
+                    dispatch_delay(
+                        user_id=str(locked.user_id),
+                        user_email=user.email,
+                        event=NotificationEvent.dva_failed,
+                        context=build_dva_context(
+                            status="failed", reason=locked.failure_reason
+                        ),
+                    )
                 continue
 
             # Re-lock: the live assign webhook may have activated this row
@@ -642,6 +691,11 @@ async def _reconcile_dva_assign() -> dict:
                         bank_name=locked.bank_name,
                     ),
                 )
-        return {"checked": len(stuck), "recovered": recovered, "skipped": skipped}
+        return {
+            "checked": len(stuck),
+            "recovered": recovered,
+            "skipped": skipped,
+            "failed": failed,
+        }
     finally:
         db.close()
