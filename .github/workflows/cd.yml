@@ -422,7 +422,11 @@ jobs:
 
             if [ -f scripts/backup_cron.sh ]; then
               chmod +x scripts/backup_cron.sh
-              (crontab -l 2>/dev/null | grep -v "backup_cron.sh"; echo "0 2 * * * ${{ secrets.DEPLOY_PATH }}/scripts/backup_cron.sh >> ${{ secrets.DEPLOY_PATH }}/backups/backup.log 2>&1") | crontab -
+              # `|| true` tolerates `crontab -l` exiting 1 on a fresh VPS
+              # with no existing crontab — without it, set -o pipefail
+              # propagates the 1 and fails the whole deploy after the
+              # stack has already come up healthy.
+              (crontab -l 2>/dev/null | grep -v "backup_cron.sh" || true; echo "0 2 * * * ${{ secrets.DEPLOY_PATH }}/scripts/backup_cron.sh >> ${{ secrets.DEPLOY_PATH }}/backups/backup.log 2>&1") | crontab -
               echo "Backup cron installed: daily at 2 AM"
             fi
 
