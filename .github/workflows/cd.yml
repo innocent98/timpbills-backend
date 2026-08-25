@@ -120,21 +120,27 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          envs: IMAGE_TAG
+          envs: IMAGE_TAG,GHCR_TOKEN,GHCR_ACTOR
           script: |
             set -euo pipefail
             mkdir -p "${{ secrets.DEPLOY_PATH }}"
             cd "${{ secrets.DEPLOY_PATH }}"
 
-            # GHCR pull requires `docker login ghcr.io` already configured on
-            # the VPS with a PAT scoped to read:packages — see
-            # docs/deployment/GITHUB_ACTIONS_SETUP.md.
+            # Authenticate the VPS Docker daemon to GHCR for this deploy using
+            # the run's ephemeral GITHUB_TOKEN (auto-rotating, repo-scoped).
+            # This removes the dependency on a manually pre-configured PAT in
+            # the host's ~/.docker/config.json, which silently expires and
+            # breaks the pull with `error from registry: denied`.
+            echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_ACTOR}" --password-stdin
+
             export API_IMAGE="ghcr.io/${{ github.repository }}:${IMAGE_TAG}"
             export COMPOSE_PROJECT_NAME=timpbills-staging
             docker compose -f docker-compose.prod.yml pull
@@ -359,17 +365,26 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           passphrase: ${{ secrets.VPS_SSH_PASSPHRASE }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          envs: IMAGE_TAG
+          envs: IMAGE_TAG,GHCR_TOKEN,GHCR_ACTOR
           script: |
             set -euo pipefail
             mkdir -p "${{ secrets.DEPLOY_PATH }}"
             cd "${{ secrets.DEPLOY_PATH }}"
+
+            # Authenticate the VPS Docker daemon to GHCR for this deploy using
+            # the run's ephemeral GITHUB_TOKEN (auto-rotating, repo-scoped).
+            # This removes the dependency on a manually pre-configured PAT in
+            # the host's ~/.docker/config.json, which silently expires and
+            # breaks the pull with `error from registry: denied`.
+            echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_ACTOR}" --password-stdin
 
             # Record previous tag for rollback before swapping.
             if [ -f .image_tag ]; then
