@@ -1,0 +1,13 @@
+{% extends "_layout.html" %}
+{% block body %}
+  <h2 style="color: #0F172A; font-size: 24px; font-weight: 700; margin: 0 0 12px;">Account deletion requested</h2>
+  <p style="color: #475569; font-size: 15px; line-height: 1.6; margin: 0 0 24px;">
+    We received a request to delete your Timpbills account. Your account is now scheduled for permanent deletion on <strong>{{ scheduled_date }}</strong>.
+  </p>
+  <p style="color: #475569; font-size: 15px; line-height: 1.6; margin: 0 0 24px;">
+    If you did not make this request, go to <a href="{{ cancel_url }}" style="color: #4F46E5;">{{ cancel_url }}</a> and choose "Cancel a pending deletion" before that date to keep your account.
+  </p>
+  <p style="color: #64748B; font-size: 13px; line-height: 1.6; margin: 0;">
+    Need help? Reply to this email.
+  </p>
+{% endblock %}

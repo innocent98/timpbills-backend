@@ -21,6 +21,7 @@ from app.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
+    PhoneResendRequest,
     PhoneVerifyRequest,
     PinLoginRequest,
     PinLoginResponse,
@@ -203,6 +204,28 @@ async def verify_phone_otp_signup(
         res.model_dump(),
         request_id=getattr(request.state, "request_id", None),
     )
+
+
+@router.post("/phone/resend")
+@limiter.limit("3/minute")
+async def resend_phone_otp_signup(
+    request: Request,
+    req: PhoneResendRequest,
+    svc: AuthService = Depends(get_auth_service),
+):
+    """Signup phone-OTP resend (no auth required).
+
+    Distinct from the authenticated /phone/send-otp below (in-session Tier 1
+    upgrade for an already-logged-in user). Mobile calls this before any
+    tokens exist, so there is no bearer requirement. Returns
+    ``{"phone_otp_sent": bool}`` — False when the cooldown / daily-cap helper
+    blocked the send.
+    """
+    try:
+        res = await svc.resend_phone_otp_unauthed(phone=req.phone)
+    except ValueError as e:
+        _raise(str(e))
+    return success(res, request_id=getattr(request.state, "request_id", None))
 
 
 # ---------------------------------------------------------------------------

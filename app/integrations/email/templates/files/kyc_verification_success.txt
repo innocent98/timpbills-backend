@@ -1,0 +1,7 @@
+You're verified
+
+Your {{ verification_type_label }} verification succeeded. You're now Tier {{ tier }}. Your wallet limit is now {{ wallet_cap_label }}.
+
+Need help? Reply to this email.
+
+Timpbills

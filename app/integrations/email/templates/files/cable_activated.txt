@@ -12,4 +12,4 @@ When: {{ when }}
 Activation usually appears on your decoder within a few minutes.
 Need help? Reply to this email.
 
-— Timpbills
+Timpbills

@@ -235,12 +235,12 @@ async def test_full_new_user_journey(client, db_session):
     assert r.json()["data"]["email"] == email
     assert r.json()["data"]["phone"] == phone
 
-    # B8: register now sends BOTH email and phone OTPs.
+    # Register now sends ONLY the email OTP — the phone OTP is deferred to
+    # the email-verify step (the phone gate becomes active there).
     assert len(_e2e_email_client.sent) == 1
     email_code = _e2e_email_client.sent[-1].code_or_body
     assert len(email_code) == 6 and email_code.isdigit()
-    assert len(_e2e_sms_client.sent) == 1
-    register_sms_count = 1
+    assert len(_e2e_sms_client.sent) == 0
 
     # DB: user exists, not verified yet
     user = db_session.query(User).filter(User.email == email).first()
@@ -265,6 +265,9 @@ async def test_full_new_user_journey(client, db_session):
     assert data2["next_action"] == "phone_verification_required"
     assert data2.get("tokens") is None
     assert data2.get("pin_setup_token") is None
+    # The phone OTP is dispatched lazily at THIS step (phone gate active).
+    assert data2["phone_otp_sent"] is True
+    assert len(_e2e_sms_client.sent) == 1
 
     # DB: email now verified
     db_session.refresh(user)
@@ -278,9 +281,6 @@ async def test_full_new_user_journey(client, db_session):
     assert user.is_phone_verified is False
     assert user.pin_hash is None
     assert user.kyc_level == KycLevel.tier_0
-    # Quiet linter — register_sms_count is part of the original step-5
-    # block that will be reintroduced after B10/B11.
-    _ = register_sms_count
 
 
 # ===========================================================================
@@ -563,29 +563,27 @@ async def test_phone_verify_without_auth_returns_401(client):
 
 @pytest.mark.asyncio
 async def test_phone_verify_already_verified(client):
-    """Calling send-otp when phone is already verified returns 409 PHONE_ALREADY_VERIFIED."""
+    """Calling send-otp when phone is already verified returns 409 PHONE_ALREADY_VERIFIED.
+
+    ``_seed_logged_in_user`` stamps the migration state (phone already
+    verified + PIN set), so the user lands fully verified. Asking for a
+    phone OTP on an already-verified phone must 409 — and must NOT
+    dispatch an SMS. (Previously this test leaned on register having sent
+    a phone OTP; register no longer does, so we assert the 409 directly.)
+    """
     email = "alreadyver@test.co"
     phone = "+2348011111107"
 
-    # Seed: register → email verify → set pin → verify phone
+    # Seed: register → email verify (migration branch) → fully verified.
     tokens, auth = await _seed_logged_in_user(client, email=email, phone=phone)
 
-    # Send and verify phone OTP
-    await client.post("/api/v1/auth/phone/send-otp", headers=auth)
-    sms_code = _e2e_sms_client.sent[-1].code_or_message
-    r_pv = await client.post(
-        "/api/v1/auth/phone/verify-otp", json={"code": sms_code}, headers=auth
-    )
-    assert r_pv.status_code == 200, r_pv.text
+    sms_before = len(_e2e_sms_client.sent)
 
-    # Update auth to use the new access token returned from phone verify
-    new_access = r_pv.json()["data"]["tokens"]["access_token"]
-    auth2 = {"Authorization": f"Bearer {new_access}"}
-
-    # Try to send phone OTP again → PHONE_ALREADY_VERIFIED
-    r_again = await client.post("/api/v1/auth/phone/send-otp", headers=auth2)
+    # Phone already verified → send-otp 409s and dispatches no SMS.
+    r_again = await client.post("/api/v1/auth/phone/send-otp", headers=auth)
     assert r_again.status_code == 409, r_again.text
     assert r_again.json()["error"]["code"] == "PHONE_ALREADY_VERIFIED"
+    assert len(_e2e_sms_client.sent) == sms_before
 
 
 # ===========================================================================

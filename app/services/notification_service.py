@@ -71,6 +71,19 @@ class NotificationEvent(str, Enum):
     referrer_signup_notified        = "referrer_signup_notified"
     referral_credited               = "referral_credited"
     welcome_bonus                   = "welcome_bonus"
+    kyc_verification_success        = "kyc_verification_success"
+    kyc_verification_failed         = "kyc_verification_failed"
+    # Dedicated Virtual Account (Paystack) provisioning outcomes. Push +
+    # in-app only — no email template — per spec §9; SMS stays reserved
+    # for KYC-1 per project convention.
+    dva_ready                       = "dva_ready"
+    dva_failed                      = "dva_failed"
+    # Public account-deletion request confirmation. Email is the primary
+    # channel (the person may have uninstalled the app, which is why they
+    # used the web page); push is best-effort. SMS stays reserved per
+    # project convention. Copy states the scheduled deletion date and the
+    # single cancel path (return to the deletion page).
+    account_deletion_requested      = "account_deletion_requested"
 
 
 # ─── Notification categories (Sprint 5c · Task 5.2) ─────────────────────────
@@ -107,6 +120,11 @@ EVENT_CATEGORY: dict[NotificationEvent, NotificationCategory] = {
     NotificationEvent.referrer_signup_notified:    NotificationCategory.referral_updates,
     NotificationEvent.referral_credited:           NotificationCategory.referral_updates,
     NotificationEvent.welcome_bonus:               NotificationCategory.referral_updates,
+    NotificationEvent.kyc_verification_success:    NotificationCategory.transaction_alerts,
+    NotificationEvent.kyc_verification_failed:     NotificationCategory.transaction_alerts,
+    NotificationEvent.dva_ready:                   NotificationCategory.transaction_alerts,
+    NotificationEvent.dva_failed:                  NotificationCategory.transaction_alerts,
+    NotificationEvent.account_deletion_requested:  NotificationCategory.transaction_alerts,
 }
 
 
@@ -198,6 +216,11 @@ _EMAIL_TEMPLATES: dict[NotificationEvent, str | None] = {
     NotificationEvent.referrer_signup_notified:    None,
     NotificationEvent.referral_credited:           None,
     NotificationEvent.welcome_bonus:               None,
+    NotificationEvent.kyc_verification_success:    "kyc_verification_success",
+    NotificationEvent.kyc_verification_failed:     "kyc_verification_failed",
+    NotificationEvent.dva_ready:                   None,
+    NotificationEvent.dva_failed:                  None,
+    NotificationEvent.account_deletion_requested:  "account_deletion_requested",
 }
 
 
@@ -249,6 +272,16 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
             title=f"{ctx.get('provider_label', 'Cable')} {mode_label}",
             body=f"{ctx.get('plan_name', '')} on your smartcard. ₦{ctx.get('amount', '')} paid.",
         )
+    if event is NotificationEvent.kyc_verification_success:
+        return _PushCopy(
+            title=f"KYC verified, you're now Tier {ctx.get('tier')}",
+            body=f"Your wallet limit is now {ctx.get('wallet_cap_label', '')}.",
+        )
+    if event is NotificationEvent.kyc_verification_failed:
+        return _PushCopy(
+            title="We couldn't verify your identity",
+            body="Please try again from the app. Check your BVN/NIN details.",
+        )
     if event is NotificationEvent.referrer_signup_notified:
         name = ctx.get("referee_display_name") or "Someone"
         return _PushCopy(
@@ -265,7 +298,26 @@ def _push_copy(event: NotificationEvent, ctx: dict[str, Any]) -> _PushCopy | Non
         amount = ctx.get("amount_naira", "")
         return _PushCopy(
             title="Welcome bonus added",
-            body=f"₦{amount} landed in your wallet — enjoy.",
+            body=f"₦{amount} landed in your wallet. Enjoy.",
+        )
+    if event is NotificationEvent.dva_ready:
+        acct = ctx.get("account_number", "")
+        bank = ctx.get("bank_name", "your bank")
+        return _PushCopy(
+            title="Your account number is ready",
+            body=f"Transfer to {acct} ({bank}) to top up your wallet instantly.",
+        )
+    if event is NotificationEvent.dva_failed:
+        reason = ctx.get("reason") or "We could not set up your account number."
+        return _PushCopy(
+            title="Account setup failed",
+            body=f"{reason}. Please try again from the app.",
+        )
+    if event is NotificationEvent.account_deletion_requested:
+        return _PushCopy(
+            title="Account deletion scheduled",
+            body=f"Your account is scheduled for deletion on "
+                 f"{ctx.get('scheduled_date', '')}. Tap to cancel if this was not you.",
         )
     return None
 
@@ -548,17 +600,23 @@ class NotificationService:
 def _email_subject(event: NotificationEvent, ctx: dict[str, Any]) -> str:
     if event is NotificationEvent.bill_success:
         if ctx.get("partial"):
-            return f"Partial delivery — ₦{ctx.get('delivered_amount')} sent"
+            return f"Partial delivery: ₦{ctx.get('delivered_amount')} sent"
         return f"Your ₦{ctx.get('amount')} {ctx.get('tx_type_label')} is on its way"
     if event is NotificationEvent.bill_failure_refund:
         return f"Refund: ₦{ctx.get('amount')} back in your wallet"
     if event is NotificationEvent.wallet_funded:
-        return f"Wallet funded — ₦{ctx.get('amount')}"
+        return f"Wallet funded: ₦{ctx.get('amount')}"
     if event is NotificationEvent.electricity_token_delivered:
-        return f"Electricity token — ₦{ctx.get('amount')} on meter {ctx.get('meter_number')}"
+        return f"Electricity token: ₦{ctx.get('amount')} on meter {ctx.get('meter_number')}"
     if event is NotificationEvent.cable_activated:
         verb = "renewed" if ctx.get("mode") == "renew" else "activated"
-        return f"{ctx.get('provider_label', 'Cable')} {verb} — {ctx.get('plan_name', '')}"
+        return f"{ctx.get('provider_label', 'Cable')} {verb}: {ctx.get('plan_name', '')}"
+    if event is NotificationEvent.kyc_verification_success:
+        return "You're verified"
+    if event is NotificationEvent.kyc_verification_failed:
+        return "We couldn't verify your identity"
+    if event is NotificationEvent.account_deletion_requested:
+        return "Your Timpbills account deletion request"
     return "Timpbills notification"
 
 
@@ -665,3 +723,51 @@ _TX_TYPE_LABELS = {
     "cable":       "cable TV",
     "flight":      "flight",
 }
+
+
+_VERIFICATION_TYPE_LABELS = {
+    "bvn": "BVN",
+    "nin": "NIN",
+}
+
+
+def build_dva_context(
+    *,
+    status: str,
+    account_number: str | None = None,
+    bank_name: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Shape the push/in-app context for dva_ready / dva_failed. No em/en
+    dashes in any string that reaches the user."""
+    return {
+        "status": status,
+        "account_number": account_number or "",
+        "bank_name": bank_name or "",
+        "reason": reason or "",
+    }
+
+
+def build_kyc_context(
+    *,
+    verification_type: str,               # "bvn" | "nin"
+    status: str,                          # "success" | "failed"
+    tier: int | None = None,              # numeric tier after (success only)
+    wallet_cap_label: str | None = None,  # e.g. "₦500,000" or "Unlimited" (success only) — fully
+                                           # formatted by the caller so this module has no opinion
+                                           # on currency formatting or the KYC tier-cap table.
+) -> dict[str, Any]:
+    """Shape the context dict for kyc_verification_success / _failed.
+    `tier` and `wallet_cap_label` are only meaningful on success — the
+    caller (KycService) resolves them from the user's actual live tier,
+    not blindly from the record, so a stale/duplicate pending record
+    confirmed late never reports a lower tier than the user already
+    has (see KycService._notify_kyc_verification_result)."""
+    return {
+        "verification_type_label": _VERIFICATION_TYPE_LABELS.get(
+            verification_type, verification_type.upper()
+        ),
+        "status": status,
+        "tier": tier,
+        "wallet_cap_label": wallet_cap_label,
+    }

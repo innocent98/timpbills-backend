@@ -1,0 +1,10 @@
+{
+  "data": null,
+  "error": {
+    "code": "INVALID_SIGNATURE",
+    "details": null,
+    "message": "Bad or missing x-dojah-signature"
+  },
+  "request_id": "a8cd6f4baf1645959b1a7fe9121c9586",
+  "success": false
+}

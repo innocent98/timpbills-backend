@@ -2,6 +2,8 @@ import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import UUID as _PG_UUID
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -12,6 +14,22 @@ from app.db.session import get_db
 # Import all models so metadata knows about them
 from app.db.models import user, otp  # noqa: F401
 from app.integrations.email.fake import FakeEmailClient
+
+
+# Render postgresql.UUID as CHAR(32) on SQLite. Without this, SQLAlchemy emits
+# the declared type "UUID", which matches none of SQLite's affinity keywords
+# (INT/CHAR/CLOB/TEXT/BLOB/REAL/FLOA/DOUB) and so lands on NUMERIC affinity.
+# NUMERIC affinity coerces any stored value that looks like a number, so a
+# uuid4 whose 32-char hex happens to be all digits (no a-f, ~1 in 3.4M) is
+# silently turned into a float -- and the UUID result processor then calls
+# uuid.UUID(<float>) and raises "'float' object has no attribute 'replace'".
+# That is a rare, order-independent CI flake. CHAR(32) carries TEXT affinity,
+# so the hex round-trips as text on every value. Production is Postgres with a
+# native uuid type and is unaffected; this only sharpens SQLite test fidelity.
+# `, "sqlite"` scopes the override to SQLite compilation -- Postgres is untouched.
+@compiles(_PG_UUID, "sqlite")
+def _render_uuid_as_char32_on_sqlite(element, compiler, **kw):  # noqa: ANN001
+    return "CHAR(32)"
 
 
 @pytest.fixture(autouse=True)

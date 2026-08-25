@@ -1,0 +1,14 @@
+{
+  "records": [
+    {
+      "created_at": "2026-07-24T20:05:14.207505",
+      "face_match": false,
+      "failure_reason": null,
+      "liveness_passed": false,
+      "reference": "PENDING-BVN-1",
+      "status": "pending",
+      "verification_type": "bvn"
+    }
+  ],
+  "tier": 1
+}

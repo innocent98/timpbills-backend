@@ -1,0 +1,10 @@
+{
+  "data": null,
+  "error": {
+    "code": "KYC_TIER_PRECONDITION",
+    "details": null,
+    "message": "bvn requires kyc_level=tier_1, user is tier_0"
+  },
+  "request_id": "9d5381a5eaaf4a14b9efd39582b9c6c7",
+  "success": false
+}

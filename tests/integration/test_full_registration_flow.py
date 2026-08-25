@@ -4,6 +4,13 @@ End-to-end happy path for the phone-only-auth contract, exercising both
 orderings of the email/phone verification gates and the subsequent
 ``pin_setup_token`` → /auth/pin/set → /auth/login round-trip.
 
+Lazy-phone-OTP note: register now sends ONLY the email OTP. The phone OTP
+is dispatched once the phone gate becomes active — i.e. on the email/verify
+call (``phone_otp_sent=True``). The phone-first ordering test therefore
+seeds the phone OTP directly (mirroring tests/api/test_auth_phone_verify_signup.py)
+to exercise the phone→email gate routing without depending on register to
+auto-send a phone OTP.
+
 The fixture wiring mirrors the B9/B10/B11/B12 single-endpoint tests: a
 per-test in-memory DB, fakeredis, the singleton FakeEmailClient + the
 deps-module FakeTermiiClient singleton, slowapi disabled. We rely on the
@@ -106,12 +113,13 @@ async def test_full_flow_email_then_phone(
     assert "tokens" not in body
     assert body["phone"] == "+2348011111111"  # phone normalised before persistence
 
+    # Register sent only the email OTP — no phone SMS yet.
     assert len(fake_email_provider.sent) == 1
-    assert len(fake_sms_provider.sent) == 1
+    assert len(fake_sms_provider.sent) == 0
     email_otp = fake_email_provider.sent[-1].code_or_body
-    phone_otp = fake_sms_provider.sent[-1].code_or_message
 
-    # 2. Verify email first — phone gate still open, no pin_setup_token yet.
+    # 2. Verify email first — phone gate becomes active, phone OTP sent now,
+    #    no pin_setup_token yet.
     r = await client.post("/api/v1/auth/email/verify", json={
         "email": "fullflow1@example.com",
         "code": email_otp,
@@ -119,8 +127,13 @@ async def test_full_flow_email_then_phone(
     assert r.status_code == 200, r.text
     body = r.json()["data"]
     assert body["next_action"] == "phone_verification_required"
+    assert body["phone_otp_sent"] is True
     assert body.get("pin_setup_token") is None
     assert body.get("tokens") is None
+
+    # The phone OTP was dispatched at the email/verify step.
+    assert len(fake_sms_provider.sent) == 1
+    phone_otp = fake_sms_provider.sent[-1].code_or_message
 
     # 3. Verify phone — both gates pass + no PIN → pin_setup_token issued.
     r = await client.post("/api/v1/auth/phone/verify", json={
@@ -162,7 +175,20 @@ async def test_full_flow_email_then_phone(
 async def test_full_flow_phone_then_email(
     client, db_session, fake_sms_provider, fake_email_provider,
 ):
-    """Phone-first verification ordering; pin_setup_token issued from email/verify."""
+    """Phone-first verification ordering; pin_setup_token issued from email/verify.
+
+    Register no longer auto-sends a phone OTP, and the lazy send only fires
+    once email is verified — so the phone-first ordering is reached here by
+    seeding a phone_verification OTP directly (the same way mobile would
+    obtain one via a phone-OTP resend). This still exercises the
+    phone→email gate routing in verify_phone_otp_unauthed.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.security import hash_pin
+    from app.db.models.otp import OtpCode, OtpPurpose
+    from app.db.models.user import User
+
     # 1. Register.
     r = await client.post("/api/v1/auth/register", json={
         "phone": "08022222222",
@@ -172,7 +198,18 @@ async def test_full_flow_phone_then_email(
     })
     assert r.status_code == 201, r.text
     email_otp = fake_email_provider.sent[-1].code_or_body
-    phone_otp = fake_sms_provider.sent[-1].code_or_message
+    assert len(fake_sms_provider.sent) == 0  # no phone OTP at register
+
+    # Seed a phone_verification OTP so the phone gate can be cleared first.
+    phone_otp = "654321"
+    user = db_session.query(User).filter(User.email == "fullflow2@example.com").one()
+    db_session.add(OtpCode(
+        user_id=user.id, phone=user.phone,
+        code_hash=hash_pin(phone_otp),
+        purpose=OtpPurpose.phone_verification,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    ))
+    db_session.commit()
 
     # 2. Verify phone first — email gate still open, no pin_setup_token yet.
     r = await client.post("/api/v1/auth/phone/verify", json={

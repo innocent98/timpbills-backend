@@ -19,7 +19,7 @@ def render_email_otp(*, code: str) -> tuple[str, str]:
           <div style="color: #4F46E5; font-size: 36px; font-weight: 700; letter-spacing: 8px; font-family: ui-monospace, SFMono-Regular, monospace;">{code}</div>
         </div>
         <p style="color: #64748B; font-size: 13px; line-height: 1.6; margin: 0;">
-          This code expires in 5 minutes. If you didn't request this, you can safely ignore this email.
+          This code expires in 30 minutes. If you didn't request this, you can safely ignore this email.
         </p>
       </td>
     </tr>
@@ -40,7 +40,7 @@ Use this 6-digit code to finish setting up your account:
 
     {code}
 
-The code expires in 5 minutes. If you didn't request this, ignore this email.
+The code expires in 30 minutes. If you didn't request this, ignore this email.
 
 \u2014 Timpbills
 """

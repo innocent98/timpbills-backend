@@ -1,0 +1,9 @@
+{
+  "face_match": false,
+  "failure_reason": "face_mismatch",
+  "liveness_passed": true,
+  "reference": "FAILFACE-BVN-1",
+  "status": "failed",
+  "tier": 1,
+  "verification_type": "bvn"
+}

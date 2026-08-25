@@ -10,4 +10,4 @@ When: {{ when }}
 
 Need help? Reply to this email.
 
-— Timpbills
+Timpbills

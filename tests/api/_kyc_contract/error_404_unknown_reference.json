@@ -1,0 +1,10 @@
+{
+  "data": null,
+  "error": {
+    "code": "UNKNOWN_REFERENCE",
+    "details": null,
+    "message": "No verification found for that reference"
+  },
+  "request_id": "5479f1a704d242e3a70269ca272d9dd5",
+  "success": false
+}

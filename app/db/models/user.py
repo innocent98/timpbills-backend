@@ -30,10 +30,11 @@ class KycLevel(str, enum.Enum):
     tier_0 = "tier_0"
     tier_1 = "tier_1"
     tier_2 = "tier_2"
+    tier_3 = "tier_3"
 
     @property
     def numeric(self) -> int:
-        """Tier as an integer (0/1/2) for the public API response.
+        """Tier as an integer (0/1/2/3) for the public API response.
 
         The DB column stores the enum string, but mobile expects a
         numeric tier so it can render labels (Tier 0/1/2/3) and gate
@@ -98,6 +99,13 @@ class User(TimestampMixin, Base):
     # Hard delete (PII purge) is a Sprint 8 / compliance concern.
     # Migration 202605220900 added the column.
     deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Set by the anonymization sweep once PII has been scrubbed (30 days
+    # after deleted_at). While deleted_at is set but this is NULL the
+    # account is in the reversible grace window; once this is set the row
+    # carries no personal data and only the retained ledger remains.
+    # Migration 202607251200 added the column.
+    anonymized_at = Column(DateTime(timezone=True), nullable=True)
 
     # 1:1 back-reference to NotificationPreference. `cascade="all,
     # delete-orphan"` mirrors the FK's ON DELETE CASCADE — deleting the

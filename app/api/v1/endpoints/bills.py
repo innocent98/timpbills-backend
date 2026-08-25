@@ -53,7 +53,11 @@ from app.services.bill_service import (
     DataPlanNotFound,
 )
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
-from app.services.wallet_service import InsufficientBalance, WalletService
+from app.services.wallet_service import (
+    InsufficientBalance,
+    WalletService,
+    WalletSpendLocked,
+)
 from app.utils.responses import success
 
 router = APIRouter(prefix="/bills", tags=["bills"])
@@ -203,6 +207,18 @@ async def purchase_airtime(
                 network=body.network,
                 phone=body.phone,
                 amount_ngn=body.amount,
+            )
+        except WalletSpendLocked:
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "code": "WALLET_SPEND_LOCKED",
+                    "message": (
+                        "Your wallet is on hold because a recent transfer put "
+                        "your balance above your KYC limit. Upgrade your KYC to "
+                        "spend from your wallet."
+                    ),
+                },
             )
         except InsufficientBalance:
             raise HTTPException(
@@ -400,6 +416,18 @@ async def purchase_electricity(
                 # BillService.purchase_electricity signature is unchanged.
                 phone=user.phone,
                 amount_ngn=body.amount,
+            )
+        except WalletSpendLocked:
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "code": "WALLET_SPEND_LOCKED",
+                    "message": (
+                        "Your wallet is on hold because a recent transfer put "
+                        "your balance above your KYC limit. Upgrade your KYC to "
+                        "spend from your wallet."
+                    ),
+                },
             )
         except InsufficientBalance:
             raise HTTPException(
@@ -670,6 +698,18 @@ async def purchase_cable(
                 status_code=400,
                 detail={"code": "UNKNOWN_CABLE_PLAN", "message": str(exc)},
             )
+        except WalletSpendLocked:
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "code": "WALLET_SPEND_LOCKED",
+                    "message": (
+                        "Your wallet is on hold because a recent transfer put "
+                        "your balance above your KYC limit. Upgrade your KYC to "
+                        "spend from your wallet."
+                    ),
+                },
+            )
         except InsufficientBalance:
             raise HTTPException(
                 status_code=402,
@@ -784,6 +824,18 @@ async def purchase_data(
             raise HTTPException(
                 status_code=400,
                 detail={"code": "UNKNOWN_DATA_PLAN", "message": str(exc)},
+            )
+        except WalletSpendLocked:
+            raise HTTPException(
+                status_code=423,
+                detail={
+                    "code": "WALLET_SPEND_LOCKED",
+                    "message": (
+                        "Your wallet is on hold because a recent transfer put "
+                        "your balance above your KYC limit. Upgrade your KYC to "
+                        "spend from your wallet."
+                    ),
+                },
             )
         except InsufficientBalance:
             raise HTTPException(

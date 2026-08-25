@@ -25,7 +25,11 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     ALGORITHM: str = "HS256"
 
-    # CORS
+    # CORS origins for frontend + public deletion page.
+    # In development, localhost suffices. In staging/production, the env var
+    # must include the marketing site origins (e.g. https://timpbills.com,
+    # https://staging.timpbills.com) so the public /delete-account page can
+    # call the API cross-origin. See .env.staging / .env.production.
     BACKEND_CORS_ORIGINS: list[str] = [
         "http://localhost:3000",
         "http://localhost:8000",
@@ -59,7 +63,7 @@ class Settings(BaseSettings):
 
     # Termii SMS
     TERMII_API_KEY: str | None = None
-    TERMII_SENDER_ID: str | None = "Timpbills"
+    TERMII_SENDER_ID: str | None = "N-Alert"
     TERMII_BASE_URL: str = "https://api.ng.termii.com/api"
 
     # Paystack
@@ -80,6 +84,22 @@ class Settings(BaseSettings):
     PAYSTACK_CARD_FEE_FIXED_NAIRA: int = 100
     PAYSTACK_CARD_FEE_FIXED_THRESHOLD_NAIRA: int = 2500
     PAYSTACK_CARD_FEE_CAP_NAIRA: int = 2000
+
+    # Paystack Dedicated Virtual Accounts (DVA). Timpbills absorbs the DVA
+    # fee: the wallet is credited GROSS (the full transferred amount). The
+    # fee figures here are for accounting/reporting only and are never
+    # applied to a credit. Use "test-bank" in dev/test.
+    PAYSTACK_DVA_PREFERRED_BANK: str = "wema-bank"
+    PAYSTACK_DVA_FEE_PERCENT: float = 1.0
+    PAYSTACK_DVA_FEE_CAP_NGN: int = 300
+
+    # Reconcile abandon sweep (S3C-P-abandon): a payment that is still PENDING
+    # this long after creation is treated as an abandoned checkout the user
+    # never completed. The reconciler stops polling Paystack verify for it and
+    # closes it out terminally (Payment->failed, Transaction->failed) instead
+    # of re-verifying it every 2 minutes forever. Paystack itself expires a
+    # checkout session well within a day, so 24h is a safe terminal horizon.
+    PAYMENT_ABANDON_AFTER_HOURS: int = 24
 
     # Resend Email
     RESEND_API_KEY: str | None = None
@@ -106,6 +126,26 @@ class Settings(BaseSettings):
     # .env if you need staging to point elsewhere.
     VTPASS_BASE_URL: str = "https://sandbox.vtpass.com"
     VTPASS_WEBHOOK_SECRET: str | None = None
+
+    # ── Dojah (KYC: BVN/NIN verification, widget + webhook) ──────────────
+    # Sandbox and production both live at api.dojah.io — DOJAH_ENVIRONMENT
+    # selects the mode server-side, it is not a hostname switch like VTPass.
+    # DOJAH_API_KEY is the secret used for server-side verification-status
+    # calls; DOJAH_APP_ID + DOJAH_PUBLIC_KEY are handed to the mobile client
+    # (via GET /kyc/config) to initialize the Dojah widget. The two widget
+    # IDs select the published BVN/NIN + selfie + liveness flows. The
+    # webhook secret validates the x-dojah-signature HMAC-SHA256 header.
+    # Real Dojah is the working path; FakeKycProvider is test-only, selected
+    # by FORCE_FAKE_PROVIDERS or when these keys are unset.
+    DOJAH_API_KEY: str | None = None
+    DOJAH_APP_ID: str | None = None
+    DOJAH_PUBLIC_KEY: str | None = None
+    DOJAH_BVN_WIDGET_ID: str | None = None
+    DOJAH_NIN_WIDGET_ID: str | None = None
+    DOJAH_WEBHOOK_SECRET: str | None = None
+    DOJAH_BASE_URL: str = "https://api.dojah.io"
+    DOJAH_ENVIRONMENT: str = "sandbox"
+    DOJAH_FACE_MATCH_THRESHOLD: int = 70
 
     # ── Firebase Cloud Messaging (push notifications) ────────────────────
     # Either FCM_CREDENTIALS_PATH (service-account JSON file) OR
@@ -218,6 +258,12 @@ class Settings(BaseSettings):
     OTP_RESEND_DAILY_CAP: int = 10
     """Maximum OTPs per phone per day (covers all purposes combined).
     Defense against SMS-bombing of a single number."""
+
+    OTP_EXPIRE_MINUTES: int = 30
+    """How long an OTP stays valid. Coupled to the Termii-approved N-Alert
+    SMS template text ("It expires in 30 minutes") — the DND route validates
+    sends against the approved wording, so the real TTL and the message must
+    agree. Changing this requires re-approving the template with Termii."""
 
     # Observability — Sentry (optional; no-op when DSN unset)
     SENTRY_DSN: str | None = None

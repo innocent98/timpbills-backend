@@ -11,6 +11,6 @@ Meter: {{ meter_number }}
 Reference: {{ reference }}
 When: {{ when }}
 
-Keep this token safe — you can re-enter it at the meter if input is interrupted.
+Keep this token safe. You can re-enter it at the meter if input is interrupted.
 
-— Timpbills
+Timpbills

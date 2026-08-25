@@ -14,8 +14,6 @@ read — acceptable because the row is one boolean tuple.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
@@ -189,7 +187,9 @@ async def soft_delete_me(
 ):
     """Soft-delete the authenticated user.
 
-    Flow:
+    Shares its logic with the public web deletion flow via
+    ``AccountDeletionService.request_deletion`` (see that module for the
+    full tombstone + notice + grace-period behaviour):
       1. Flip ``is_active=False`` — login + every authenticated endpoint
          will refuse the user going forward.
       2. Stamp ``deleted_at = now()`` — the /auth/register flow reads
@@ -199,6 +199,10 @@ async def soft_delete_me(
          token issued before this instant is rejected at the gate.
       4. Revoke every refresh token in the rotation keyspace so existing
          devices can't refresh themselves back to life.
+      5. Dispatch the account-deletion notice (email + push).
+
+    A non-empty wallet blocks the delete with 409 WALLET_NOT_EMPTY — the
+    user must withdraw first; nothing is mutated when the guard trips.
 
     Hard delete (full PII purge) is a Sprint 8 / compliance concern —
     this endpoint only sets the tombstone. The row stays in the table
@@ -208,16 +212,19 @@ async def soft_delete_me(
     echo any state back. Mobile flow: receive 204 → discard local tokens
     → bounce to the login screen.
     """
-    now = datetime.now(UTC)
-    current_user.is_active = False
-    current_user.deleted_at = now
-    current_user.tokens_revoked_at = now
-    db.add(current_user)
-    db.commit()
+    from app.services.account_deletion_service import AccountDeletionService
 
-    # Drop every outstanding refresh token. Access-token side is covered
-    # by the ``tokens_revoked_at`` stamp + the ``is_active`` check in
-    # ``get_current_user`` — same belt-and-braces pattern as the
-    # password-change endpoint.
-    await token_store.revoke_all(user_id=str(current_user.id))
+    svc = AccountDeletionService(db=db, token_store=token_store)
+    try:
+        await svc.request_deletion(user=current_user)
+    except ValueError as e:
+        if str(e) == "WALLET_NOT_EMPTY":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "WALLET_NOT_EMPTY",
+                    "message": "Withdraw your wallet balance before deleting your account.",
+                },
+            ) from e
+        raise
     return None

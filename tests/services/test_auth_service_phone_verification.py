@@ -102,3 +102,110 @@ async def test_send_phone_otp_user_not_found(db_session):
 
     with pytest.raises(ValueError, match="USER_NOT_FOUND"):
         await svc.send_phone_otp(user_id=uuid4())
+
+
+# ---------------------------------------------------------------------------
+# resend_phone_otp_unauthed — public signup resend (no tokens yet)
+# ---------------------------------------------------------------------------
+
+def _make_unverified_user(
+    db_session,
+    *,
+    phone="+2348099999999",
+    email="resend@test.co",
+    referral_code="RSND1",
+    is_phone_verified=False,
+):
+    """Seed a clean user with NO prior OTP, so the cooldown window is open."""
+    user = User(
+        phone=phone,
+        email=email,
+        full_name="Resend User",
+        password_hash="h",
+        referral_code=referral_code,
+        kyc_level=KycLevel.tier_0,
+        email_verified=False,
+        is_phone_verified=is_phone_verified,
+        pin_hash=None,
+        is_active=True,
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    return user
+
+
+def _new_svc(db_session):
+    return AuthService(
+        db=db_session,
+        sms=FakeTermiiClient(),
+        email=FakeEmailClient(),
+        token_store=NullTokenStore(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_resend_phone_otp_unverified_sends(db_session):
+    user = _make_unverified_user(db_session)
+    sms = FakeTermiiClient()
+    svc = AuthService(db=db_session, sms=sms, email=FakeEmailClient(), token_store=NullTokenStore())
+
+    res = await svc.resend_phone_otp_unauthed(phone=user.phone)
+
+    assert res == {"phone_otp_sent": True}
+    # A fresh phone_verification OTP row exists for this user.
+    otp = (
+        db_session.query(OtpCode)
+        .filter_by(user_id=user.id, purpose=OtpPurpose.phone_verification)
+        .order_by(OtpCode.created_at.desc())
+        .first()
+    )
+    assert otp is not None
+    # Fake SMS recorded the send, carrying the 6-digit code.
+    assert len(sms.sent) == 1
+    assert sms.sent[-1].phone == user.phone
+    assert len(sms.sent[-1].code_or_message) == 6
+
+
+@pytest.mark.asyncio
+async def test_resend_phone_otp_cooldown_blocks_second(db_session):
+    """Two immediate resends: the cooldown helper (60s window) blocks the
+    second, which returns phone_otp_sent=False without raising and without
+    a second SMS."""
+    user = _make_unverified_user(db_session)
+    sms = FakeTermiiClient()
+    svc = AuthService(db=db_session, sms=sms, email=FakeEmailClient(), token_store=NullTokenStore())
+
+    first = await svc.resend_phone_otp_unauthed(phone=user.phone)
+    assert first == {"phone_otp_sent": True}
+    assert len(sms.sent) == 1
+
+    second = await svc.resend_phone_otp_unauthed(phone=user.phone)
+    assert second == {"phone_otp_sent": False}
+    # No extra SMS — the cooldown blocked the second send.
+    assert len(sms.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_resend_phone_otp_unknown_phone(db_session):
+    svc = _new_svc(db_session)
+    with pytest.raises(ValueError, match="USER_NOT_FOUND"):
+        await svc.resend_phone_otp_unauthed(phone="+2348070000000")
+
+
+@pytest.mark.asyncio
+async def test_resend_phone_otp_already_verified(db_session):
+    user = _make_unverified_user(
+        db_session, phone="+2348088888888", email="verified@test.co",
+        referral_code="RSND2", is_phone_verified=True,
+    )
+    svc = _new_svc(db_session)
+    with pytest.raises(ValueError, match="PHONE_ALREADY_VERIFIED"):
+        await svc.resend_phone_otp_unauthed(phone=user.phone)
+
+
+@pytest.mark.asyncio
+async def test_resend_phone_otp_bad_format(db_session):
+    svc = _new_svc(db_session)
+    with pytest.raises(ValueError, match="INVALID_PHONE_FORMAT"):
+        await svc.resend_phone_otp_unauthed(phone="not-a-phone")
