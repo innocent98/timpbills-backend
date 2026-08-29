@@ -13,6 +13,7 @@ the acting `AdminUser` from the `admin_users` table. No/expired session
 in `X-CSRF-Token`).
 """
 import enum
+import uuid
 from datetime import datetime
 from typing import Annotated
 
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.api._filters import parse_enum_or_400
 from app.api.deps import (
+    get_auth_service,
     get_bill_service,
     get_db,
     get_paystack_provider,
@@ -37,10 +39,11 @@ from app.db.models.notification_log import (
 )
 from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
-from app.db.models.user import KycLevel
+from app.db.models.user import KycLevel, User
 from app.integrations.paystack.base import PaymentProvider
 from app.integrations.vtpass.base import BillProvider
 from app.services.admin_service import AdminService
+from app.services.auth_service import AuthService
 from app.services.bill_service import BillService
 from app.utils.responses import success
 
@@ -185,6 +188,81 @@ async def admin_trigger_refund(
             "refund_amount":         str(refund.amount),
             "was_created":           was_created,
         },
+        request_id=getattr(request.state, "request_id", None),
+    )
+
+
+@router.post(
+    "/users/{user_id}/resend-verification-email",
+    response_model=None,
+    # Same ordering rationale as admin_trigger_refund: require_admin is the
+    # route-level dep (resolved before CSRF) AND a path-op param below, so an
+    # unauthenticated POST hits 401 ADMIN_AUTH_REQUIRED before the 403 CSRF.
+    dependencies=[Depends(require_admin), Depends(require_admin_csrf)],
+)
+async def admin_resend_verification_email(
+    user_id: str,
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    auth_svc: Annotated[AuthService, Depends(get_auth_service)],
+):
+    """Re-send the email-verification OTP for a user from the admin console.
+
+    Idempotent-friendly: an already-verified user is a 200 with
+    ``sent=false, reason="already_verified"`` (not an error) so the ops UI
+    can call this without first re-checking state. ``send_email_otp`` re-runs
+    the same not-found / already-verified guards server-side; we map those
+    raised ValueErrors back onto the identical response shapes so a race
+    (user verifies between our lookup and the send) never leaks a 500.
+
+    Not a money/transaction mutation, so no ``transaction_events`` audit row
+    is written — that audit surface is tx-scoped and this touches no tx.
+    """
+    # Coerce the path id to a UUID with a guard so a malformed id maps to a
+    # clean 404 rather than a 500 (same convention as
+    # AdminService.get_user_detail).
+    try:
+        uid = uuid.UUID(user_id)
+    except (TypeError, ValueError):
+        uid = None
+    user = (
+        db.query(User).filter(User.id == uid).first()
+        if uid is not None
+        else None
+    )
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "USER_NOT_FOUND", "message": "User not found"},
+        )
+
+    if user.email_verified:
+        return success(
+            {"sent": False, "reason": "already_verified", "email": user.email},
+            request_id=getattr(request.state, "request_id", None),
+        )
+
+    try:
+        await auth_svc.send_email_otp(user.email)
+    except ValueError as exc:
+        # Defensive re-mapping of send_email_otp's own guards onto the same
+        # shapes as above — the state could have changed under us.
+        code = str(exc)
+        if code == "EMAIL_ALREADY_VERIFIED":
+            return success(
+                {"sent": False, "reason": "already_verified", "email": user.email},
+                request_id=getattr(request.state, "request_id", None),
+            )
+        if code == "USER_NOT_FOUND":
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "USER_NOT_FOUND", "message": "User not found"},
+            ) from exc
+        raise
+
+    return success(
+        {"sent": True, "email": user.email},
         request_id=getattr(request.state, "request_id", None),
     )
 
