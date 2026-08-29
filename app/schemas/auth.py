@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.utils.email import normalize_email
+
 
 class RegisterRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=80)
@@ -36,6 +38,13 @@ class RegisterRequest(BaseModel):
             return None
         v = v.strip().upper()
         return v or None
+
+    @field_validator("email")
+    @classmethod
+    def _normalise_email(cls, v: str) -> str:
+        # Case-insensitive email: ``Example@X.com`` and ``example@x.com``
+        # must resolve to the same account. See app.utils.email.
+        return normalize_email(v)
 
 
 class RegisterResponse(BaseModel):
@@ -74,10 +83,20 @@ class VerifyOtpResponse(BaseModel):
 class SendEmailOtpRequest(BaseModel):
     email: EmailStr
 
+    @field_validator("email")
+    @classmethod
+    def _normalise_email(cls, v: str) -> str:
+        return normalize_email(v)
+
 
 class VerifyEmailOtpRequest(BaseModel):
     email: EmailStr
     code: str = Field(min_length=6, max_length=6)
+
+    @field_validator("email")
+    @classmethod
+    def _normalise_email(cls, v: str) -> str:
+        return normalize_email(v)
 
 
 class EmailVerifiedResponse(BaseModel):
@@ -230,11 +249,29 @@ class PinLoginResponse(BaseModel):
     pin_set: bool = True
 
 
+def _normalise_identifier(v: str) -> str:
+    # ``identifier`` is a combined email|phone value. Lowercase only when it
+    # looks like an email (contains "@") so a phone number keeps its exact
+    # form (phone normalisation to E.164 happens at the service layer). This
+    # keeps ``Example@X.com`` matching the stored lowercased email.
+    return normalize_email(v) if "@" in v else v
+
+
 class ForgotPasswordRequest(BaseModel):
     identifier: str
+
+    @field_validator("identifier")
+    @classmethod
+    def _normalise(cls, v: str) -> str:
+        return _normalise_identifier(v)
 
 
 class ResetPasswordRequest(BaseModel):
     identifier: str
     code: str = Field(min_length=6, max_length=6)
     new_password: str
+
+    @field_validator("identifier")
+    @classmethod
+    def _normalise(cls, v: str) -> str:
+        return _normalise_identifier(v)
