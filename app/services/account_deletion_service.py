@@ -11,6 +11,7 @@ from app.db.models.user import User
 from app.db.models.wallet import Wallet
 from app.services.notification_service import NotificationEvent
 from app.services.token_store import TokenStore
+from app.utils.email import normalize_email
 from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
 from app.workers.tasks.notification_tasks import dispatch_delay
 
@@ -35,13 +36,16 @@ class AccountDeletionService:
         self._token_store = token_store
 
     async def resolve_and_verify(self, *, identifier: str, password: str) -> User:
+        # Emails are stored lowercased; canonicalise the email arm so a
+        # deletion request with "Example@X.com" matches "example@x.com".
+        email = normalize_email(identifier) if "@" in identifier else identifier
         try:
             phone = normalize_to_e164(identifier)
         except InvalidPhoneFormat:
             phone = identifier
         user = (
             self._db.query(User)
-            .filter((User.email == identifier) | (User.phone == phone))
+            .filter((User.email == email) | (User.phone == phone))
             .first()
         )
         # One generic error for both "no such user" and "bad password" so the

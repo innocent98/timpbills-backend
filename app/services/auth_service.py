@@ -43,6 +43,7 @@ from app.services.app_setting_service import AppSettingService
 from app.services.referral_code import generate_referral_code
 from app.services.token_revocation_service import TokenRevocationService
 from app.services.token_store import TokenStore
+from app.utils.email import normalize_email
 
 _ACCESS_EXPIRE = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 _REFRESH_EXPIRE = timedelta(days=30)
@@ -250,6 +251,12 @@ class AuthService:
         except InvalidPhoneFormat:
             raise ValueError("INVALID_PHONE_FORMAT")
 
+        # Defense-in-depth: the schema already normalises email case, but
+        # non-schema callers (scripts, migrations, internal flows) also land
+        # here — canonicalise so the uniqueness check + stored value are
+        # case-insensitive regardless of entry point.
+        email = normalize_email(req.email)
+
         thirty_days_ago = datetime.now(UTC) - timedelta(days=30)
 
         existing_phone = (
@@ -264,7 +271,7 @@ class AuthService:
             raise ValueError("USER_ALREADY_EXISTS")
 
         existing_email = (
-            self._db.query(User).filter(User.email == req.email).first()
+            self._db.query(User).filter(User.email == email).first()
         )
         if existing_email is not None:
             if (
@@ -287,7 +294,7 @@ class AuthService:
 
         user = User(
             phone=phone,
-            email=req.email,
+            email=email,
             full_name=req.full_name,
             password_hash=await hash_password_async(req.password),
             kyc_level=KycLevel.tier_0,
@@ -430,6 +437,7 @@ class AuthService:
 
     async def send_email_otp(self, email: str) -> None:
         """Re-send an email OTP for the given address (e.g. resend during countdown)."""
+        email = normalize_email(email)
         user = self._db.query(User).filter(User.email == email).first()
         if not user:
             raise ValueError("USER_NOT_FOUND")
@@ -451,7 +459,8 @@ class AuthService:
         await self._email.send_otp(to=user.email, code=code)
 
     async def verify_email_otp(self, req: VerifyEmailOtpRequest) -> EmailVerifiedResponse:
-        user = self._db.query(User).filter(User.email == req.email).first()
+        email = normalize_email(req.email)
+        user = self._db.query(User).filter(User.email == email).first()
         if not user:
             raise ValueError("USER_NOT_FOUND")
 
@@ -1180,6 +1189,10 @@ class AuthService:
 
     async def forgot_password(self, identifier: str) -> None:
         from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
+        # Emails are stored lowercased; canonicalise the email arm so a reset
+        # with "Example@X.com" matches the stored "example@x.com". A phone
+        # arm keeps its exact form for E.164 normalisation below.
+        email = normalize_email(identifier) if "@" in identifier else identifier
         try:
             # Phones are stored E.164; normalise a local/intl number so a
             # reset with "09066128757" matches the stored "+2349066128757".
@@ -1188,7 +1201,7 @@ class AuthService:
             phone = identifier  # an email — matched on the email column
         user = (
             self._db.query(User)
-            .filter((User.email == identifier) | (User.phone == phone))
+            .filter((User.email == email) | (User.phone == phone))
             .first()
         )
         if not user:
@@ -1210,13 +1223,14 @@ class AuthService:
 
     async def reset_password(self, identifier: str, code: str, new_password: str) -> None:
         from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
+        email = normalize_email(identifier) if "@" in identifier else identifier
         try:
             phone = normalize_to_e164(identifier)
         except InvalidPhoneFormat:
             phone = identifier  # an email — matched on the email column
         user = (
             self._db.query(User)
-            .filter((User.email == identifier) | (User.phone == phone))
+            .filter((User.email == email) | (User.phone == phone))
             .first()
         )
         if not user:
