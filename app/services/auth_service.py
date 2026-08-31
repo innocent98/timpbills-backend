@@ -685,6 +685,46 @@ class AuthService:
             pass
         return phone_otp_sent
 
+    async def _mint_and_send_email_otp(self, user: User) -> bool:
+        """Mint an email_verification OTP for ``user`` and email it.
+
+        Symmetric to ``_mint_and_send_phone_otp`` — used by the inline send
+        on the /login email gate (a returning, email-unverified user logs in;
+        we dispatch a fresh code so the client can go straight to the
+        verify-email screen). Keyed on the same cooldown / daily-cap helper
+        every OTP path uses, so a rapid-tap /login caller can't bypass the
+        resend window; a block is swallowed and reflected in the return
+        value (``False``) rather than raised.
+
+        Unlike the phone helper this also swallows any *unexpected* send-path
+        error (log + return ``False``): the email gate is a mid-login side
+        effect and must never turn a successful credential check into a 500.
+        The caller maps the return onto ``email_otp_sent`` so mobile shows
+        the existing-OTP countdown instead of a "we just sent it" toast.
+        """
+        email_otp_sent = False
+        try:
+            _check_otp_cooldown(
+                self._db,
+                user_id=user.id,
+                purpose=OtpPurpose.email_verification,
+            )
+            code = f"{secrets.randbelow(1_000_000):06d}"
+            self._db.add(OtpCode(
+                user_id=user.id, email=user.email,
+                code_hash=await hash_pin_async(code),
+                purpose=OtpPurpose.email_verification,
+                expires_at=datetime.now(UTC) + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
+            ))
+            self._db.commit()
+            await self._email.send_otp(to=user.email, code=code)
+            email_otp_sent = True
+        except (OtpCooldownActive, OtpDailyCapExceeded):
+            pass
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auth: inline login email OTP send failed err=%s", exc)
+        return email_otp_sent
+
     async def send_phone_otp(self, user_id: UUID) -> None:
         """Send a phone OTP for an authenticated user (on-demand upgrade to Tier 1)."""
         user = self._db.query(User).filter(User.id == user_id).first()
@@ -832,9 +872,21 @@ class AuthService:
 
         # Gate evaluation: email → phone → pin.
         if not user.email_verified:
+            # Inline email-OTP send — symmetric with the phone gate below.
+            # A returning, email-unverified user's login carries no fresh
+            # code, and the client no longer holds the email address, so we
+            # dispatch one here (subject to the same cooldown / daily-cap
+            # helper) and return it alongside ``email`` so mobile can prefill
+            # + jump straight to the verify-email screen. A block or send
+            # error is reflected via ``email_otp_sent=False`` (mobile then
+            # shows the existing-OTP countdown instead of a "we just sent it"
+            # toast); login never 500s on the send path.
+            email_otp_sent = await self._mint_and_send_email_otp(user)
             return LoginResponse(
                 next_action="email_verification_required",
                 pin_set=user.pin_hash is not None,
+                email=user.email,
+                email_otp_sent=email_otp_sent,
             )
 
         if not user.is_phone_verified:
@@ -849,6 +901,7 @@ class AuthService:
             return LoginResponse(
                 next_action="phone_verification_required",
                 pin_set=user.pin_hash is not None,
+                email=user.email,
                 phone_otp_sent=phone_otp_sent,
             )
 
@@ -856,6 +909,7 @@ class AuthService:
             return LoginResponse(
                 next_action="pin_setup_required",
                 pin_set=False,
+                email=user.email,
                 pin_setup_token=create_pin_setup_token(user_id=str(user.id)),
             )
 
@@ -868,6 +922,7 @@ class AuthService:
         return LoginResponse(
             next_action="tokens_issued",
             pin_set=True,
+            email=user.email,
             tokens=tokens,
         )
 

@@ -178,9 +178,14 @@ class LoginResponse(BaseModel):
 
     Gate evaluation order is email → phone → pin; ``next_action`` reports
     the first unverified gate. Tokens / pin_setup_token are populated
-    only on the branch they apply to; ``phone_otp_sent`` is populated
-    only on the phone-verification branch and reports whether the inline
-    OTP dispatch succeeded (False when blocked by cooldown / daily cap).
+    only on the branch they apply to; ``phone_otp_sent`` / ``email_otp_sent``
+    are populated only on their respective verification branch and report
+    whether the inline OTP dispatch succeeded (False when blocked by
+    cooldown / daily cap, or when the send path errored).
+
+    ``email`` is the authenticated user's email — always present so mobile
+    can prefill the verify-email screen on the ``email_verification_required``
+    branch (the client no longer holds the address on a returning-user login).
     """
 
     next_action: Literal[
@@ -190,9 +195,11 @@ class LoginResponse(BaseModel):
         "pin_setup_required",
     ]
     pin_set: bool
+    email: str
     tokens: AuthTokens | None = None
     pin_setup_token: str | None = None
     phone_otp_sent: bool | None = None
+    email_otp_sent: bool | None = None
 
 
 class RefreshRequest(BaseModel):
