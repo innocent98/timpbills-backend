@@ -51,6 +51,7 @@ async def test_login_with_phone_issues_tokens(db_session):
     assert res.tokens.access_token
     assert res.tokens.refresh_token
     assert res.pin_set is True
+    assert res.email == "user@test.co"
 
 
 @pytest.mark.asyncio
@@ -104,7 +105,8 @@ async def test_login_email_field_in_phone_position_400s(db_session):
 async def test_login_unverified_email_returns_email_action(db_session):
     """B12 contract: an unverified email no longer raises — it returns
     ``next_action=email_verification_required`` with no tokens. Routing
-    is mobile's responsibility from here."""
+    is mobile's responsibility from here. The response now also carries the
+    user's ``email`` so mobile can prefill the verify-email screen."""
     sms = FakeTermiiClient()
     em = FakeEmailClient()
     svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
@@ -119,6 +121,84 @@ async def test_login_unverified_email_returns_email_action(db_session):
     res = await svc.login(LoginRequest(phone="+2348011111112", password="Secret1!"))
     assert res.next_action == "email_verification_required"
     assert res.tokens is None
+    assert res.email == "unverified@test.co"
+
+
+@pytest.mark.asyncio
+async def test_login_email_gate_sends_inline_otp(db_session):
+    """Email-unverified login dispatches a FRESH email OTP inline and
+    reports ``email_otp_sent=True`` + the user's ``email``.
+
+    Register already sent one code, so we backdate every existing OTP past
+    the cooldown window before logging in, then clear the fake email client
+    so the assertion isolates the inline login send."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.config import settings
+    from app.db.models.otp import OtpCode
+
+    sms = FakeTermiiClient()
+    em = FakeEmailClient()
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
+
+    req = RegisterRequest(
+        full_name="Email Gate User", phone="+2348011111116",
+        email="emailgate@test.co", password="Secret1!",
+    )
+    await svc.register(req)
+    # Backdate the register-time email OTP so cooldown doesn't block login.
+    cooldown_back = timedelta(seconds=settings.OTP_RESEND_COOLDOWN_SECONDS + 10)
+    db_session.query(OtpCode).update(
+        {"created_at": datetime.now(UTC) - cooldown_back}
+    )
+    db_session.commit()
+    em.sent.clear()
+
+    res = await svc.login(LoginRequest(phone="+2348011111116", password="Secret1!"))
+    assert res.next_action == "email_verification_required"
+    assert res.tokens is None
+    assert res.email == "emailgate@test.co"
+    assert res.email_otp_sent is True
+    assert len(em.sent) == 1
+    assert em.sent[0].to == "emailgate@test.co"
+
+
+@pytest.mark.asyncio
+async def test_login_email_gate_cooldown_blocks_second_send(db_session):
+    """A rapid second email-gate login inside the cooldown window returns
+    ``email_otp_sent=False`` and does NOT queue a second email."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.config import settings
+    from app.db.models.otp import OtpCode
+
+    sms = FakeTermiiClient()
+    em = FakeEmailClient()
+    svc = AuthService(db=db_session, sms=sms, email=em, token_store=NullTokenStore())
+
+    req = RegisterRequest(
+        full_name="Cooldown User", phone="+2348011111117",
+        email="emailcooldown@test.co", password="Secret1!",
+    )
+    await svc.register(req)
+    cooldown_back = timedelta(seconds=settings.OTP_RESEND_COOLDOWN_SECONDS + 10)
+    db_session.query(OtpCode).update(
+        {"created_at": datetime.now(UTC) - cooldown_back}
+    )
+    db_session.commit()
+    em.sent.clear()
+
+    # First login sends a fresh code (resets the cooldown clock to now).
+    first = await svc.login(LoginRequest(phone="+2348011111117", password="Secret1!"))
+    assert first.email_otp_sent is True
+    assert len(em.sent) == 1
+
+    # Second, immediate login is inside the cooldown window → blocked.
+    second = await svc.login(LoginRequest(phone="+2348011111117", password="Secret1!"))
+    assert second.next_action == "email_verification_required"
+    assert second.email == "emailcooldown@test.co"
+    assert second.email_otp_sent is False
+    assert len(em.sent) == 1  # no second email queued
 
 
 @pytest.mark.asyncio
