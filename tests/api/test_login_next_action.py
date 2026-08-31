@@ -117,13 +117,17 @@ async def test_login_all_gates_passed_issues_tokens(client, db_session):
     body = r.json()["data"]
     assert body["next_action"] == "tokens_issued"
     assert "access_token" in body["tokens"]
+    assert body["email"] == "b12@example.com"
 
 
 @pytest.mark.asyncio
 async def test_login_email_unverified_returns_email_action(client, db_session):
+    """Email gate: response carries the user's ``email`` and dispatches a
+    fresh email OTP inline (no prior code → cooldown passes)."""
     user = _seed(db_session,
                  email_verified=False,
                  email="b12-noemail@example.com")
+    _test_email_client.sent.clear()
     r = await client.post("/api/v1/auth/login", json={
         "phone": user.phone, "password": "Secret1!",
     })
@@ -131,6 +135,41 @@ async def test_login_email_unverified_returns_email_action(client, db_session):
     body = r.json()["data"]
     assert body["next_action"] == "email_verification_required"
     assert body.get("tokens") is None
+    assert body["email"] == "b12-noemail@example.com"
+    assert body["email_otp_sent"] is True
+    # A fresh code was queued via the fake email client.
+    assert len(_test_email_client.sent) == 1
+    assert _test_email_client.sent[0].to == "b12-noemail@example.com"
+
+
+@pytest.mark.asyncio
+async def test_login_email_unverified_respects_cooldown(client, db_session):
+    """A recent email-verification OTP inside the cooldown window makes the
+    inline login send a no-op: ``email_otp_sent=False`` and no new email."""
+    from datetime import UTC, datetime, timedelta
+    user = _seed(db_session,
+                 email_verified=False,
+                 phone="+2348088888888",
+                 email="b12-emailcooldown@example.com")
+    db_session.add(OtpCode(
+        user_id=user.id, email=user.email,
+        code_hash=hash_pin("000000"),
+        purpose=OtpPurpose.email_verification,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        created_at=datetime.now(UTC) - timedelta(seconds=10),
+    ))
+    db_session.commit()
+    _test_email_client.sent.clear()
+
+    r = await client.post("/api/v1/auth/login", json={
+        "phone": user.phone, "password": "Secret1!",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()["data"]
+    assert body["next_action"] == "email_verification_required"
+    assert body["email"] == "b12-emailcooldown@example.com"
+    assert body["email_otp_sent"] is False
+    assert len(_test_email_client.sent) == 0
 
 
 @pytest.mark.asyncio
