@@ -27,6 +27,7 @@ from app.api.deps import (
     get_bill_service,
     get_db,
     get_paystack_provider,
+    get_token_store,
     get_vtpass_provider,
     require_admin,
     require_admin_csrf,
@@ -42,10 +43,31 @@ from app.db.models.transaction_event import TransactionEvent
 from app.db.models.user import KycLevel, User
 from app.integrations.paystack.base import PaymentProvider
 from app.integrations.vtpass.base import BillProvider
+from app.schemas.admin_user_update import AdminUserUpdateRequest
 from app.services.admin_service import AdminService
 from app.services.auth_service import AuthService
 from app.services.bill_service import BillService
+from app.services.token_store import TokenStore
 from app.utils.responses import success
+
+# Maps the stable ValueError codes AdminService.update_user raises onto HTTP
+# status. Pydantic validation errors (bad email shape, extra key, name too
+# short) already surface as 422 VALIDATION_ERROR via the global handler.
+_UPDATE_USER_ERROR_STATUS = {
+    "NO_FIELDS": 400,
+    "USER_NOT_FOUND": 404,
+    "EMAIL_ALREADY_IN_USE": 409,
+    "PHONE_ALREADY_IN_USE": 409,
+    "INVALID_PHONE": 422,
+}
+
+_UPDATE_USER_ERROR_MESSAGE = {
+    "NO_FIELDS": "No fields to update.",
+    "USER_NOT_FOUND": "User not found",
+    "EMAIL_ALREADY_IN_USE": "That email is already in use by another account.",
+    "PHONE_ALREADY_IN_USE": "That phone number is already in use by another account.",
+    "INVALID_PHONE": "Enter a valid Nigerian phone number.",
+}
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -471,4 +493,51 @@ async def admin_user_detail(
             status_code=404,
             detail={"code": "USER_NOT_FOUND", "message": "User not found"},
         )
+    return success(data, request_id=getattr(request.state, "request_id", None))
+
+
+@router.patch(
+    "/users/{user_id}",
+    response_model=None,
+    # Same ordering rationale as admin_trigger_refund (Task 6): require_admin
+    # is the route-level dep (resolved before CSRF) AND a path-op param below,
+    # so an unauthenticated PATCH hits 401 ADMIN_AUTH_REQUIRED before the 403
+    # CSRF check. PATCH won't shadow the GET detail route on the same path.
+    dependencies=[Depends(require_admin), Depends(require_admin_csrf)],
+)
+async def admin_update_user(
+    user_id: str,
+    body: AdminUserUpdateRequest,
+    request: Request,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    token_store: Annotated[TokenStore, Depends(get_token_store)],
+):
+    """Edit a user's basic identity fields (name / email / phone).
+
+    True PATCH: only the supplied fields change (``exclude_unset``), an empty
+    body is a 400 ``NO_FIELDS``. Email/phone changes apply without an OTP (the
+    admin is trusted) but carry the same re-verification side effects as the
+    user's own flows: an email change clears ``email_verified``; a phone change
+    clears ``phone_verified`` AND signs the user out (all tokens revoked).
+
+    Returns the SAME payload shape as ``GET /admin/users/{id}`` so the console
+    can swap its user-detail state directly.
+    """
+    try:
+        data = await AdminService(db=db).update_user(
+            user_id=user_id,
+            patch=body.model_dump(exclude_unset=True),
+            actor=admin,
+            token_store=token_store,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        status = _UPDATE_USER_ERROR_STATUS.get(code)
+        if status is None:
+            raise
+        raise HTTPException(
+            status_code=status,
+            detail={"code": code, "message": _UPDATE_USER_ERROR_MESSAGE[code]},
+        ) from exc
     return success(data, request_id=getattr(request.state, "request_id", None))

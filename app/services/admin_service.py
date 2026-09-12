@@ -9,9 +9,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 if TYPE_CHECKING:
+    from app.db.models.admin_user import AdminUser
     from app.integrations.paystack.base import PaymentProvider
     from app.integrations.vtpass.base import BillProvider
+    from app.services.token_store import TokenStore
 
+from app.core.logger import log
 from app.db.models._enums import TransactionStatus, TransactionType
 from app.db.models.notification_log import (
     NotificationChannel,
@@ -23,6 +26,8 @@ from app.db.models.transaction import Transaction
 from app.db.models.transaction_event import TransactionEvent
 from app.db.models.user import KycLevel, User
 from app.db.models.wallet import Wallet
+from app.utils.email import normalize_email
+from app.utils.phone import InvalidPhoneFormat, normalize_to_e164
 
 _SUCCESS = TransactionStatus.success
 _AWAITING = (TransactionStatus.refund_pending, TransactionStatus.refund_failed)
@@ -537,6 +542,116 @@ class AdminService:
                 for t in recent
             ],
         }
+
+    async def update_user(
+        self,
+        *,
+        user_id: str,
+        patch: dict,
+        actor: "AdminUser",
+        token_store: "TokenStore",
+    ) -> dict:
+        """Edit a user's basic identity fields (name / email / phone).
+
+        Trusted admin surface, so email/phone changes apply WITHOUT the OTP
+        step the self-service flows require. Side effects mirror the user's
+        own verified-change paths:
+
+          * ``email`` change -> ``email_verified = False`` (must re-verify).
+          * ``phone`` change -> ``is_phone_verified = False`` + stamp
+            ``tokens_revoked_at`` + ``token_store.revoke_all`` so every
+            outstanding access/refresh token for that user dies. The user is
+            effectively signed out (mirrors ``confirm_phone_change``).
+
+        Raises ``ValueError`` with a stable code the endpoint maps to HTTP:
+          NO_FIELDS -> 400, USER_NOT_FOUND -> 404,
+          EMAIL_ALREADY_IN_USE / PHONE_ALREADY_IN_USE -> 409,
+          INVALID_PHONE -> 422.
+
+        Returns the fresh ``get_user_detail`` dict (same shape as
+        ``GET /admin/users/{id}``) so the FE can replace its state directly.
+
+        Audit: emits one structured ``log.info`` line with the actor id/email,
+        the target id, and the LIST OF CHANGED FIELD NAMES only — never the
+        new email/phone VALUES (PII stays out of the ops log stream).
+        """
+        import uuid
+
+        _editable = ("full_name", "email", "phone")
+        if not any(patch.get(f) is not None for f in _editable):
+            raise ValueError("NO_FIELDS")
+
+        try:
+            uid = uuid.UUID(user_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("USER_NOT_FOUND") from exc
+        user = self._db.query(User).filter(User.id == uid).first()
+        if user is None:
+            raise ValueError("USER_NOT_FOUND")
+
+        changed: list[str] = []
+        revoke_tokens = False
+
+        if patch.get("full_name") is not None:
+            new_name = patch["full_name"].strip()
+            if new_name != user.full_name:
+                user.full_name = new_name
+                changed.append("full_name")
+
+        if patch.get("email") is not None:
+            new_email = normalize_email(patch["email"])
+            if new_email != user.email:
+                collision = (
+                    self._db.query(User)
+                    .filter(User.email == new_email, User.id != user.id)
+                    .first()
+                )
+                if collision is not None:
+                    raise ValueError("EMAIL_ALREADY_IN_USE")
+                user.email = new_email
+                user.email_verified = False
+                changed.append("email")
+
+        if patch.get("phone") is not None:
+            try:
+                new_phone = normalize_to_e164(patch["phone"])
+            except InvalidPhoneFormat as exc:
+                raise ValueError("INVALID_PHONE") from exc
+            if new_phone != user.phone:
+                collision = (
+                    self._db.query(User)
+                    .filter(User.phone == new_phone, User.id != user.id)
+                    .first()
+                )
+                if collision is not None:
+                    raise ValueError("PHONE_ALREADY_IN_USE")
+                user.phone = new_phone
+                user.is_phone_verified = False
+                # Rotating the phone invalidates every live session: stamp the
+                # access-token gate and nuke the refresh keyspace (below, after
+                # commit) exactly as confirm_phone_change does.
+                user.tokens_revoked_at = datetime.now(UTC)
+                revoke_tokens = True
+                changed.append("phone")
+
+        self._db.commit()
+
+        # Refresh-token revocation is a Redis side effect — run it AFTER the
+        # DB commit so a rollback never leaves tokens killed for an un-applied
+        # change (same ordering as AuthService.confirm_phone_change).
+        if revoke_tokens:
+            await token_store.revoke_all(user_id=str(user.id))
+
+        # Audit: field NAMES only, never the new email/phone values (PII).
+        log.info(
+            "admin_user_update actor_id=%s actor_email=%s target_user_id=%s changed_fields=%s",
+            actor.id,
+            actor.email,
+            str(user.id),
+            changed,
+        )
+
+        return self.get_user_detail(user_id=str(user.id))
 
     async def requery_transaction(
         self,
