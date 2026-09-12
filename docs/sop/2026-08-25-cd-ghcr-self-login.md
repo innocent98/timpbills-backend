@@ -1,11 +1,23 @@
-# CD: self-authenticate the VPS to GHCR during deploy
+# CD: fix production deploy (GHCR auth + pipefail crontab)
 
 ## What shipped
-`.github/workflows/cd.yml` — both `staging-deploy` and `production-deploy` now run
-`docker login ghcr.io` on the VPS inside the SSH deploy step, using the run's
-ephemeral `GITHUB_TOKEN`, immediately before `docker compose pull`. Removes the
-dependency on a manually pre-configured `read:packages` PAT living in the host's
-`~/.docker/config.json`.
+Two `.github/workflows/cd.yml` fixes that took the production deploy from failing to
+green (verified: `https://api.timpbills.com/api/v1/health` → `200 {"status":"ok"}`,
+2026-08-25):
+
+1. **GHCR self-login** (PR #11 → `main`). Both `staging-deploy` and
+   `production-deploy` now run `docker login ghcr.io` on the VPS inside the SSH
+   deploy step, using the run's ephemeral `GITHUB_TOKEN`, immediately before
+   `docker compose pull`. Removes the dependency on a manually pre-configured
+   `read:packages` PAT living in the host's `~/.docker/config.json`.
+2. **Pipefail crontab guard** (PR #12 → `main`). Added `|| true` to the production
+   backup-cron install pipeline, mirroring the staging block (see "Second root
+   cause" below).
+
+> Deploy-chain gotcha (cost a full round-trip): CD triggers on
+> `on: workflow_run: workflows:["CI"]`, so it **always executes `cd.yml` from the
+> default branch (`main`)** — never from the branch whose CI fired it. The first fix
+> pushed only to `develop` had zero effect on the deploy; it had to reach `main`.
 
 ## Why
 Production (and then staging) deploys failed at `docker compose ... pull` with:
@@ -54,27 +66,45 @@ Key decisions / tradeoffs:
   logged in on the host is still useful for *manual* ops like `docker compose pull`
   by hand — orthogonal to this automated-path fix.)
 
-## What's involved
-- `.github/workflows/cd.yml` — staging step (~L119-146) and production step
-  (~L364-397).
+## Second root cause — pipefail crontab (PR #12)
+With the pull fixed, the production deploy reached a **healthy** stack
+(`Production API is healthy.`, all containers `Up (healthy)`) and *then* exited 1
+on the backup-cron install:
 
-## Verification
-- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/cd.yml'))"` → OK.
-- `permissions: packages: write` present at workflow level → `GITHUB_TOKEN` can pull.
-- Not yet run live — needs a push (develop → staging, main → production) to exercise.
+```bash
+(crontab -l 2>/dev/null | grep -v "backup_cron.sh"; echo "…") | crontab -
+```
+
+On a VPS with no existing crontab, `crontab -l` and `grep -v` both exit 1; with
+`set -o pipefail` the pipeline returns 1 and `set -e` aborts the job — *after* a
+successful deploy. Staging already carried the `|| true` guard for exactly this;
+production did not. Fix = add `|| true`, mirroring staging.
+
+## What's involved
+- `.github/workflows/cd.yml` — staging SSH step + production SSH step (GHCR login
+  before `compose pull`; `|| true` on the production crontab pipeline).
+
+## Verification (live)
+- `python3 -c "import yaml; yaml.safe_load(...)"` → OK.
+- `permissions: packages: write` present → `GITHUB_TOKEN` can pull the private image.
+- Production deploy run **succeeded** end-to-end: `Log in to GHCR` ✓, `Pull image +
+  deploy production` ✓, migrations + `up -d` ✓, health loop ✓.
+- External check: `curl https://api.timpbills.com/api/v1/health` → `200
+  {"status":"ok"}` (2026-08-25).
 
 ## Operate / roll back
-Re-run the deploy after merging. Rollback = revert this commit; the host then
-falls back to needing a manual `docker login` again.
+Deploys are push-driven (develop → staging, main → production), workflow file taken
+from `main`. Rollback = revert PR #11/#12 on `main`; the host then falls back to
+needing a manual `docker login` and the crontab step can false-fail again.
 
 ## Follow-ups (NOT fixed here)
-- **`.env` missing on the VPS.** Same runs warn `POSTGRES_USER / POSTGRES_PASSWORD
-  / POSTGRES_DB / REDIS_PASSWORD ... not set, defaulting to blank`. `docker compose`
-  interpolates these from `./.env` at parse time (compose L158-160, L205). Once the
-  pull succeeds, `up -d` will start Postgres with blank creds unless `.env` at
-  `DEPLOY_PATH` carries them. Decide which:
-  1. If the "Decrypt … .env" step logs *"server .env must already exist"* →
-     `ENV_ENCRYPTION_KEY` is not set on that GitHub **environment**; set it so the
-     `.env.{staging,production}.enc` file decrypts and scp delivers a full `.env`.
-  2. If it logs *"Decrypted … successfully"* but the warnings persist → the encrypted
-     env file itself lacks those 4 keys; re-encrypt it with the complete env.
+- **`.env` on the VPS lacks `POSTGRES_USER/PASSWORD/DB` + `REDIS_PASSWORD`.** Deploys
+  still warn `… not set, defaulting to blank`; `docker compose` interpolates these
+  from `./.env` at parse time (compose L158-160, L205). It came up healthy this time
+  only because the prod DB volume was already initialised — a fresh volume would fail.
+  Decide which:
+  1. "Decrypt … .env" logs *"server .env must already exist"* → `ENV_ENCRYPTION_KEY`
+     not set on that GitHub **environment**; set it so the `.env.{env}.enc` decrypts
+     and scp delivers a full `.env`.
+  2. Logs *"Decrypted … successfully"* but warnings persist → the `.enc` itself lacks
+     those 4 keys; re-encrypt with the complete env (`./scripts/env.sh encrypt <env>`).
