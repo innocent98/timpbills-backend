@@ -60,6 +60,11 @@ Auth: opaque admin session cookie (`require_admin`) + double-submit CSRF
   - [x] SOP: `2026-09-12-admin-edit-user-basic-info.md`
   - [x] FE guide: `fe-integration-guide-admin-edit-user.md` (captured-live)
 
+## Ops / infra fixes
+
+- [x] Celery beat healthcheck fixed (add `procps`/`pgrep` to runtime image; beat was cosmetically unhealthy) + beat `start_period` (2026-09-15)
+  - [x] SOP: `2026-09-15-beat-healthcheck-procps.md`
+
 ## Security hardening
 
 - [x] API docs (Swagger/ReDoc/OpenAPI) disabled on staging + production, local-only (2026-09-15)

@@ -145,6 +145,9 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      # Give beat time to import the app graph + start before the check counts
+      # failures, so it does not flap unhealthy on every deploy. Mirrors worker.
+      start_period: 30s
     logging:
       driver: json-file
       options:

@@ -86,9 +86,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     WEB_CONCURRENCY=4
 
 # Runtime-only system deps. libpq5 supplies the Postgres client lib that
-# psycopg2 dynamically links against. No compiler, no curl, no Poetry.
+# psycopg2 dynamically links against. procps supplies pgrep, which the beat
+# container's healthcheck uses (`pgrep -f 'celery.*beat'`); python:slim omits
+# it, so without this the beat healthcheck fails 127 and reports unhealthy even
+# while beat is running fine. No compiler, no curl, no Poetry.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 \
+        libpq5 procps \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 1000 appuser \
  && useradd  --system --uid 1000 --gid appuser --home-dir /app --no-create-home appuser
