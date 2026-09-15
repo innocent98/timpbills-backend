@@ -1,0 +1,16 @@
+{
+  "request_body": {
+    "amount": "50.00"
+  },
+  "response_status": 422,
+  "response_body": {
+    "success": false,
+    "data": null,
+    "error": {
+      "code": "AMOUNT_TOO_LOW",
+      "message": "Minimum funding amount is \u20a6100.",
+      "details": null
+    },
+    "request_id": "2d6af23ab8524c1ca092fd1f3e8dd4fa"
+  }
+}
