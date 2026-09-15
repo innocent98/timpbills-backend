@@ -11,10 +11,29 @@ GitHub task lists so progress is visible at a glance. Complements the SOPs
 
 ## Snapshot
 
-- Modules mapped: 1 (Admin console API)
+- Modules mapped: 2 (Admin console API, Wallet funding)
 - This file is NOT yet a complete map of the whole backend - it is seeded from
   the admin surface and grows as areas are worked. Treat unlisted modules as
   "not yet mapped here", not "not built".
+
+## Wallet funding (`/api/v1/wallet`) - in progress
+
+Auth: bearer access token; money ops also require `X-Pin-Token` +
+`Idempotency-Key`.
+
+- [x] **Absorb Paystack card funding fee - `POST /wallet/fund`** (2026-09-15)
+  - [x] Charge exactly the entered amount (`gross_kobo = int(amount * 100)`);
+        user pays no fee (`fee = 0.00` on tx + response)
+  - [x] Removed `_calculate_fee`; `PAYSTACK_CARD_FEE_*` retained-but-unused in config
+  - [x] Server-side minimum `WALLET_MIN_FUND_NAIRA = 100` -> `422 AMOUNT_TOO_LOW`
+        (checked before idempotency slot / Paystack call)
+  - [x] Webhook card `charge.success` records `paystack_fee` in transition context (reporting only)
+  - [x] Tests: `test_wallet_fund.py` (+2), `test_webhooks_paystack.py` (+1), all green
+  - [x] SOP: `2026-09-15-absorb-paystack-card-funding-fee.md`
+  - [x] FE guide: `fe-integration-guide-wallet-funding.md` (captured-live)
+- Note: bank-transfer (DVA) funding already absorbs its fee; no
+  wallet-to-bank withdrawal path exists. Funding is a cost center recovered
+  via bill-payment margins.
 
 ## Admin console API (`/api/v1/admin`) - in progress
 

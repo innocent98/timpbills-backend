@@ -52,28 +52,6 @@ async def get_wallet(
     )
 
 
-def _calculate_fee(amount: Decimal) -> Decimal:
-    """Paystack local-card fee passed through to the user.
-
-    Wallet funding is break-even for Timpbills per PRD §6.3 — we don't add
-    a margin here. The fee shown is exactly what Paystack will deduct from
-    the settlement for this transaction, so the user's wallet receives
-    their requested amount in full.
-
-        fee = amount * 1.5% + (₦100 when amount ≥ ₦2,500), capped at ₦2,000
-    """
-    pct = Decimal(str(settings.PAYSTACK_CARD_FEE_PERCENT)) / Decimal("100")
-    fixed = Decimal(settings.PAYSTACK_CARD_FEE_FIXED_NAIRA)
-    threshold = Decimal(settings.PAYSTACK_CARD_FEE_FIXED_THRESHOLD_NAIRA)
-    cap = Decimal(settings.PAYSTACK_CARD_FEE_CAP_NAIRA)
-
-    fee = amount * pct
-    if amount >= threshold:
-        fee += fixed
-    fee = fee.quantize(Decimal("0.01"))
-    return min(fee, cap)
-
-
 @router.post("/fund", response_model=None, status_code=200)
 @limiter.limit("30/minute", key_func=per_user_or_ip)
 async def fund_wallet(
@@ -87,6 +65,26 @@ async def fund_wallet(
     idem: IdempotencyService = Depends(get_idempotency_service),
     paystack: PaymentProvider = Depends(get_paystack_provider),
 ):
+    """Initialize a Paystack card checkout to top up the wallet.
+
+    Timpbills absorbs the Paystack card fee: the user is charged EXACTLY
+    the amount they enter and their wallet is credited that same amount in
+    full (funding is a cost center recovered via bill-payment margins, not
+    a break-even pass-through). The webhook records Paystack's real fee for
+    reporting without charging the user. See docs/sop/2026-09-15-absorb-
+    paystack-card-funding-fee.md.
+    """
+    # Minimum-amount gate. A pure validation failure must not consume an
+    # idempotency slot, so this runs BEFORE lookup_or_acquire.
+    if body.amount < settings.WALLET_MIN_FUND_NAIRA:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "AMOUNT_TOO_LOW",
+                "message": f"Minimum funding amount is ₦{settings.WALLET_MIN_FUND_NAIRA:,}.",
+            },
+        )
+
     req_hash = idem.hash_body(
         user_id=str(user.id),
         endpoint="/wallet/fund",
@@ -141,7 +139,9 @@ async def fund_wallet(
                 },
             )
 
-        fee = _calculate_fee(body.amount)
+        # Timpbills absorbs the Paystack card fee: the user pays no fee and
+        # is charged exactly the amount they entered.
+        fee = Decimal("0.00")
         tx = tx_svc.create(
             user_id=user.id,
             type=TransactionType.wallet_funding,
@@ -149,7 +149,7 @@ async def fund_wallet(
             fee=fee,
         )
 
-        gross_kobo = int((body.amount + fee) * 100)
+        gross_kobo = int(body.amount * 100)
         init = await paystack.initialize(
             amount_kobo=gross_kobo,
             email=user.email,

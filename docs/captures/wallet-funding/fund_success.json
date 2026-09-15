@@ -1,0 +1,17 @@
+{
+  "request_body": {
+    "amount": "5000.00"
+  },
+  "response_status": 200,
+  "response_body": {
+    "success": true,
+    "data": {
+      "reference": "202609151208TMP361f2cY7TNJ5ZR30",
+      "authorization_url": "https://checkout.paystack.com/fake/202609151208TMP361f2cY7TNJ5ZR30",
+      "amount": "5000.00",
+      "fee": "0.00"
+    },
+    "error": null,
+    "request_id": "4e0c5c9c6b384164acb030d087dc3874"
+  }
+}

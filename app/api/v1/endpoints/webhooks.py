@@ -348,11 +348,15 @@ async def paystack_webhook(
                     "code": "KYC_LIMIT_EXCEEDED",
                     "message": "Credit would exceed the user's KYC balance cap",
                 })
+            # Record Paystack's real fee for this funding (kobo) so finance
+            # can report Timpbills' absorbed card cost. The user is not
+            # charged this fee (card-fee absorption 2026-09-15); we credit
+            # tx.amount in full. Mirrors the DVA path's context.
             tx_svc.transition(
                 tx,
                 to_status=TransactionStatus.success,
                 reason="paystack.webhook.charge.success",
-                context={"paystack_event_id": event_id},
+                context={"paystack_event_id": event_id, "paystack_fee": data.get("fees")},
             )
             # Notify: only wallet-funding lands a balance change the
             # user cares about here. Outbound-tx charges don't come

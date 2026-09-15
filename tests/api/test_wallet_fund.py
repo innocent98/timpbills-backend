@@ -103,6 +103,88 @@ async def test_fund_wallet_happy_path(client):
 
 
 @pytest.mark.asyncio
+async def test_fund_wallet_charges_exact_amount_and_absorbs_fee(client, db_session):
+    """Card-fee absorption (2026-09-15): Timpbills eats the Paystack card fee.
+
+    The user is charged EXACTLY the amount they entered (no fee added on
+    top), the response reports fee == 0, and the created transaction row
+    carries fee == 0. Regression guard against re-introducing the old
+    amount+fee pass-through gross.
+    """
+    from decimal import Decimal
+    from app.db.models.transaction import Transaction
+
+    _, headers = await _seed_logged_in_user(client)
+    pin_token = await _pin_token(client, headers)
+
+    r = await client.post(
+        "/api/v1/wallet/fund",
+        json={"amount": "5000.00"},
+        headers={
+            **headers,
+            "X-Pin-Token": pin_token,
+            "Idempotency-Key": str(uuid4()),
+        },
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["amount"] == "5000.00"
+    assert data["fee"] == "0.00"
+
+    # Paystack was asked to charge exactly the entered amount, in kobo,
+    # with NO fee added on top.
+    from app.api.deps import _fake_paystack_singleton as fps
+    assert fps.initialized[-1] == (data["reference"], 500000)
+
+    # The persisted transaction records zero fee.
+    tx = (
+        db_session.query(Transaction)
+        .filter(Transaction.reference == data["reference"])
+        .one()
+    )
+    assert tx.fee == Decimal("0.00")
+    assert tx.amount == Decimal("5000.00")
+
+
+@pytest.mark.asyncio
+async def test_fund_wallet_below_minimum_returns_422_without_touching_paystack(client):
+    """Server-side minimum funding gate. An amount below
+    settings.WALLET_MIN_FUND_NAIRA is refused with 422 AMOUNT_TOO_LOW
+    BEFORE any idempotency slot is acquired and BEFORE Paystack is called.
+
+    Verifies two things beyond the status code:
+      1. Paystack.initialize was never invoked (no checkout session created).
+      2. No idempotency slot leaked — reusing the SAME key with a valid
+         amount still succeeds (a leaked in-flight slot would 409).
+    """
+    from app.api.deps import _fake_paystack_singleton as fps
+    from app.core.config import settings
+
+    _, headers = await _seed_logged_in_user(client)
+    pin_token = await _pin_token(client, headers)
+
+    key = str(uuid4())
+    too_low = str(settings.WALLET_MIN_FUND_NAIRA - 1)
+    r = await client.post(
+        "/api/v1/wallet/fund",
+        json={"amount": too_low},
+        headers={**headers, "X-Pin-Token": pin_token, "Idempotency-Key": key},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "AMOUNT_TOO_LOW"
+    # Paystack was never called for the rejected request.
+    assert fps.initialized == []
+
+    # No idempotency slot leaked: the same key + a valid amount still works.
+    r2 = await client.post(
+        "/api/v1/wallet/fund",
+        json={"amount": str(settings.WALLET_MIN_FUND_NAIRA)},
+        headers={**headers, "X-Pin-Token": pin_token, "Idempotency-Key": key},
+    )
+    assert r2.status_code == 200, r2.text
+
+
+@pytest.mark.asyncio
 async def test_fund_wallet_requires_pin_token(client):
     _, headers = await _seed_logged_in_user(client)
     r = await client.post(
