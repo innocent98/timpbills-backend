@@ -60,6 +60,17 @@ Auth: opaque admin session cookie (`require_admin`) + double-submit CSRF
   - [x] SOP: `2026-09-12-admin-edit-user-basic-info.md`
   - [x] FE guide: `fe-integration-guide-admin-edit-user.md` (captured-live)
 
+## Security hardening
+
+- [x] API docs (Swagger/ReDoc/OpenAPI) disabled on staging + production, local-only (2026-09-15)
+  - [x] `Settings.docs_enabled`; `main.py` gates the three doc URLs
+  - [x] Tests: `tests/core/test_docs_gate.py`; SOP: `2026-09-15-disable-swagger-docs-staging-prod.md`
+
+## Wallet funding
+
+- [x] Timpbills absorbs Paystack card funding fee; N100 server minimum (2026-09-15, prod)
+  - [x] SOP `2026-09-15-absorb-paystack-card-funding-fee.md`; FE guide `fe-integration-guide-wallet-funding.md`
+
 ## Backlog / upcoming (admin console)
 
 - [ ] Admin action audit trail (a non-tx audit surface; name/email/phone edits

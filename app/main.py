@@ -32,12 +32,18 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# Swagger UI, ReDoc and the OpenAPI schema are served only where
+# settings.docs_enabled is true (local development + tests). On the deployed
+# staging and production servers all three are None, so the routes 404 and the
+# API surface is not exposed. See Settings.docs_enabled.
+_docs_enabled = settings.docs_enabled
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    docs_url=f"{settings.API_V1_STR}/docs",
-    redoc_url=f"{settings.API_V1_STR}/redoc",
+    openapi_url=f"{settings.API_V1_STR}/openapi.json" if _docs_enabled else None,
+    docs_url=f"{settings.API_V1_STR}/docs" if _docs_enabled else None,
+    redoc_url=f"{settings.API_V1_STR}/redoc" if _docs_enabled else None,
 )
 
 # Attach limiter to app state
@@ -67,11 +73,14 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 def root():
-    return {
+    body = {
         "message": f"Welcome to {settings.PROJECT_NAME} API",
         "version": settings.VERSION,
-        "docs": f"{settings.API_V1_STR}/docs",
     }
+    # Only advertise the docs link where the docs are actually served.
+    if _docs_enabled:
+        body["docs"] = f"{settings.API_V1_STR}/docs"
+    return body
 
 
 @app.get("/health")
