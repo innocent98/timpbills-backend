@@ -119,6 +119,51 @@ async def test_charge_success_credits_wallet(client):
 
 
 @pytest.mark.asyncio
+async def test_charge_success_records_paystack_fee_in_transition_context(
+    db_session, client
+):
+    """Card-fee absorption (2026-09-15): the user is not charged the fee,
+    but Timpbills still needs Paystack's real cost per funding for reporting.
+    The card charge.success handler records `paystack_fee` (data.fees, in
+    kobo) into the success transition's context, mirroring the DVA path.
+    """
+    from app.db.models.transaction import Transaction
+    from app.db.models._enums import TransactionStatus
+    from app.db.models.transaction_event import TransactionEvent
+
+    _, headers = await _seed_logged_in_user(client)
+    ref = await _init_funding(client, headers, amount="5000.00")
+
+    from app.api.deps import _fake_paystack_singleton as fps
+    fps.will_succeed(ref)
+
+    # Real Paystack card charge.success payloads carry `fees` (kobo).
+    body = {
+        "event": "charge.success",
+        "data": {"id": "evt_fee", "reference": ref, "fees": 750},
+    }
+    r = await client.post(
+        "/api/v1/webhooks/paystack",
+        content=json.dumps(body).encode(),
+        headers={"x-paystack-signature": "FAKE_SIG"},
+    )
+    assert r.status_code == 200
+
+    db_session.expire_all()
+    tx = db_session.query(Transaction).filter(Transaction.reference == ref).one()
+    success_event = (
+        db_session.query(TransactionEvent)
+        .filter(
+            TransactionEvent.transaction_id == tx.id,
+            TransactionEvent.to_status == TransactionStatus.success,
+        )
+        .one()
+    )
+    assert success_event.context["paystack_fee"] == 750
+    assert success_event.context["paystack_event_id"] == "evt_fee"
+
+
+@pytest.mark.asyncio
 async def test_duplicate_event_is_deduped(client):
     _, headers = await _seed_logged_in_user(client)
     ref = await _init_funding(client, headers, amount="5000.00")

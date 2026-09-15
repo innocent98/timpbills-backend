@@ -77,9 +77,19 @@ class Settings(BaseSettings):
     # its own "/close" page which requires a manual tap.
     PAYSTACK_CALLBACK_URL: str = "https://timpbills.com/paystack/callback"
 
-    # Paystack card-fee pass-through (no Timpbills margin on wallet funding per PRD §6.3).
-    # Defaults match Paystack's published local-card fee structure:
-    #   fee = amount * 1.5% + (₦100 if amount >= ₦2,500), capped at ₦2,000 total.
+    # Minimum wallet-funding amount (naira). Enforced server-side in
+    # POST /wallet/fund before any Paystack call. Guards against dust
+    # top-ups whose Paystack fee (which Timpbills now absorbs) would
+    # dwarf the credited amount.
+    WALLET_MIN_FUND_NAIRA: int = 100
+
+    # Retained-but-unused since card-fee absorption (2026-09-15): Timpbills
+    # now absorbs the Paystack card fee, so _calculate_fee and these four
+    # fields are no longer referenced. Kept (not deleted) to avoid any
+    # env-mismatch risk in deployed .env files; Settings uses extra="ignore"
+    # so their presence is harmless. Defaults match Paystack's published
+    # local-card fee structure: amount * 1.5% + (N100 if amount >= N2,500),
+    # capped at N2,000 total.
     PAYSTACK_CARD_FEE_PERCENT: float = 1.5
     PAYSTACK_CARD_FEE_FIXED_NAIRA: int = 100
     PAYSTACK_CARD_FEE_FIXED_THRESHOLD_NAIRA: int = 2500
