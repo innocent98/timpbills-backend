@@ -294,6 +294,14 @@ class Settings(BaseSettings):
     ADMIN_COOKIE_SECURE: bool = True
     ADMIN_COOKIE_DOMAIN: str | None = None  # set to ".timpbills.com" in staging/prod
 
+    @property
+    def docs_enabled(self) -> bool:
+        """Whether the interactive API docs (Swagger UI, ReDoc) and the
+        OpenAPI schema are served. Disabled on the deployed staging and
+        production servers so the API surface is not exposed publicly;
+        enabled everywhere else (local development, tests)."""
+        return self.ENVIRONMENT.strip().lower() not in {"staging", "production"}
+
     class Config:
         case_sensitive = True
         env_file = ".env"
