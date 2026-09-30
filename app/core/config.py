@@ -2,8 +2,14 @@ import json
 from decimal import Decimal
 from typing import Any
 
-from pydantic import EmailStr, field_validator
+from pydantic import EmailStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+# Environments where fake third-party providers may be selected (via
+# FORCE_FAKE_PROVIDERS=true or a missing API key). Same set every provider
+# factory enforces; anything else (staging / preview / production / a typo)
+# must run against the real providers.
+FAKE_ELIGIBLE_ENVS = frozenset({"dev", "development", "test", "testing", "local"})
 
 
 class Settings(BaseSettings):
@@ -145,8 +151,9 @@ class Settings(BaseSettings):
     # (via GET /kyc/config) to initialize the Dojah widget. The two widget
     # IDs select the published BVN/NIN + selfie + liveness flows. The
     # webhook secret validates the x-dojah-signature HMAC-SHA256 header.
-    # Real Dojah is the working path; FakeKycProvider is test-only, selected
-    # by FORCE_FAKE_PROVIDERS or when these keys are unset.
+    # Real Dojah is the working path; FakeKycProvider (approves everything)
+    # is dev/test-only. Outside FAKE_ELIGIBLE_ENVS, DOJAH_API_KEY is required
+    # and settings load fails without it — see _refuse_fake_kyc_outside_dev.
     DOJAH_API_KEY: str | None = None
     DOJAH_APP_ID: str | None = None
     DOJAH_PUBLIC_KEY: str | None = None
@@ -293,6 +300,28 @@ class Settings(BaseSettings):
     ADMIN_CSRF_COOKIE_NAME: str = "admin_csrf"
     ADMIN_COOKIE_SECURE: bool = True
     ADMIN_COOKIE_DOMAIN: str | None = None  # set to ".timpbills.com" in staging/prod
+
+    @model_validator(mode="after")
+    def _refuse_fake_kyc_outside_dev(self) -> "Settings":
+        """Fail fast at boot if the approve-everything KYC fake could be
+        selected outside dev/test. Mirrors the runtime gate in
+        app/integrations/dojah/factory.py so a bad deploy never serves
+        traffic (or runs a Celery task) with KYC silently bypassed."""
+        env = self.ENVIRONMENT.strip().lower()
+        if env in FAKE_ELIGIBLE_ENVS:
+            return self
+        if self.FORCE_FAKE_PROVIDERS:
+            raise ValueError(
+                f"FORCE_FAKE_PROVIDERS=true is not allowed in ENVIRONMENT={env!r}; "
+                f"fake providers are only usable in {sorted(FAKE_ELIGIBLE_ENVS)}."
+            )
+        if not self.DOJAH_API_KEY:
+            raise ValueError(
+                f"DOJAH_API_KEY is required in ENVIRONMENT={env!r}. Refusing to "
+                f"start: without it KYC would fall back to a fake that approves "
+                f"every BVN/NIN verification."
+            )
+        return self
 
     @property
     def docs_enabled(self) -> bool:
