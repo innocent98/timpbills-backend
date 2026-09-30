@@ -200,6 +200,47 @@ async def test_confirm_phone_change_wrong_otp(client):
 
 
 @pytest.mark.asyncio
+async def test_confirm_phone_change_compares_otp_in_constant_time(
+    client, monkeypatch
+):
+    """The OTP check must go through hmac.compare_digest, not ``==``, so
+    response timing does not leak how many leading digits matched."""
+    import hmac
+
+    from app.services import auth_service as auth_service_mod
+
+    calls: list[tuple[bytes, bytes]] = []
+    real_compare = hmac.compare_digest
+
+    def _spy(a, b):
+        calls.append((a, b))
+        return real_compare(a, b)
+
+    monkeypatch.setattr(auth_service_mod.hmac, "compare_digest", _spy)
+
+    headers, _, _ = await _seed_user(
+        client, email="pc-ct@test.co", phone="+2348099111107"
+    )
+    new_phone = "+2348099222207"
+    req = await client.post(
+        "/api/v1/auth/phone/change-request",
+        headers=headers,
+        json={"new_phone": new_phone},
+    )
+    request_id = req.json()["data"]["request_id"]
+    otp = _last_sms_to(new_phone)
+    assert otp is not None
+
+    cfm = await client.post(
+        "/api/v1/auth/phone/change-confirm",
+        headers=headers,
+        json={"request_id": request_id, "otp": otp},
+    )
+    assert cfm.status_code == 200, cfm.text
+    assert (otp.encode(), otp.encode()) in calls
+
+
+@pytest.mark.asyncio
 async def test_confirm_phone_change_unknown_request_id(client):
     headers, _, _ = await _seed_user(
         client, email="pc-unk@test.co", phone="+2348099111104"

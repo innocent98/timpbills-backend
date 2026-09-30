@@ -70,6 +70,14 @@ Auth: opaque admin session cookie (`require_admin`) + double-submit CSRF
 - [x] API docs (Swagger/ReDoc/OpenAPI) disabled on staging + production, local-only (2026-09-15)
   - [x] `Settings.docs_enabled`; `main.py` gates the three doc URLs
   - [x] Tests: `tests/core/test_docs_gate.py`; SOP: `2026-09-15-disable-swagger-docs-staging-prod.md`
+- [x] KYC fake provider gated to dev/test — closes KYC/AML bypass where a missing
+      `DOJAH_API_KEY` in prod silently approved every BVN/NIN upgrade (2026-09-30)
+  - [x] Dojah factory env-allowlist + `FakeKycInEligibleEnvError` (mirrors Termii/Paystack)
+  - [x] Boot-time fail-fast: `Settings._refuse_fake_kyc_outside_dev`
+  - [x] Tests: `tests/integrations/dojah/test_factory.py`, `tests/core/test_config_kyc_fail_fast.py`
+  - [x] SOP: `2026-09-30-kyc-fake-provider-env-gate.md`
+  - [ ] Deploy prerequisite: confirm non-empty `DOJAH_API_KEY` in `.env.staging` / `.env.production`
+- [x] Phone-change confirm OTP compared with `hmac.compare_digest` (2026-09-30)
 
 ## Wallet funding
 
@@ -86,3 +94,7 @@ Auth: opaque admin session cookie (`require_admin`) + double-submit CSRF
 - [ ] Pre-existing local test drift: `tests/core/test_admin_config_defaults.py`
       and `tests/core/test_config_dojah.py` fail locally on `.env` config
       defaults (unrelated to feature work; confirmed red before the edit-user change).
+- [x] CI latent break fixed: pinned `sqlalchemy <2.1` (2.1 defaults `postgresql://` to
+      psycopg 3, not installed). Follow-up: commit `poetry.lock` (currently gitignored).
+- [ ] Boot-time "missing key" validation for `TERMII_API_KEY` / `RESEND_API_KEY`;
+      consolidate per-factory `_FAKE_ELIGIBLE_ENVS` onto `app.core.config.FAKE_ELIGIBLE_ENVS`.

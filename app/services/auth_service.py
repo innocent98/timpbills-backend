@@ -1,3 +1,4 @@
+import hmac
 import secrets
 import uuid as _uuid_mod
 from datetime import UTC, datetime, timedelta
@@ -1183,7 +1184,11 @@ class AuthService:
 
         if stored_user_id != str(user_id):
             raise ValueError("USER_MISMATCH")
-        if otp != expected_otp:
+        # Constant-time compare so response timing can't leak how many
+        # leading digits matched. Bytes, because compare_digest rejects
+        # non-ASCII str (the schema restricts to digits; the service is
+        # also called directly).
+        if not hmac.compare_digest(otp.encode(), expected_otp.encode()):
             raise ValueError("INVALID_OTP")
 
         user = self._db.query(User).filter(User.id == user_id).first()
