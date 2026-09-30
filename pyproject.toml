@@ -22,7 +22,7 @@ python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 passlib = {extras = ["bcrypt", "argon2"], version = "^1.7.4"}
 bcrypt = "~4.0.1"  # pin to 4.0.x — passlib 1.7 can't read bcrypt 4.1+ __about__ attr
 argon2-cffi = "^23.1.0"  # primary password scheme; passlib reads via its argon2 backend
-sqlalchemy = "^2.0.41"
+sqlalchemy = ">=2.0.41,<2.1"  # 2.1 defaults postgresql:// to psycopg 3 (not installed; we use psycopg2)
 alembic = "^1.15.0"
 loguru = "^0.7.3"
 emails = "^0.6"

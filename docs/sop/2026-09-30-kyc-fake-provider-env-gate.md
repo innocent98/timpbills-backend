@@ -67,6 +67,7 @@ would fail across a deploy. Not needed to close the timing issue.
 | `app/core/config.py` | `FAKE_ELIGIBLE_ENVS` constant; `_refuse_fake_kyc_outside_dev` model validator; Dojah comment updated |
 | `app/integrations/dojah/factory.py` | Env-allowlist gate, `FakeKycInEligibleEnvError`, docstring records the spec-decision reversal |
 | `app/services/auth_service.py` | `import hmac`; constant-time compare in `confirm_phone_change` |
+| `pyproject.toml` | `sqlalchemy = ">=2.0.41,<2.1"` — keeps CI on the psycopg2 driver |
 | `.env.example` | Dojah block: key is REQUIRED outside dev/test |
 | `tests/integrations/dojah/test_factory.py` | Rewritten: eligible envs -> fake; prod/staging/preview + missing/blank key -> raises; prod + forced -> raises; key present -> `DojahClient` |
 | `tests/core/test_config_kyc_fail_fast.py` | New: Settings-load fail-fast cases |
@@ -102,10 +103,9 @@ Local reproduction of every `ci.yml` job (Python 3.11, project `.venv`):
       `app.core.config.FAKE_ELIGIBLE_ENVS`.
 - [ ] Optionally store the phone-change OTP hashed in Redis (needs a
       payload-format migration window).
-- [ ] **CI latent break (pre-existing, unrelated):** `poetry.lock` is gitignored,
-      so CI re-resolves `sqlalchemy = "^2.0.41"` on every run. SQLAlchemy 2.1.x
-      makes `postgresql://` default to psycopg 3, which is not a dependency, so
-      alembic and the app fail with `No module named 'psycopg'`. The last green CI
-      (2026-09-15) resolved 2.0.53; today's resolution is 2.1.1. Fix by pinning
-      `sqlalchemy = ">=2.0.41,<2.1"`, using `postgresql+psycopg2://` URLs, or
-      committing the lockfile.
+- [x] **CI latent break (fixed in this PR):** `poetry.lock` is gitignored, so CI
+      re-resolves on every run; SQLAlchemy 2.1.x makes `postgresql://` default to
+      psycopg 3 (not a dependency) -> alembic/pytest fail with
+      `No module named 'psycopg'`. Pinned `sqlalchemy = ">=2.0.41,<2.1"` in
+      `pyproject.toml` (resolves 2.0.54); alembic + full suite verified green with
+      the plain `postgresql://` URL CI uses. Longer-term: commit `poetry.lock`.

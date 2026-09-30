@@ -94,8 +94,7 @@ Auth: opaque admin session cookie (`require_admin`) + double-submit CSRF
 - [ ] Pre-existing local test drift: `tests/core/test_admin_config_defaults.py`
       and `tests/core/test_config_dojah.py` fail locally on `.env` config
       defaults (unrelated to feature work; confirmed red before the edit-user change).
-- [ ] CI latent break: `poetry.lock` is gitignored, so CI now resolves SQLAlchemy 2.1.x,
-      which defaults `postgresql://` to psycopg 3 (not installed) -> alembic/pytest
-      `No module named 'psycopg'`. Pin `sqlalchemy <2.1` or use `postgresql+psycopg2://`.
+- [x] CI latent break fixed: pinned `sqlalchemy <2.1` (2.1 defaults `postgresql://` to
+      psycopg 3, not installed). Follow-up: commit `poetry.lock` (currently gitignored).
 - [ ] Boot-time "missing key" validation for `TERMII_API_KEY` / `RESEND_API_KEY`;
       consolidate per-factory `_FAKE_ELIGIBLE_ENVS` onto `app.core.config.FAKE_ELIGIBLE_ENVS`.
