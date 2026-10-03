@@ -25,7 +25,11 @@ services:
       - --access-logfile
       - "-"
     ports:
-      - "${API_PORT:-8000}:8000"
+      # Loopback only: host nginx is the sole entry point (proxy_pass
+      # http://127.0.0.1:${API_PORT}). Publishing on all interfaces bypasses
+      # ufw (Docker writes its own iptables rules) and exposed plain HTTP on
+      # :8000 / :8001 to the internet, skipping TLS and nginx entirely.
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     env_file: .env
     volumes:
       # Mount the Firebase admin SDK JSON from the host's deploy dir into
